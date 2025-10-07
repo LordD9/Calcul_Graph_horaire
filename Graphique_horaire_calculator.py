@@ -65,7 +65,7 @@ dataframe_gares = st.session_state.get('gares')
 if dataframe_gares is not None:
 
     # --- Paramètres de génération (Mode et Horaires globaux) ---
-    st.header("3. Paramètres de service et mode de génération")
+    st.header("2. Paramètres de service et mode de génération")
     heure_debut_service = st.time_input("Début de service", value=datetime.strptime("06:00", "%H:%M").time(), key="heure_debut_service_global")
     heure_fin_service = st.time_input("Fin de service", value=datetime.strptime("22:00", "%H:%M").time(), key="heure_fin_service_global")
 
@@ -76,7 +76,7 @@ if dataframe_gares is not None:
 
 
     # --- Definition des missions ---
-    st.header("2. Missions")
+    st.header("3. Missions")
     nombre_missions = st.number_input("Nombre de missions (chaque mission est un aller, le retour sera généré)", min_value=0, max_value=10, value=len(st.session_state.missions) or 1, key="nombre_missions_input", help="Chaque mission définie ici correspond à un trajet 'aller'. Le système tentera de générer un trajet 'retour' en mode optimisé.")
 
     while len(st.session_state.missions) < nombre_missions:
@@ -89,13 +89,14 @@ if dataframe_gares is not None:
         if i >= len(st.session_state.missions) or not isinstance(st.session_state.missions[i], dict):
             st.session_state.missions[i] = {"passing_points": [], "reference_minutes": "0"}
 
+        # La variable est définie ICI pour chaque mission de la boucle
         mission_actuelle = st.session_state.missions[i]
 
+        # Récupération des valeurs initiales
         origine_mission_saisie = mission_actuelle.get("origine")
         terminus_mission_saisie = mission_actuelle.get("terminus")
         frequence_saisie = mission_actuelle.get("frequence", 1.0)
         temps_trajet_saisi = mission_actuelle.get("temps_trajet", 45)
-        temps_retournement_saisi = mission_actuelle.get("temps_retournement", 10)
         minutes_reference_texte_saisi = mission_actuelle.get("reference_minutes", "0")
 
         if mode_generation == "Rotation optimisée":
@@ -114,19 +115,26 @@ if dataframe_gares is not None:
                 default_term_index = dataframe_gares["gare"].tolist().index(mission_actuelle.get("terminus"))
             terminus_mission_saisie = st.selectbox(f"Terminus mission {i+1}", dataframe_gares["gare"], key=f"term{i}", index=default_term_index)
 
+        temps_retournement_A_saisi = mission_actuelle.get("temps_retournement_A", 10)
+        temps_retournement_B_saisi = mission_actuelle.get("temps_retournement_B", temps_retournement_A_saisi)
+
         with col_mission_2:
             frequence_saisie = st.number_input(f"Fréquence (train/h) mission {i+1}", min_value=0.01, max_value=10.0,
-                                   value=mission_actuelle.get("frequence", 1.0), step=0.1, key=f"freq{i}")
-            temps_trajet_saisi = st.number_input(f"Temps trajet (min) mission {i+1} (un sens)", min_value=1, max_value=720,
-                                         value=mission_actuelle.get("temps_trajet", 45), key=f"tt{i}", help="Temps total pour un sens de la mission (ex: aller).")
+                                    value=mission_actuelle.get("frequence", 1.0), step=0.1, key=f"freq{i}")
+            temps_trajet_saisi = st.number_input(f"Temps trajet (min) {origine_mission_saisie} -> {terminus_mission_saisie}", min_value=1, max_value=720,
+                                            value=mission_actuelle.get("temps_trajet", 45), key=f"tt{i}", help="Temps total pour un sens de la mission (ex: aller).")
             if mode_generation != "Rotation optimisée":
-                temps_retournement_saisi = st.number_input(f"Temps de retournement (min) M{i+1}", min_value=0, max_value=120,
-                                                value=mission_actuelle.get("temps_retournement", 10), key=f"tr_manual_{i}")
+                    temps_retournement_A_saisi = st.number_input(f"Retournement à {origine_mission_saisie} (min)", min_value=0, max_value=120,
+                                                    value=temps_retournement_A_saisi, key=f"tr_a_manual_{i}")
+                    temps_retournement_B_saisi = st.number_input(f"Retournement à {terminus_mission_saisie} (min)", min_value=0, max_value=120,
+                                                    value=temps_retournement_B_saisi, key=f"tr_b_manual_{i}")
 
         if mode_generation == "Rotation optimisée":
             with col_mission_3:
-                temps_retournement_saisi = st.number_input(f"Temps de retournement (min) M{i+1}", min_value=0, max_value=120,
-                                                value=mission_actuelle.get("temps_retournement", 10), key=f"tr_optim_{i}", help="Temps d'arrêt au terminus avant de pouvoir repartir (pour l'aller et le retour).")
+                temps_retournement_A_saisi = st.number_input(f"Retournement à {origine_mission_saisie} (min)", min_value=0, max_value=120,
+                                                value=temps_retournement_A_saisi, key=f"tr_a_optim_{i}", help="Temps d'arrêt à l'origine de la mission avant un nouveau départ.")
+                temps_retournement_B_saisi = st.number_input(f"Retournement à {terminus_mission_saisie} (min)", min_value=0, max_value=120,
+                                                value=temps_retournement_B_saisi, key=f"tr_b_optim_{i}", help="Temps d'arrêt au terminus avant de repartir en sens inverse.")
                 minutes_reference_texte_saisi = st.text_input(f"Minute(s) de réf. M{i+1} (ex: 0,15,30)",
                                                 value=mission_actuelle.get("reference_minutes", "0"),
                                                 key=f"ref_mins{i}",
@@ -185,46 +193,130 @@ if dataframe_gares is not None:
                         dernier_temps_pp_depuis_origine = pp_tps_depuis_origine
                     else:
                         st.error(f"Temps pour le point de passage {j+1} ({pp_tps_depuis_origine} min) invalide. Doit être > {dernier_temps_pp_depuis_origine} et < {temps_trajet_saisi}.")
+    # --- NOUVEAU BLOC POUR LE TRAJET ASYMÉTRIQUE ---
+        st.markdown("**Options pour le trajet Retour :**")
+        trajet_asymetrique = st.checkbox("Saisir un temps de parcours différent pour le retour", value=mission_actuelle.get("trajet_asymetrique", False), key=f"asym_{i}")
+
+        temps_trajet_retour_saisi = temps_trajet_saisi
+        points_passage_retour_temporaires = []
+
+        if trajet_asymetrique:
+            st.warning(f"Vous définissez maintenant le trajet retour : {terminus_mission_saisie} → {origine_mission_saisie}")
+
+            # Temps de trajet pour le retour
+            temps_trajet_retour_saisi = st.number_input(f"Temps trajet RETOUR (min)", min_value=1, max_value=720,
+                                            value=mission_actuelle.get("temps_trajet_retour", temps_trajet_saisi), key=f"tt_retour_{i}")
+
+            # Calcul des points de passage inversés par défaut
+            points_passage_inverses_defaut = []
+            if isinstance(mission_actuelle.get("passing_points"), list):
+                for pp in reversed(mission_actuelle.get("passing_points")):
+                    if isinstance(pp, dict) and "gare" in pp and "temps_depuis_origine" in pp:
+                        points_passage_inverses_defaut.append({
+                            "gare": pp["gare"],
+                            "temps_depuis_origine": temps_trajet_saisi - pp["temps_depuis_origine"]
+                        })
+
+            # Points de passage pour le retour
+            nombre_points_passage_retour = st.number_input(f"Nombre de points de passage (Retour Mission {i+1})", min_value=0, max_value=10,
+                                    value=len(mission_actuelle.get("passing_points_retour", points_passage_inverses_defaut)), key=f"n_pass_retour_{i}")
+
+            if nombre_points_passage_retour > 0:
+                dernier_temps_pp_retour = 0
+                gares_passage_disponibles_retour = [g for g in dataframe_gares["gare"].tolist() if g != origine_mission_saisie and g != terminus_mission_saisie]
+
+                # Utiliser les points de passage retour déjà saisis ou les valeurs par défaut
+                existing_pp_retour_list = mission_actuelle.get("passing_points_retour", points_passage_inverses_defaut)
+
+                for j in range(nombre_points_passage_retour):
+                    default_pp_gare_val_ret = None
+                    default_pp_tps_val_ret = dernier_temps_pp_retour + 15
+
+                    if j < len(existing_pp_retour_list) and isinstance(existing_pp_retour_list[j], dict):
+                        default_pp_gare_val_ret = existing_pp_retour_list[j].get("gare")
+                        default_pp_tps_val_ret = existing_pp_retour_list[j].get("temps_depuis_origine")
+
+                    if not gares_passage_disponibles_retour:
+                        st.warning("Pas assez de gares intermédiaires pour le retour.")
+                        break
+
+                    cols_pp_ret = st.columns(2)
+                    with cols_pp_ret[0]:
+                        default_pp_gare_idx_ret = gares_passage_disponibles_retour.index(default_pp_gare_val_ret) if default_pp_gare_val_ret and default_pp_gare_val_ret in gares_passage_disponibles_retour else 0
+                        pp_gare_ret = st.selectbox(f"Gare de passage {j+1} (Retour M{i+1})", options=gares_passage_disponibles_retour,
+                                            key=f"pp_gare_retour_{i}_{j}", index=default_pp_gare_idx_ret)
+                    with cols_pp_ret[1]:
+                        pp_tps_depuis_origine_ret = st.number_input(f"Temps depuis {terminus_mission_saisie} (min) PP{j+1}",
+                                                                    min_value=dernier_temps_pp_retour + 1,
+                                                                    max_value=temps_trajet_retour_saisi - 1,
+                                                                    value=min(max(default_pp_tps_val_ret, dernier_temps_pp_retour + 1), temps_trajet_retour_saisi-1),
+                                                                    key=f"pp_tps_retour_{i}_{j}")
+
+                    points_passage_retour_temporaires.append({"gare": pp_gare_ret, "temps_depuis_origine": pp_tps_depuis_origine_ret})
+                    dernier_temps_pp_retour = pp_tps_depuis_origine_ret
 
         st.session_state.missions[i] = {
             "origine": origine_mission_saisie, "terminus": terminus_mission_saisie, "frequence": frequence_saisie,
-            "temps_trajet": temps_trajet_saisi, "temps_retournement": temps_retournement_saisi,
+            "temps_trajet": temps_trajet_saisi,
+            # Nouveaux champs pour le retournement
+            "temps_retournement_A": temps_retournement_A_saisi,
+            "temps_retournement_B": temps_retournement_B_saisi,
             "passing_points": sorted(points_passage_temporaires, key=lambda x: x["temps_depuis_origine"]),
-            "reference_minutes": minutes_reference_texte_saisi
+            "reference_minutes": minutes_reference_texte_saisi,
+            # Nouveaux champs pour le trajet asymétrique
+            "trajet_asymetrique": trajet_asymetrique,
+            "temps_trajet_retour": temps_trajet_retour_saisi if trajet_asymetrique else temps_trajet_saisi,
+            "passing_points_retour": sorted(points_passage_retour_temporaires, key=lambda x: x["temps_depuis_origine"]) if trajet_asymetrique else []
         }
-        st.markdown("---")
 
     if mode_generation == "Rotation optimisée":
         st.subheader("Options pour la Rotation Optimisée")
         decalage_par_gare_missions = st.number_input("Décalage de base entre séries de missions 'Aller' (min) depuis une même gare", min_value=0, max_value=120, value=0, step=5, key="decalage_missions_opt", help="Optionnel. Si plusieurs types de missions 'Aller' partent de la même gare, ce décalage s'appliquera successivement à leur 'heure de début de calcul de série' avant l'application de leurs minutes de référence spécifiques.")
 
     def trouver_mission_pour_od(origine_selectionnee, terminus_selectionne, toutes_les_missions):
+        # Cherche une mission directe
         for donnees_mission in toutes_les_missions:
             if donnees_mission["origine"] == origine_selectionnee and donnees_mission["terminus"] == terminus_selectionne:
                 return donnees_mission
 
+        # Cherche une mission inverse
         for donnees_mission in toutes_les_missions:
             if donnees_mission["origine"] == terminus_selectionne and donnees_mission["terminus"] == origine_selectionnee:
-                mission_inversee = {
-                    "origine": origine_selectionnee,
-                    "terminus": terminus_selectionne,
-                    "frequence": donnees_mission["frequence"],
-                    "temps_trajet": donnees_mission["temps_trajet"],
-                    "temps_retournement": donnees_mission["temps_retournement"],
-                    "passing_points": []
-                }
-                temps_total_mission_aller = donnees_mission["temps_trajet"]
-                points_passage_inverses = []
-                points_passage_actuels = donnees_mission.get("passing_points", [])
-                if isinstance(points_passage_actuels, list):
-                    for pp in reversed(points_passage_actuels):
-                        if isinstance(pp, dict) and "gare" in pp and "temps_depuis_origine" in pp:
-                             points_passage_inverses.append({
-                                "gare": pp["gare"],
-                                "temps_depuis_origine": temps_total_mission_aller - pp["temps_depuis_origine"]
-                            })
-                mission_inversee["passing_points"] = sorted(points_passage_inverses, key=lambda x: x["temps_depuis_origine"])
-                return mission_inversee
+                # Si le trajet est défini comme asymétrique, on utilise les données "retour"
+                if donnees_mission.get("trajet_asymetrique", False):
+                    mission_inversee = {
+                        "origine": origine_selectionnee,
+                        "terminus": terminus_selectionne,
+                        "frequence": donnees_mission["frequence"],
+                        "temps_trajet": donnees_mission.get("temps_trajet_retour", donnees_mission["temps_trajet"]),
+                        "temps_retournement_A": donnees_mission.get("temps_retournement_B", 10), # Inversion logique
+                        "temps_retournement_B": donnees_mission.get("temps_retournement_A", 10),
+                        "passing_points": donnees_mission.get("passing_points_retour", [])
+                    }
+                    return mission_inversee
+                # Sinon, on calcule l'inverse comme avant
+                else:
+                    mission_inversee = {
+                        "origine": origine_selectionnee,
+                        "terminus": terminus_selectionne,
+                        "frequence": donnees_mission["frequence"],
+                        "temps_trajet": donnees_mission["temps_trajet"],
+                        "temps_retournement_A": donnees_mission.get("temps_retournement_B", 10),
+                        "temps_retournement_B": donnees_mission.get("temps_retournement_A", 10),
+                        "passing_points": []
+                    }
+                    temps_total_mission_aller = donnees_mission["temps_trajet"]
+                    points_passage_inverses = []
+                    points_passage_actuels = donnees_mission.get("passing_points", [])
+                    if isinstance(points_passage_actuels, list):
+                        for pp in reversed(points_passage_actuels):
+                            if isinstance(pp, dict) and "gare" in pp and "temps_depuis_origine" in pp:
+                                points_passage_inverses.append({
+                                    "gare": pp["gare"],
+                                    "temps_depuis_origine": temps_total_mission_aller - pp["temps_depuis_origine"]
+                                })
+                    mission_inversee["passing_points"] = sorted(points_passage_inverses, key=lambda x: x["temps_depuis_origine"])
+                    return mission_inversee
         return None
 
     def obtenir_temps_trajet_defaut_etape_manuelle(gare_depart_etape, gare_arrivee_etape, toutes_les_missions, df_gares_local_fct):
@@ -253,8 +345,10 @@ if dataframe_gares is not None:
 
     def obtenir_temps_retournement_defaut(nom_gare_retournement, toutes_les_missions):
         for donnees_mission in toutes_les_missions:
-            if nom_gare_retournement == donnees_mission["origine"] or nom_gare_retournement == donnees_mission["terminus"]:
-                return donnees_mission.get("temps_retournement", 10)
+            if nom_gare_retournement == donnees_mission["origine"]:
+                return donnees_mission.get("temps_retournement_A", 10)
+            if nom_gare_retournement == donnees_mission["terminus"]:
+                return donnees_mission.get("temps_retournement_B", 10)
         return 10
 
     if mode_generation == "Manuel":
@@ -402,7 +496,6 @@ if dataframe_gares is not None:
                                             gare_depart_actuelle = current_etape_dict["depart"]
                                             temps_retournement = obtenir_temps_retournement_defaut(gare_depart_actuelle, st.session_state.missions)
                                             new_depart_dt = last_arrival_dt + timedelta(minutes=temps_retournement)
-
                                         temps_trajet = current_etape_dict["temps_trajet"]
                                         new_arrivee_dt = new_depart_dt + timedelta(minutes=temps_trajet)
                                         current_etape_dict["heure_depart"] = new_depart_dt.strftime("%H:%M")
@@ -764,10 +857,10 @@ if dataframe_gares is not None:
                                 else:
                                     st.warning(f"Minute de référence {minute_ref_entier} hors plage (0-59) pour mission Aller {indice_mission_aller+1} ({mission_originale_aller.get('origine','?')}), ignorée.")
                         if not minutes_reference_parsees and minutes_brutes_texte:
-                             st.warning(f"Aucune minute de référence valide (mission Aller {indice_mission_aller+1}, {mission_originale_aller.get('origine','?')}) pour '{minutes_reference_texte_optim}'. Utilisation de :00 par défaut.")
-                             minutes_reference_parsees = [0]
+                                st.warning(f"Aucune minute de référence valide (mission Aller {indice_mission_aller+1}, {mission_originale_aller.get('origine','?')}) pour '{minutes_reference_texte_optim}'. Utilisation de :00 par défaut.")
+                                minutes_reference_parsees = [0]
                         elif not minutes_reference_parsees and not minutes_brutes_texte:
-                             minutes_reference_parsees = [0]
+                                minutes_reference_parsees = [0]
                         minutes_reference_parsees.sort()
                     except Exception as e:
                         st.warning(f"Erreur lors du parsing des minutes de référence '{minutes_reference_texte_optim}' (mission Aller {indice_mission_aller+1}, {mission_originale_aller.get('origine','?')}): {e}. Utilisation de :00 par défaut.")
@@ -795,7 +888,7 @@ if dataframe_gares is not None:
 
                         curseur_temps_mission_optim = heure_premier_depart_reelle
                         while curseur_temps_mission_optim < datetime_fin_service_optim and \
-                              (curseur_temps_mission_optim + timedelta(minutes=mission_originale_aller["temps_trajet"])) <= datetime_fin_service_optim :
+                                (curseur_temps_mission_optim + timedelta(minutes=mission_originale_aller["temps_trajet"])) <= datetime_fin_service_optim :
                             if curseur_temps_mission_optim >= datetime_debut_service_optim:
                                 evenements.append({
                                     "type": "depart_aller_planifie",
@@ -852,7 +945,11 @@ if dataframe_gares is not None:
 
                             if segments_aller_actuel:
                                 chronologie_complete_optim[id_train_assigne_aller].extend(segments_aller_actuel)
-                                heure_dispo_pour_retour = datetime_arrivee_finale_aller + timedelta(minutes=config_mission_aller["temps_retournement"])
+
+                                # ✅ MODIFIÉ : Utilisation de temps_retournement_B (au terminus)
+                                temps_retournement_terminus = config_mission_aller.get("temps_retournement_B", 10)
+                                heure_dispo_pour_retour = datetime_arrivee_finale_aller + timedelta(minutes=temps_retournement_terminus)
+
                                 if heure_dispo_pour_retour < datetime_fin_service_optim:
                                     if origine_aller != terminus_aller:
                                         evenements.append({"type": "train_disponible_pour_retour", "heure": heure_dispo_pour_retour, "details": {"id_train_concerne": id_train_assigne_aller, "en_gare": terminus_aller, "mission_originale_pour_construire_retour": config_mission_aller}})
@@ -865,15 +962,22 @@ if dataframe_gares is not None:
                         gare_depart_retour = details_dispo_retour["en_gare"]
                         mission_originale = details_dispo_retour["mission_originale_pour_construire_retour"]
 
-                        config_mission_retour = mission_originale.copy()
-                        config_mission_retour["origine"], config_mission_retour["terminus"] = gare_depart_retour, mission_originale["origine"]
-
-                        pp_inverses_retour = []
-                        if isinstance(mission_originale.get("passing_points"), list):
-                            for pp_aller_ref in reversed(mission_originale["passing_points"]):
-                                if isinstance(pp_aller_ref, dict) and "gare" in pp_aller_ref and "temps_depuis_origine" in pp_aller_ref:
-                                    pp_inverses_retour.append({"gare": pp_aller_ref["gare"], "temps_depuis_origine": mission_originale["temps_trajet"] - pp_aller_ref["temps_depuis_origine"]})
-                        config_mission_retour["passing_points"] = sorted(pp_inverses_retour, key=lambda x: x["temps_depuis_origine"])
+                        config_mission_retour = {}
+                        if mission_originale.get("trajet_asymetrique", False):
+                            config_mission_retour["origine"] = gare_depart_retour
+                            config_mission_retour["terminus"] = mission_originale["origine"]
+                            config_mission_retour["temps_trajet"] = mission_originale.get("temps_trajet_retour", mission_originale["temps_trajet"])
+                            config_mission_retour["passing_points"] = mission_originale.get("passing_points_retour", [])
+                        else:
+                            config_mission_retour["origine"] = gare_depart_retour
+                            config_mission_retour["terminus"] = mission_originale["origine"]
+                            config_mission_retour["temps_trajet"] = mission_originale["temps_trajet"]
+                            pp_inverses_retour = []
+                            if isinstance(mission_originale.get("passing_points"), list):
+                                for pp_aller_ref in reversed(mission_originale["passing_points"]):
+                                    if isinstance(pp_aller_ref, dict):
+                                        pp_inverses_retour.append({"gare": pp_aller_ref["gare"], "temps_depuis_origine": mission_originale["temps_trajet"] - pp_aller_ref["temps_depuis_origine"]})
+                            config_mission_retour["passing_points"] = sorted(pp_inverses_retour, key=lambda x: x["temps_depuis_origine"])
 
                         horaire_retour_prepare = preparer_horaire_mission_interne(config_mission_retour)
                         datetime_arrivee_finale_retour = heure_evenement
@@ -891,7 +995,11 @@ if dataframe_gares is not None:
 
                             if segments_retour_actuel:
                                 chronologie_complete_optim.setdefault(id_train_pour_retour, []).extend(segments_retour_actuel)
-                                heure_dispo_apres_retour = datetime_arrivee_finale_retour + timedelta(minutes=config_mission_retour["temps_retournement"])
+
+                                # ✅ MODIFIÉ : Utilisation de temps_retournement_A (à l'origine de la mission initiale)
+                                temps_retournement_origine = mission_originale.get("temps_retournement_A", 10)
+                                heure_dispo_apres_retour = datetime_arrivee_finale_retour + timedelta(minutes=temps_retournement_origine)
+
                                 if heure_dispo_apres_retour < datetime_fin_service_optim:
                                     trains_disponibles_optim.append({"id_train": id_train_pour_retour, "disponible_a_partir_de": heure_dispo_apres_retour, "en_gare_actuelle": config_mission_retour["terminus"]})
                 return chronologie_complete_optim
