@@ -64,64 +64,97 @@ if st.session_state.get('gares') is not None:
             st.subheader(f"Mission {i+1} (trajet Aller)")
             mission = st.session_state.missions[i]
 
-            # Formulaire principal
-            cols = st.columns([2, 2, 3] if mode_generation == "Rotation optimisée" else [2, 2])
+            # Formulaire principal homogénéisé sur 3 colonnes
+            cols = st.columns([2, 2, 3])
             origine = cols[0].selectbox(f"Origine M{i+1}", gares_list, index=gares_list.index(mission.get("origine", gares_list[0])) if mission.get("origine") in gares_list else 0, key=f"orig{i}")
             terminus = cols[0].selectbox(f"Terminus M{i+1}", gares_list, index=gares_list.index(mission.get("terminus", gares_list[-1])) if mission.get("terminus") in gares_list else len(gares_list)-1, key=f"term{i}")
+
             frequence = cols[1].number_input(f"Fréquence (train/h) M{i+1}", 0.1, 10.0, mission.get("frequence", 1.0), 0.1, key=f"freq{i}")
             temps_trajet = cols[1].number_input(f"Temps trajet (min) M{i+1}", 1, 720, mission.get("temps_trajet", 45), key=f"tt{i}")
-            if mode_generation == "Rotation optimisée":
-                retournement_A = cols[2].number_input(f"Retournement à {origine} (min)", 0, 120, mission.get("temps_retournement_A", 10), key=f"tr_a_opt_{i}")
-                retournement_B = cols[2].number_input(f"Retournement à {terminus} (min)", 0, 120, mission.get("temps_retournement_B", 10), key=f"tr_b_opt_{i}")
-                ref_minutes = cols[2].text_input(f"Minute(s) de réf. M{i+1}", mission.get("reference_minutes", "0,30"), key=f"ref_mins{i}")
-            else:
-                retournement_A = cols[1].number_input(f"Retournement à {origine} (min)", 0, 120, mission.get("temps_retournement_A", 10), key=f"tr_a_man_{i}")
-                retournement_B = cols[1].number_input(f"Retournement à {terminus} (min)", 0, 120, mission.get("temps_retournement_B", 10), key=f"tr_b_man_{i}")
-                ref_minutes = "0"
 
-            # Points de passage Aller
-            st.markdown("**Points de passage optionnels (Aller) :**")
-            gares_passage_dispo = [g for g in gares_list if g not in [origine, terminus]]
-            nb_pp = st.number_input(f"Nombre de points de passage (M{i+1})", 0, 10, len(mission.get("passing_points", [])), key=f"n_pass_{i}")
+            retournement_A = cols[2].number_input(f"Retournement à {origine} (min)", 0, 120, mission.get("temps_retournement_A", 10), key=f"tr_a_{i}")
+            retournement_B = cols[2].number_input(f"Retournement à {terminus} (min)", 0, 120, mission.get("temps_retournement_B", 10), key=f"tr_b_{i}")
+            ref_minutes = "0"
+            if mode_generation == "Rotation optimisée":
+                ref_minutes = cols[2].text_input(f"Minute(s) de réf. M{i+1}", mission.get("reference_minutes", "0,30"), key=f"ref_mins{i}")
+
+            st.markdown("**Points de passage optionnels :**")
+            trajet_asymetrique = st.checkbox("Saisir un temps/parcours différent pour le retour", mission.get("trajet_asymetrique", False), key=f"asym_{i}")
+
+            saisie_pp_mode = st.radio("Méthode de saisie des points de passage", ["Interface Guidée", "Saisie manuelle par lot"], key=f"saisie_pp_{i}", horizontal=True)
 
             passing_points = []
-            if gares_passage_dispo and nb_pp > 0:
-                dernier_temps = 0
-                for j in range(nb_pp):
-                    pp_cols = st.columns(2)
-                    pp_gare = pp_cols[0].selectbox(f"Gare PP {j+1}", gares_passage_dispo, key=f"pp_gare_{i}_{j}")
-                    pp_temps = pp_cols[1].number_input(f"Temps depuis {origine} (min)", min_value=dernier_temps + 1, max_value=temps_trajet - 1, value=min(dernier_temps + 15, temps_trajet - 1), key=f"pp_tps_{i}_{j}")
-                    passing_points.append({"gare": pp_gare, "time_offset_min": pp_temps})
-                    dernier_temps = pp_temps
+            passing_points_retour = []
 
-            # Trajet asymétrique
-            st.markdown("**Options pour le trajet Retour :**")
-            trajet_asymetrique = st.checkbox("Saisir un temps/parcours différent pour le retour", mission.get("trajet_asymetrique", False), key=f"asym_{i}")
-            temps_trajet_retour, passing_points_retour = temps_trajet, []
-            if trajet_asymetrique:
-                temps_trajet_retour = st.number_input(f"Temps trajet RETOUR (min)", 1, 720, mission.get("temps_trajet_retour", temps_trajet), key=f"tt_retour_{i}")
+            if saisie_pp_mode == "Interface Guidée":
+                # Points de passage Aller
+                st.markdown("**Aller :**")
+                gares_passage_dispo = [g for g in gares_list if g not in [origine, terminus]]
+                nb_pp = st.number_input(f"Nombre de points de passage (Aller M{i+1})", 0, 10, len(mission.get("passing_points", [])), key=f"n_pass_{i}")
 
-                # Pré-calcul des points de passage inversés pour les valeurs par défaut
-                pp_inverses_defaut = []
-                if passing_points:
-                    pp_inverses_defaut = sorted([
-                        {"gare": pp["gare"], "time_offset_min": temps_trajet - pp["time_offset_min"]} for pp in passing_points
-                    ], key=lambda x: x["time_offset_min"])
+                if gares_passage_dispo and nb_pp > 0:
+                    dernier_temps = 0
+                    for j in range(nb_pp):
+                        pp_cols = st.columns(2)
+                        pp_gare = pp_cols[0].selectbox(f"Gare PP {j+1}", gares_passage_dispo, key=f"pp_gare_{i}_{j}")
+                        pp_temps = pp_cols[1].number_input(f"Temps depuis {origine} (min)", min_value=dernier_temps + 1, max_value=temps_trajet - 1, value=min(dernier_temps + 15, temps_trajet - 1), key=f"pp_tps_{i}_{j}")
+                        passing_points.append({"gare": pp_gare, "time_offset_min": pp_temps})
+                        dernier_temps = pp_temps
 
-                pp_retour_existants = mission.get("passing_points_retour", pp_inverses_defaut)
-                nb_pp_retour = st.number_input(f"Nombre de PP (Retour M{i+1})", 0, 10, len(pp_retour_existants), key=f"n_pass_retour_{i}")
+                # Points de passage Retour (si asymétrique)
+                if trajet_asymetrique:
+                    st.markdown("**Retour :**")
+                    temps_trajet_retour = st.number_input(f"Temps trajet RETOUR (min)", 1, 720, mission.get("temps_trajet_retour", temps_trajet), key=f"tt_retour_{i}")
+                    nb_pp_retour = st.number_input(f"Nombre de PP (Retour M{i+1})", 0, 10, len(mission.get("passing_points_retour", [])), key=f"n_pass_retour_{i}")
 
-                if gares_passage_dispo and nb_pp_retour > 0:
-                    dernier_temps_retour = 0
-                    for j in range(nb_pp_retour):
-                        default_gare = pp_retour_existants[j]['gare'] if j < len(pp_retour_existants) else gares_passage_dispo[0]
-                        default_temps = pp_retour_existants[j]['time_offset_min'] if j < len(pp_retour_existants) else dernier_temps_retour + 15
+                    if gares_passage_dispo and nb_pp_retour > 0:
+                        dernier_temps_retour = 0
+                        for j in range(nb_pp_retour):
+                            pp_cols_r = st.columns(2)
+                            pp_gare_r = pp_cols_r[0].selectbox(f"Gare PP {j+1} (Retour)", gares_passage_dispo, key=f"pp_gare_retour_{i}_{j}")
+                            pp_temps_r = pp_cols_r[1].number_input(f"Temps depuis {terminus} (min)", dernier_temps_retour + 1, temps_trajet_retour - 1, min(dernier_temps_retour + 15, temps_trajet_retour - 1), key=f"pp_tps_retour_{i}_{j}")
+                            passing_points_retour.append({"gare": pp_gare_r, "time_offset_min": pp_temps_r})
+                            dernier_temps_retour = pp_temps_r
+                else:
+                    temps_trajet_retour = temps_trajet
 
-                        pp_cols_r = st.columns(2)
-                        pp_gare_r = pp_cols_r[0].selectbox(f"Gare PP {j+1} (Retour)", gares_passage_dispo, index=gares_passage_dispo.index(default_gare) if default_gare in gares_passage_dispo else 0, key=f"pp_gare_retour_{i}_{j}")
-                        pp_temps_r = pp_cols_r[1].number_input(f"Temps depuis {terminus} (min)", dernier_temps_retour + 1, temps_trajet_retour - 1, min(max(dernier_temps_retour + 1, default_temps), temps_trajet_retour - 1), key=f"pp_tps_retour_{i}_{j}")
-                        passing_points_retour.append({"gare": pp_gare_r, "time_offset_min": pp_temps_r})
-                        dernier_temps_retour = pp_temps_r
+            else: # Saisie manuelle par lot
+                placeholder_text = "Vauvert;20\n...ou si case cochée...\nVauvert;20;30"
+                help_text = f"Format: Gare;Temps depuis {origine} (min)[;Temps depuis {terminus} (min)]"
+                pp_raw_text = st.text_area("Points de passage (un par ligne)", value=mission.get("pp_raw_text", ""), placeholder=placeholder_text, help=help_text, key=f"pp_raw_{i}")
+
+                mission["pp_raw_text"] = pp_raw_text # Sauvegarde du texte brut
+
+                temps_trajet_retour = temps_trajet
+                if trajet_asymetrique:
+                    temps_trajet_retour = st.number_input(f"Temps trajet RETOUR (min)", 1, 720, mission.get("temps_trajet_retour", temps_trajet), key=f"tt_retour_{i}")
+
+                # Parsing du texte
+                try:
+                    for line in pp_raw_text.strip().split('\n'):
+                        if not line: continue
+                        parts = [p.strip() for p in line.split(';')]
+
+                        if not (2 <= len(parts) <= 3):
+                            st.warning(f"Ligne ignorée (format incorrect): '{line}'")
+                            continue
+
+                        gare = parts[0]
+                        if gare not in gares_list:
+                            st.warning(f"Gare '{gare}' non reconnue. Elle doit être dans la liste principale.")
+                            continue
+
+                        # Trajet Aller
+                        t_aller = int(parts[1])
+                        passing_points.append({"gare": gare, "time_offset_min": t_aller})
+
+                        # Trajet Retour (si asymétrique et fourni)
+                        if trajet_asymetrique and len(parts) == 3:
+                            t_retour = int(parts[2])
+                            passing_points_retour.append({"gare": gare, "time_offset_min": t_retour})
+                except (ValueError, IndexError) as e:
+                    st.error(f"Erreur de parsing dans la saisie manuelle. Vérifiez les nombres. Détails : {e}")
+
 
             # Sauvegarde de la mission complète dans l'état de session
             st.session_state.missions[i] = {
@@ -129,9 +162,9 @@ if st.session_state.get('gares') is not None:
                 "temps_retournement_A": retournement_A, "temps_retournement_B": retournement_B, "reference_minutes": ref_minutes,
                 "passing_points": sorted(passing_points, key=lambda x: x['time_offset_min']),
                 "trajet_asymetrique": trajet_asymetrique, "temps_trajet_retour": temps_trajet_retour,
-                "passing_points_retour": sorted(passing_points_retour, key=lambda x: x['time_offset_min'])
+                "passing_points_retour": sorted(passing_points_retour, key=lambda x: x['time_offset_min']),
+                "pp_raw_text": mission.get("pp_raw_text", "") # Conserver le texte
             }
-
     # --- SECTION 4: Mode Manuel ---
     if mode_generation == "Manuel":
         st.header("4. Construction manuelle des roulements")
