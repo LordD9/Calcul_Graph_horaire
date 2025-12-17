@@ -906,9 +906,17 @@ if st.session_state.get('gares') is not None:
 
                 if type_mat == "batterie" and resultat_train["batterie_log"]:
                     with st.expander(f"Détail batterie Train {id_train} ({options_materiel_map.get(type_mat, type_mat)})"):
-                        df_batt = pd.DataFrame(resultat_train["batterie_log"], columns=["Heure", "Niveau kWh", "Événement"])
-                        df_batt["Heure"] = df_batt["Heure"].apply(lambda x: x.strftime('%H:%M:%S'))
-                        st.dataframe(df_batt, height=300)
+                        # Mise à jour des colonnes pour inclure le SoC (%)
+                        df_batt = pd.DataFrame(resultat_train["batterie_log"],
+                                             columns=["Heure", "Niveau kWh", "SoC", "Événement"])
+
+                        # Formatage heure
+                        df_batt["Heure"] = df_batt["Heure"].apply(lambda x: x.strftime('%H:%M:%S') if isinstance(x, datetime) else str(x))
+
+                        # Formatage kWh pour propreté
+                        df_batt["Niveau kWh"] = df_batt["Niveau kWh"].apply(lambda x: f"{x:.1f}")
+
+                        st.dataframe(df_batt, height=300, use_container_width=True)
 
             st.subheader("Bilan énergétique global")
             if resultats_globaux:

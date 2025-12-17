@@ -16,6 +16,24 @@ from collections import defaultdict
 import json
 
 
+def _find_end_of_single_track_block(df_gares, start_idx, direction):
+    """
+    Trouve l'index de la prochaine gare qui permet un croisement (VE, D, ou Terminus)
+    dans la direction donnée.
+    Retourne l'index de la gare de fin de bloc.
+    """
+    n = len(df_gares)
+    curr = start_idx + direction
+    while 0 <= curr < n:
+        gare_name = df_gares.iloc[curr]['gare']
+        infra = _get_infra_at_gare(df_gares, gare_name)
+        # Une gare VE ou D marque la fin du cantonnement de voie unique "strict"
+        # (D = début double voie, VE = évitement).
+        if infra in ['VE', 'D']:
+            return curr
+        curr += direction
+    return start_idx # Ne devrait pas arriver si terminus bien défini
+
 
 def _get_infra_at_gare(df_gares, gare_name):
     """Helper pour obtenir la valeur 'infra' d'une gare."""
@@ -667,125 +685,98 @@ def construire_horaire_mission(mission_config, trajet_spec, df_gares):
 def verifier_conflit(h_depart, duree, gare_dep, gare_arr, id_train_courant,
                      occupation_cantons, df_gares, debug=False):
     """
-    Vérifie les conflits pour un trajet donné, section par section.
-
-    Logique :
-    - Sur voie double : aucun conflit.
-    - Sur voie unique :
-        • Si la section contient une gare VE : croisement possible à cette gare,
-          mais l’un des deux trains doit attendre avant d’entrer sur la section
-          jusqu’à ce que la VE soit libre.
-        • Sinon : conflit direct (face-à-face interdit).
+    Vérifie les conflits avec une logique de "Bloc de Voie Unique".
+    Si on s'engage sur une VU depuis une VE/D, on vérifie que TOUT le bloc jusqu'à la prochaine VE/D est libre.
     """
-
     h_arrivee = h_depart + timedelta(minutes=duree)
-    if gare_dep == gare_arr or duree <= 0:
-        return None
+    if gare_dep == gare_arr or duree <= 0: return None
 
-    # Préparation infra
     gares_sorted = df_gares.sort_values('distance').reset_index(drop=True)
     gare_to_index = {g: i for i, g in enumerate(gares_sorted['gare'])}
-    gare_to_dist = dict(zip(gares_sorted['gare'], gares_sorted['distance']))
-    infra_list = [str(_get_infra_at_gare(df_gares, g)).upper() for g in gares_sorted['gare']]
 
-    if gare_dep not in gare_to_index or gare_arr not in gare_to_index:
-        return {"type": "erreur_infra", "fin_conflit": h_arrivee, "avec_train": "inconnu"}
+    idx_dep = gare_to_index.get(gare_dep)
+    idx_arr = gare_to_index.get(gare_arr)
 
-    idx_dep, idx_arr = gare_to_index[gare_dep], gare_to_index[gare_arr]
-    idx_min, idx_max = min(idx_dep, idx_arr), max(idx_dep, idx_arr)
-    dist_dep, dist_arr = gare_to_dist[gare_dep], gare_to_dist[gare_arr]
-    dist_totale = abs(dist_arr - dist_dep) or 1e-6
+    if idx_dep is None or idx_arr is None: return None # Sécurité
 
-    # Comptage des D
-    d_count = 0
-    if idx_min > 0:
-        for i in range(idx_min):
-            if infra_list[i] == 'D':
-                d_count += 1
+    direction = 1 if idx_arr > idx_dep else -1
 
-    for i in range(idx_min, idx_max):
-        gare_a = gares_sorted.iloc[i]['gare']
-        gare_b = gares_sorted.iloc[i + 1]['gare']
+    # 1. Identifier si on entre dans un bloc critique
+    infra_dep = _get_infra_at_gare(df_gares, gare_dep)
 
-        # basculement D avant la section
-        if infra_list[i] == 'D':
-            d_count += 1
-        is_section_double = (d_count % 2 == 1)
+    # Si on part d'un point de croisement (VE) ou d'une transition (D) vers une voie unique (F),
+    # on doit scanner jusqu'au prochain point de croisement.
+    # Note: Si infra_dep est 'F', on est déjà "au milieu" (retardé précédemment),
+    # on vérifie juste le segment immédiat pour ne pas s'empiler.
 
-        infra_a = _get_infra_at_gare(df_gares, gare_a)
-        infra_b = _get_infra_at_gare(df_gares, gare_b)
+    check_full_block = (infra_dep in ['VE', 'D', 'Terminus'])
+    # (Note: Terminus traité comme VE implicitement dans _can_cross_at, ici simplifié)
 
-        # Si voie double : libre
-        if is_section_double:
-            if debug:
-                print(f"[DEBUG] Section {gare_a}→{gare_b} : VD (aucun conflit possible)")
-            continue
+    target_scan_idx = idx_arr
 
-        # Section voie unique
-        # Repérer s'il existe une gare VE dans la portion entre gare_dep et gare_arr
-        portion_globale = gares_sorted.iloc[idx_min:idx_max + 1]
-        ve_points = [st['gare'] for _, st in portion_globale.iterrows()
-                     if _get_infra_at_gare(df_gares, st['gare']) == 'VE']
+    if check_full_block:
+        # Regarder si le segment immédiat est une VOIE UNIQUE
+        # On regarde l'infra de la gare SUIVANTE. Si c'est F, c'est du VU.
+        # Si c'est D (début double), ce n'est pas du VU critique.
+        next_gare_idx = idx_dep + direction
+        if 0 <= next_gare_idx < len(gares_sorted):
+            next_infra = _get_infra_at_gare(df_gares, gares_sorted.iloc[next_gare_idx]['gare'])
+            # Si la gare suivante est F, on s'engage en VU.
+            # Si c'est VE, le bloc ne fait qu'un segment, c'est OK.
+            if next_infra == 'F':
+                # On doit trouver la fin du bloc
+                end_block_idx = _find_end_of_single_track_block(df_gares, idx_dep, direction)
+                # On scanne jusqu'à cette gare là, au lieu de juste gare_arr
+                target_scan_idx = end_block_idx
 
-        if debug:
-            print(f"[DEBUG] Section {gare_a}→{gare_b} : VU | VE={ve_points}")
+    # Définition de la plage d'index à vérifier
+    range_start = idx_dep
+    range_end = target_scan_idx
+    step = direction
 
-        # Calcul des temps de passage sur cette section
-        dist_a, dist_b = gare_to_dist[gare_a], gare_to_dist[gare_b]
-        ratio_a = abs(dist_a - dist_dep) / dist_totale
-        ratio_b = abs(dist_b - dist_dep) / dist_totale
-        t_a = h_depart + timedelta(minutes=duree * ratio_a)
-        t_b = h_depart + timedelta(minutes=duree * ratio_b)
-        if t_b < t_a:
-            t_a, t_b = t_b, t_a
+    # Boucle de vérification sur tous les segments du bloc identifié
+    curr = range_start
+    while curr != range_end:
+        idx_a = curr
+        idx_b = curr + step
+        gare_a = gares_sorted.iloc[idx_a]['gare']
+        gare_b = gares_sorted.iloc[idx_b]['gare']
 
-        # Vérification des occupations
-        for seg in [(gare_a, gare_b), (gare_b, gare_a)]:
-            occupations = occupation_cantons.get(seg, [])
-            if not occupations:
-                continue
+        # Vérif occupation sur ce segment (gare_a, gare_b) ou (gare_b, gare_a)
+        # On cherche des trains OPPOSÉS ou MÊME SENS qui occuperaient le segment
+        # pendant notre traversée estimée du BLOC entier.
 
-            idx_search = bisect.bisect_left(occupations, (t_a - timedelta(minutes=1),))
-            for k in range(max(0, idx_search - 1), len(occupations)):
-                try:
-                    h_deb_occ, h_fin_occ, id_train_occ = occupations[k]
-                except (ValueError, TypeError):
-                    continue
+        # Estimation grossière du temps de passage à ce segment précis
+        # (On prend large : [h_depart, h_arrivee_du_bloc])
+        # Pour être rigoureux, on devrait interpoler, mais prendre la fenêtre large est plus sûr pour la sécurité.
+        t_check_start = h_depart
+        t_check_end = h_arrivee + timedelta(minutes=5) # Marge de sécurité
 
-                if h_deb_occ >= t_b:
-                    break
+        seg_key = (gare_a, gare_b) if gare_a < gare_b else (gare_b, gare_a)
+        occupations = occupation_cantons.get(seg_key, [])
 
-                if h_fin_occ > t_a and h_deb_occ < t_b and id_train_occ != id_train_courant:
-                    # Conflit détecté
-                    if debug:
-                        print(f"[DEBUG] ❌ Conflit détecté sur {gare_a}→{gare_b} "
-                              f"entre {id_train_courant} et {id_train_occ}")
+        # Mais attention, occupation_cantons stocke (start, end, id).
+        # Pour un segment de voie unique, toute occupation dans la fenêtre est un danger
+        # SI c'est un train adverse (nez à nez) OU un train devant (rattrapage).
 
-                    # Si une VE existe, attendre jusqu'à ce qu'elle soit libre
-                    if ve_points:
-                        fin_conflit = h_fin_occ + timedelta(minutes=1)
-                        if debug:
-                            print(f"[DEBUG] Attente à {gare_a} jusqu'à libération de {ve_points[0]} ({fin_conflit.time()})")
-                        return {
-                            "fin_conflit": fin_conflit,
-                            "avec_train": id_train_occ,
-                            "type": "attente_pour_croisement",
-                            "points": ve_points,
-                        }
+        for (occ_start, occ_end, occ_id) in occupations:
+            if occ_id == id_train_courant: continue
 
-                    # Sinon : face à face sans échappatoire
-                    fin_conflit = h_fin_occ + timedelta(seconds=1)
-                    if debug:
-                        print(f"[DEBUG] ❌ Face-à-face sur section sans VE entre {id_train_courant} et {id_train_occ}")
-                    return {
-                        "fin_conflit": fin_conflit,
-                        "avec_train": id_train_occ,
-                        "type": "face_a_face",
-                        "points": [],
-                    }
+            # Chevauchement temporel ?
+            if max(t_check_start, occ_start) < min(t_check_end, occ_end):
+                # Conflit !
+                # Si on scannait tout le bloc et qu'on trouve un train loin devant,
+                # on doit attendre ICI (gare_dep) que le bloc se libère.
 
-    if debug:
-        print(f"[DEBUG] ✅ Aucun conflit détecté pour Train {id_train_courant} ({gare_dep}→{gare_arr})")
+                return {
+                    "fin_conflit": occ_end + timedelta(minutes=1),
+                    "avec_train": occ_id,
+                    "type": "bloc_vu_occupe",
+                    "points": [gare_a, gare_b]
+                }
+
+        curr += step
+
     return None
 
 
