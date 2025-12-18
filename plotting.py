@@ -375,3 +375,58 @@ def creer_graphique_horaire(
 
     fig.subplots_adjust(right=0.85)
     return fig
+
+def creer_graphique_batterie(batterie_log, train_id):
+    """
+    Génère un graphique d'évolution du SoC (State of Charge) pour un train donné.
+    Affiche le % de batterie en fonction du temps, avec seuils 20% et 80%.
+
+    Args:
+        batterie_log (list): Liste de tuples [(datetime, kwh, soc_str, msg), ...]
+        train_id (int/str): Identifiant du train pour le titre
+
+    Returns:
+        fig (matplotlib.figure.Figure)
+    """
+    if not batterie_log:
+        return None
+
+    # Extraction des données
+    times = [x[0] for x in batterie_log]
+    # Parsing du SoC (ex: "85.5%" -> 85.5)
+    socs = []
+    for x in batterie_log:
+        try:
+            val = float(x[2].strip('%'))
+        except:
+            val = 0.0
+        socs.append(val)
+
+    # Création figure
+    fig, ax = plt.subplots(figsize=(10, 3))
+
+    # Courbe principale
+    # step='post' permet de bien visualiser les paliers si on veut,
+    # mais 'plot' standard relie les points, ce qui est logique pour une batterie qui se décharge/charge continuement.
+    ax.plot(times, socs, color='#2ca02c', linewidth=2, label='SoC (%)')
+    ax.fill_between(times, socs, alpha=0.2, color='#2ca02c')
+
+    # Lignes de seuil
+    ax.axhline(y=80, color='#d62728', linestyle='--', linewidth=1, alpha=0.8, label='Seuil 80%')
+    ax.axhline(y=20, color='#d62728', linestyle='--', linewidth=1, alpha=0.8, label='Seuil 20%')
+
+    # Formatage
+    ax.set_ylim(-5, 105)
+    ax.set_ylabel('Batterie (%)')
+    ax.set_title(f'Profil de charge - Train {train_id}')
+    ax.grid(True, linestyle=':', alpha=0.6)
+    ax.legend(loc='lower center', ncol=3, bbox_to_anchor=(0.5, -0.4), fontsize='small', frameon=False)
+
+    # Formatage temporel
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    plt.setp(ax.get_xticklabels(), rotation=0, ha="center")
+
+    # Ajustement des marges
+    plt.tight_layout()
+
+    return fig

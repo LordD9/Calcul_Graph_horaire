@@ -16,7 +16,7 @@ import re # Import re, bien que les helpers soient supprimés
 # Import des modules locaux
 from utils import trouver_mission_pour_od, obtenir_temps_trajet_defaut_etape_manuelle, obtenir_temps_retournement_defaut
 from core_logic import generer_tous_trajets_optimises, preparer_roulement_manuel, importer_roulements_fichier, analyser_frequences_manuelles, generer_exports, construire_horaire_mission_cached
-from plotting import creer_graphique_horaire
+from plotting import creer_graphique_horaire, creer_graphique_batterie
 from energy_logic import get_default_energy_params, calculer_consommation_trajet
 
 
@@ -905,18 +905,20 @@ if st.session_state.get('gares') is not None:
                 })
 
                 if type_mat == "batterie" and resultat_train["batterie_log"]:
-                    with st.expander(f"Détail batterie Train {id_train} ({options_materiel_map.get(type_mat, type_mat)})"):
-                        # Mise à jour des colonnes pour inclure le SoC (%)
-                        df_batt = pd.DataFrame(resultat_train["batterie_log"],
-                                             columns=["Heure", "Niveau kWh", "SoC", "Événement"])
+                    found_bat = True
+                    with st.expander(f"Train {id_train} (Batterie)"):
+                        # Tableau
+                        df_log = pd.DataFrame(resultat_train["batterie_log"], columns=["Heure", "Niveau kWh", "SoC", "Événement"])
+                        # Formatage
+                        df_log["Heure"] = df_log["Heure"].apply(lambda x: x.strftime("%H:%M") if isinstance(x, datetime) else str(x))
+                        df_log["Niveau kWh"] = df_log["Niveau kWh"].apply(lambda x: f"{x:.1f}")
 
-                        # Formatage heure
-                        df_batt["Heure"] = df_batt["Heure"].apply(lambda x: x.strftime('%H:%M:%S') if isinstance(x, datetime) else str(x))
+                        st.dataframe(df_log, width="stretch")
 
-                        # Formatage kWh pour propreté
-                        df_batt["Niveau kWh"] = df_batt["Niveau kWh"].apply(lambda x: f"{x:.1f}")
-
-                        st.dataframe(df_batt, height=300, use_container_width=True)
+                        # Graphique SoC (NOUVEAU)
+                        fig_bat = creer_graphique_batterie(resultat_train["batterie_log"], id_train)
+                        if fig_bat:
+                            st.pyplot(fig_bat)
 
             st.subheader("Bilan énergétique global")
             if resultats_globaux:
