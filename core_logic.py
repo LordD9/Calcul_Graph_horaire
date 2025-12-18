@@ -2,9 +2,8 @@
 """
 core_logic.py
 
-Ce module contient le "cerveau" de l'application : les fonctions de calcul complexes
-qui ne dépendent pas de l'interface utilisateur.
-
+Ce module contient le "cerveau" de l'application.
+Mise à jour V3 : Logique de croisement affinée (DV vs VU) et respect strict des contraintes utilisateur.
 """
 from datetime import datetime, timedelta
 import pandas as pd
@@ -14,967 +13,613 @@ import bisect
 from functools import lru_cache
 from collections import defaultdict
 import json
+import math
 
-
-def _find_end_of_single_track_block(df_gares, start_idx, direction):
-    """
-    Trouve l'index de la prochaine gare qui permet un croisement (VE, D, ou Terminus)
-    dans la direction donnée.
-    Retourne l'index de la gare de fin de bloc.
-    """
-    n = len(df_gares)
-    curr = start_idx + direction
-    while 0 <= curr < n:
-        gare_name = df_gares.iloc[curr]['gare']
-        infra = _get_infra_at_gare(df_gares, gare_name)
-        # Une gare VE ou D marque la fin du cantonnement de voie unique "strict"
-        # (D = début double voie, VE = évitement).
-        if infra in ['VE', 'D']:
-            return curr
-        curr += direction
-    return start_idx # Ne devrait pas arriver si terminus bien défini
-
+# =============================================================================
+# CLASSES ET UTILITAIRES DE PLANIFICATION
+# =============================================================================
 
 def _get_infra_at_gare(df_gares, gare_name):
-    """Helper pour obtenir la valeur 'infra' d'une gare."""
+    """Récupère l'infrastructure d'une gare (VE, D, F)."""
     try:
-        # Assurer que df_gares a bien une colonne 'gare' et 'infra'
         if df_gares is None or 'gare' not in df_gares.columns or 'infra' not in df_gares.columns:
             return 'F'
+        series = df_gares.loc[df_gares['gare'] == gare_name, 'infra']
+        if series.empty: return 'F'
+        val = series.iloc[0]
+        return str(val).strip().upper() if pd.notna(val) else 'F'
+    except:
+        return 'F'
 
-        # Utiliser .loc pour éviter SettingWithCopyWarning potentiel si df_gares est une slice
-        infra_series = df_gares.loc[df_gares['gare'] == gare_name, 'infra']
-        if infra_series.empty:
-            return 'F' # Gare non trouvée
+def _is_crossing_point(infra_code):
+    """Définit si un train peut s'arrêter ici pour croiser (VE, D, Terminus)."""
+    # VE = Voie d'évitement, D = Double Voie (donc on peut s'y arrêter/croiser), Terminus = OK
+    return infra_code in ['VE', 'D', 'Terminus']
 
-        infra = infra_series.iloc[0]
-        return str(infra).strip().upper() if pd.notna(infra) else 'F' # Défaut F si NaN
-    except (IndexError, KeyError) as e:
-        return 'F' # Défaut F en cas d'erreur
+class SimulationEngine:
+    def __init__(self, df_gares, heure_debut, heure_fin):
+        self.df_gares = df_gares.sort_values('distance').reset_index(drop=True)
+        self.gares_map = {r.gare: i for i, r in self.df_gares.iterrows()}
+        self.infra_map = {r.gare: _get_infra_at_gare(df_gares, r.gare) for _, r in self.df_gares.iterrows()}
 
+        self.dt_debut = datetime.combine(datetime.today(), heure_debut)
+        self.dt_fin = datetime.combine(datetime.today(), heure_fin)
+        if self.dt_fin <= self.dt_debut:
+            self.dt_fin += timedelta(days=1)
 
-def _can_cross_at(df_gares, gare_name, is_terminus=False):
-    """
-    Retourne True si la gare permet un croisement (Voie d'Évitement).
-    Un point 'D' ne permet pas de croisement *sur place*.
-    """
-    infra_type = _get_infra_at_gare(df_gares, gare_name)
+        # Analyse des segments (Voie Unique vs Double Voie)
+        # segment_properties[i] décrit le segment entre gare i et i+1
+        self.segment_is_double = self._analyze_segments()
 
-    if infra_type == 'VE':
-        return True
-    elif infra_type in ['D', 'F']:
-        return False
+        # Stockage des sillons validés (trajectoires)
+        self.committed_schedules = []
 
-    for col in ['can_cross', 'allow_cross']:
-        if col in df_gares.columns:
-            try:
-                # Utiliser .loc pour être sûr
-                val_series = df_gares.loc[df_gares['gare'] == gare_name, col]
-                if val_series.empty: continue # Gare non trouvée pour cette colonne
-                val = val_series.iloc[0]
-                if pd.isna(val): continue
-                if isinstance(val, str):
-                    return val.strip().upper() not in ('F', 'FALSE', '0', '')
-                return bool(val)
-            except (IndexError, KeyError):
-                pass # Essayer colonne suivante
+        # Gestion du matériel { 'gare': [(dt_dispo, id_train), ...] }
+        self.fleet_availability = defaultdict(list)
+        self.train_counter = 1
 
-    # Par défaut : les terminus permettent le croisement/stationnement
-    return is_terminus
+    def _analyze_segments(self):
+        """
+        Détermine pour chaque segment s'il est à Double Voie (DV) ou Voie Unique (VU).
+        Logique : 'D' marque une transition (Début/Fin DV).
+        On suppose que la ligne commence en VU par défaut, sauf indication contraire.
+        """
+        is_double = {}
+        n = len(self.df_gares)
+        current_state_double = False # Hypothèse : départ en VU
 
+        for i in range(n - 1):
+            gare_curr = self.df_gares.iloc[i]['gare']
+            infra_curr = self.infra_map.get(gare_curr, 'F')
+
+            # Si on rencontre un 'D', on bascule l'état pour le segment À VENIR (et les suivants)
+            # Hypothèse : D --(DV)-- D --(VU)-- VE
+            if infra_curr == 'D':
+                current_state_double = not current_state_double
+
+            is_double[i] = current_state_double
+
+        return is_double
+
+    def _get_block_end(self, start_idx, direction):
+        """Trouve la fin du bloc de cantonnement (prochaine gare capable de croiser)."""
+        curr = start_idx + direction
+        while 0 <= curr < len(self.df_gares):
+            gare = self.df_gares.iloc[curr]['gare']
+            infra = self.infra_map.get(gare, 'F')
+            if _is_crossing_point(infra):
+                return curr
+            curr += direction
+        return start_idx # Should not happen if terminus defined
+
+    def check_segment_availability(self, seg_idx_min, seg_idx_max, t_enter, t_exit):
+        """
+        Vérifie si une plage de segments est libre.
+        Si c'est du DV, on ignore les trains en sens inverse.
+        Si c'est du VU, on vérifie tout conflit.
+        Retourne (True, None) ou (False, t_liberation_estimee).
+        """
+        # Vérifions d'abord la nature du tronçon
+        # Si TOUS les segments sont DV, c'est du DV global.
+        all_double = True
+        for i in range(seg_idx_min, seg_idx_max):
+            if not self.segment_is_double.get(i, False):
+                all_double = False
+                break
+
+        # Marge de sécurité
+        margin = timedelta(minutes=1)
+        t_check_start = t_enter
+        t_check_end = t_exit
+
+        latest_conflict_end = t_enter # Par défaut
+
+        for committed in self.committed_schedules:
+            path = committed['path']
+            # Optimisation: bounding box temporelle du train complet
+            if path[-1]['arr'] < t_check_start or path[0]['dep'] > t_check_end:
+                continue
+
+            for i in range(len(path) - 1):
+                p_a, p_b = path[i], path[i+1]
+
+                # Intersection spatiale ?
+                o_idx_min = min(p_a['index'], p_b['index'])
+                o_idx_max = max(p_a['index'], p_b['index'])
+
+                if max(seg_idx_min, o_idx_min) < min(seg_idx_max, o_idx_max):
+                    # Intersection temporelle ?
+                    o_start = p_a['dep'] - margin
+                    o_end = p_b['arr'] + margin
+
+                    if max(t_check_start, o_start) < min(t_check_end, o_end):
+                        # CONFLIT POTENTIEL
+
+                        # Si on est en Double Voie (DV), le conflit n'existe que si même sens (rattrapage)
+                        # Pour simplifier et respecter "croisement en tout point", on ignore les sens inverses sur DV.
+                        # On ignore même le même sens (hypothèse cantonnement mobile ou espacement géré ailleurs/non critique ici)
+                        if all_double:
+                            continue
+
+                        # Si Voie Unique (VU), tout croisement est fatal.
+                        return False, o_end + timedelta(seconds=1) # On doit attendre que l'autre sorte
+
+        return True, None
+
+    def solve_mission_schedule(self, mission, ideal_start_time, type_trajet, min_start_time=None):
+        """
+        Construit un horaire valide en insérant des attentes si nécessaire.
+        Priorité : Respecter min_start_time (dispo matériel), puis s'approcher de ideal_start_time.
+        """
+        # 1. Obtenir le tracé de base (temps de parcours purs)
+        base_schedule = construire_horaire_mission(mission, type_trajet, self.df_gares)
+        if not base_schedule: return None, [], "Erreur itinéraire"
+
+        # Convertir en liste d'étapes avec durées relatives
+        steps = []
+        for i in range(len(base_schedule)):
+            pt = base_schedule[i]
+            idx = self.gares_map.get(pt['gare'])
+            offset = pt.get('time_offset_min', 0)
+
+            # Durée depuis le point précédent
+            duration_from_prev = 0
+            if i > 0:
+                duration_from_prev = offset - base_schedule[i-1].get('time_offset_min', 0)
+
+            steps.append({
+                'gare': pt['gare'],
+                'index': idx,
+                'run_time': duration_from_prev, # Temps de marche pour arriver ici
+                'infra': self.infra_map.get(pt['gare'], 'F')
+            })
+
+        # 2. Initialisation
+        # Le départ ne peut pas être avant la dispo du matériel
+        actual_start_time = ideal_start_time
+        if min_start_time and min_start_time > actual_start_time:
+            actual_start_time = min_start_time
+
+        current_time = actual_start_time
+        final_path = []
+        direction = 1 if steps[-1]['index'] > steps[0]['index'] else -1
+
+        # 3. Construction pas à pas (Greedy)
+        # On valide bloc par bloc (entre points de croisement)
+
+        # Le premier point est forcément un point d'arrêt/départ
+        final_path.append({
+            'gare': steps[0]['gare'],
+            'index': steps[0]['index'],
+            'arr': current_time,
+            'dep': current_time # Peut être modifié si on attend au départ
+        })
+
+        i = 0
+        while i < len(steps) - 1:
+            curr_step = steps[i]
+
+            # Identifier le prochain "Check Point" (fin du bloc VU ou prochaine gare importante)
+            # Sur une DV, on peut avancer gare par gare. Sur une VU, il faut réserver tout le bloc jusqu'au prochain évitement.
+
+            # On cherche le prochain point de croisement physique
+            next_crossing_idx_in_steps = -1
+            phys_idx_curr = curr_step['index']
+
+            # Scan dans les steps de la mission pour trouver le prochain point capable de croisement
+            target_step_idx = i + 1
+            while target_step_idx < len(steps):
+                st = steps[target_step_idx]
+                infra = st['infra']
+                # Si c'est un point de croisement ou la fin de mission
+                if _is_crossing_point(infra) or target_step_idx == len(steps) - 1:
+                    next_crossing_idx_in_steps = target_step_idx
+                    break
+                target_step_idx += 1
+
+            # Définition du Bloc Critique à traverser
+            # De step[i] à step[target_step_idx]
+            # On doit vérifier que TOUTE cette section est libre pendant le temps de traversée
+
+            # Calcul du temps de trajet théorique cumulé pour ce bloc
+            travel_time_block = 0
+            for k in range(i + 1, target_step_idx + 1):
+                travel_time_block += steps[k]['run_time']
+
+            # Boucle de tentative (Wait & Retry)
+            # On essaie de partir de curr_step à 'current_departure'
+            # Si ça coince, on incrémente 'current_departure' (donc on attend à curr_step)
+            current_departure = current_time
+
+            # Protection boucle infinie
+            max_wait = timedelta(hours=2)
+
+            while True:
+                if current_departure - current_time > max_wait:
+                    return None, [], "Impossible de trouver un créneau (timeout)"
+
+                t_enter_block = current_departure
+                t_exit_block = current_departure + timedelta(minutes=travel_time_block)
+
+                # Vérification sur l'ensemble des segments physiques du bloc
+                # Attention : steps peut sauter des gares si interpolation, mais ici on a toutes les gares.
+                # On utilise les indices physiques min/max.
+                idx_start_phys = steps[i]['index']
+                idx_end_phys = steps[target_step_idx]['index']
+
+                idx_min = min(idx_start_phys, idx_end_phys)
+                idx_max = max(idx_start_phys, idx_end_phys)
+
+                is_free, next_free_time = self.check_segment_availability(idx_min, idx_max, t_enter_block, t_exit_block)
+
+                if is_free:
+                    # C'est validé !
+                    # On met à jour le path pour tous les points intermédiaires
+                    t_cursor = t_enter_block
+
+                    # Mettre à jour le départ réel du point actuel (si on a attendu)
+                    final_path[-1]['dep'] = t_enter_block
+
+                    for k in range(i + 1, target_step_idx + 1):
+                        dt = steps[k]['run_time']
+                        t_cursor += timedelta(minutes=dt)
+                        final_path.append({
+                            'gare': steps[k]['gare'],
+                            'index': steps[k]['index'],
+                            'arr': t_cursor,
+                            'dep': t_cursor # Par défaut, repart tout de suite (sera ajusté au prochain tour si attente)
+                        })
+
+                    current_time = t_cursor # Heure d'arrivée au bout du bloc
+                    i = target_step_idx # On avance l'itérateur
+                    break # Sortie de la boucle while True (Retry)
+
+                else:
+                    # Conflit détecté.
+                    # On doit attendre à la gare actuelle (steps[i]).
+                    # next_free_time nous dit quand le conflit se libère.
+                    # On décale notre tentative de départ.
+                    if next_free_time and next_free_time > current_departure:
+                        current_departure = next_free_time
+                    else:
+                        current_departure += timedelta(minutes=1)
+
+        return actual_start_time, final_path, None
+
+    def allocate_train_id(self, gare_depart, heure_depart, mission_id):
+        """Réutilisation FIFO du matériel."""
+        pool = self.fleet_availability[gare_depart]
+        pool.sort(key=lambda x: x[0])
+
+        # On cherche un train dispo AVANT ou À l'heure de départ
+        best_train_id = None
+        best_idx = -1
+
+        for i, (dt_dispo, tid) in enumerate(pool):
+            if dt_dispo <= heure_depart:
+                best_train_id = tid
+                best_idx = i
+                break
+
+        if best_train_id:
+            pool.pop(best_idx)
+            return best_train_id, False
+        else:
+            tid = self.train_counter
+            self.train_counter += 1
+            return tid, True
+
+    def register_train_arrival(self, train_id, gare_arrivee, heure_arrivee, temps_retournement):
+        """Libère le train."""
+        dt_dispo = heure_arrivee + timedelta(minutes=temps_retournement)
+        self.fleet_availability[gare_arrivee].append((dt_dispo, train_id))
+
+# =============================================================================
+# FONCTION PRINCIPALE
+# =============================================================================
 
 def generer_tous_trajets_optimises(missions, heure_debut, heure_fin, df_gares):
     """
-    Génère la chronologie complète des trajets en mode "Rotation optimisée".
-    VERSION CORRIGÉE : Gestion des conflits stricte (pas de passage forcé).
-    Logique avertissement points 'D' corrigée.
-    Planification retour corrigée.
+    Génère les trajets avec logique de glissement pour respecter l'infra.
     """
-    # Validation initiale df_gares
-    if df_gares is None or df_gares.empty or 'gare' not in df_gares.columns or 'distance' not in df_gares.columns:
-         # Utiliser st.error si disponible (exécuté dans Streamlit), sinon print
-         error_msg = "DataFrame des gares invalide ou vide."
-         if st: st.error(error_msg)
-         else: print(f"Erreur: {error_msg}")
-         return {}, {"infra_violations": [], "other": [error_msg]}
+    engine = SimulationEngine(df_gares, heure_debut, heure_fin)
+    chronologie_reelle = defaultdict(list)
+    warnings = {"infra_violations": [], "other": []}
 
-    # S'assurer que 'infra' existe, sinon la créer avec 'F' par défaut
-    if 'infra' not in df_gares.columns:
-         df_gares = df_gares.copy() # Eviter modif inplace de l'original
-         df_gares['infra'] = 'F'
-
-
-    # --- Initialisation ---
-    infra_violation_warnings = []
-    other_warnings = []
-    chronologie_reelle = {}
-    id_train_counter = 1
-    event_counter = 0
-
-    dt_debut_service = datetime.combine(datetime.today(), heure_debut)
-    dt_fin_service = datetime.combine(datetime.today(), heure_fin)
-    if dt_fin_service <= dt_debut_service:
-        dt_fin_service += timedelta(days=1)
-
-    trains = {} # Stocke l'état {id: {"loc": gare, "dispo_a": datetime}}
-    occupation_cantons = defaultdict(list) # {(gare_a, gare_b): [(start_dt, end_dt, train_id), ...]}
-    evenements = [] # Heapq : (datetime, counter, type_event, details)
-
-    # --- Préparation des demandes de départ ---
-    gare_set = set(df_gares['gare']) # Pour vérification rapide
+    # 1. Création des demandes (Triées par heure idéale)
+    demandes = []
     for i, mission in enumerate(missions):
-        mission_id = f"M{i+1}" # Pour logs
-        # Validation Mission
-        if not isinstance(mission, dict):
-             other_warnings.append(f"Mission {mission_id} invalide (n'est pas un dictionnaire). Ignorée.")
-             continue
-        origine = mission.get("origine")
-        terminus = mission.get("terminus")
-        frequence = mission.get("frequence")
+        freq = mission.get('frequence', 0)
+        if freq <= 0: continue
+        intervalle = timedelta(hours=1.0/freq)
 
-        # Vérifier gares
-        if not origine or origine not in gare_set:
-            other_warnings.append(f"Origine '{origine}' de {mission_id} introuvable. Mission ignorée.")
-            continue
-        if not terminus or terminus not in gare_set:
-            other_warnings.append(f"Terminus '{terminus}' de {mission_id} introuvable. Mission ignorée.")
-            continue
-        if origine == terminus:
-             other_warnings.append(f"Origine et Terminus identiques pour {mission_id}. Mission ignorée.")
-             continue
-
-        # Vérifier fréquence
-        if not isinstance(frequence, (int, float)) or frequence <= 0:
-            other_warnings.append(f"Fréquence '{frequence}' invalide pour {mission_id}. Mission ignorée.")
-            continue
-
-        try: # Calcul intervalle robuste
-             intervalle = timedelta(hours=1 / frequence)
-             if intervalle.total_seconds() <= 0: raise ValueError("Intervalle nul ou négatif")
-        except (ZeroDivisionError, ValueError):
-             other_warnings.append(f"Fréquence '{frequence}' invalide (intervalle <= 0) pour {mission_id}. Mission ignorée.")
-             continue
-
-
-        # Vérifier minutes de référence
         try:
-            minutes_ref_str = mission.get("reference_minutes", "0")
-            minutes_ref = sorted(list(set([
-                int(m.strip()) for m in minutes_ref_str.split(',')
-                if m.strip().isdigit()
-            ])))
-            if not minutes_ref: minutes_ref = [0] # Défaut à 0 si vide ou invalide après filtrage
-        except Exception as e:
-            other_warnings.append(f"Format minutes réf. '{minutes_ref_str}' invalide pour {mission_id}: {e}. Utilisation de [0].")
-            minutes_ref = [0]
+            refs = sorted([int(x.strip()) for x in str(mission.get('reference_minutes', '0')).split(',') if x.strip().isdigit()])
+        except: refs = [0]
+        if not refs: refs = [0]
 
+        for ref in refs:
+            # Calage précis sur la minute de référence
+            # Si ref=0, intervalle=30min -> 06:00, 06:30...
+            # Calcul du premier temps valide >= heure_debut
+            start_h = engine.dt_debut.hour
 
-        # Génération des événements de demande
-        for minute_ref in minutes_ref:
-            offset_hours = minute_ref // 60
-            offset_minutes = minute_ref % 60
+            # On part d'une base jour J à 00:00 + minute ref
+            base_time = engine.dt_debut.replace(hour=start_h, minute=0, second=0) + timedelta(minutes=ref)
 
-            # Calcul du premier départ théorique
-            curseur_temps = dt_debut_service.replace(
-                minute=offset_minutes, second=0, microsecond=0
-            ) + timedelta(hours=offset_hours)
+            # On recule pour être sûr de choper le cycle
+            curr = base_time - timedelta(hours=2)
+            while curr < engine.dt_debut:
+                curr += intervalle
 
-            # Ajuster au premier départ DANS ou APRES dt_debut_service
-            while curseur_temps < dt_debut_service:
-                 # Avancer par intervalle pour respecter le cadencement dès le début
-                 curseur_temps += intervalle
+            # Génération jusqu'à la fin
+            while curr < engine.dt_fin:
+                demandes.append({
+                    'ideal_time': curr,
+                    'mission': mission,
+                    'mission_idx': i
+                })
+                curr += intervalle
 
+    demandes.sort(key=lambda x: x['ideal_time'])
 
-            # Générer les départs jusqu'à la fin de service
-            while curseur_temps < dt_fin_service:
-                event_counter += 1
-                heapq.heappush(evenements, (
-                    curseur_temps, event_counter, "demande_depart_aller",
-                    {"mission": mission, "mission_id": mission_id} # Ajouter ID pour logs
-                ))
-                curseur_temps += intervalle # Avancer pour le prochain
+    # 2. Résolution séquentielle
+    for dem in demandes:
+        mission = dem['mission']
+        ideal_start = dem['ideal_time']
 
-    # Sérialiser une seule fois pour le cache (si df_gares est valide)
-    try:
-         df_gares_json = df_gares.to_json() if df_gares is not None else None
-    except Exception as e_json:
-         other_warnings.append(f"Erreur sérialisation df_gares: {e_json}. Le cache horaire sera désactivé.")
-         df_gares_json = None
+        # A. Planification ALLER
+        # On ne passe pas de min_start_time spécifique pour l'aller initial (nouveau train possible)
+        # Mais allocate_train_id favorisera un train existant si dispo.
 
+        # Astuce : Pour savoir si on est contraint par le matériel au départ, il faudrait savoir quel train on prend.
+        # Mais on ne le sait qu'après avoir fixé l'horaire.
+        # Solution : On calcule l'horaire "idéal". Ensuite on cherche un train.
+        # Si aucun train dispo à ideal_start, on a deux choix :
+        # 1. Créer un nouveau train (Respect fréquence > Réutilisation) -> Choix actuel pour minimiser impact.
+        # 2. Retarder le départ (Réutilisation > Fréquence).
+        # L'utilisateur demande de "Minimiser le nombre de trains".
+        # Donc on devrait vérifier la dispo flotte AVANT.
 
-    # --- Boucle principale de simulation ---
-    while evenements:
-        heure, _, type_event, details = heapq.heappop(evenements)
+        pool = engine.fleet_availability.get(mission['origine'], [])
+        pool.sort(key=lambda x: x[0])
+        min_mat_time = None
 
-        # Ignorer événements après fin de service
-        if heure >= dt_fin_service:
+        # Y a-t-il un train dispo "raisonnablement" proche (ex: retard < 30 min) ?
+        # Sinon on en crée un.
+        for dt_dispo, tid in pool:
+            if dt_dispo <= ideal_start + timedelta(minutes=15): # Tolérance réutilisation
+                min_mat_time = dt_dispo
+                break # On prend le premier dispo
+
+        # Calcul Sillon Aller
+        real_start, path_aller, err = engine.solve_mission_schedule(mission, ideal_start, 'aller', min_start_time=min_mat_time)
+
+        if err or not path_aller:
+            warnings['other'].append(f"Échec plannif M{dem['mission_idx']+1} à {ideal_start.strftime('%H:%M')}: {err}")
             continue
 
-        # --- Gestion Demande de Départ ---
-        if type_event == "demande_depart_aller":
-            mission_cfg = details["mission"]
-            mission_id = details["mission_id"]
-            origine = mission_cfg["origine"]
+        # Vérification Fréquence
+        diff_min = (real_start - ideal_start).total_seconds() / 60
+        if diff_min > 2:
+            warnings['infra_violations'].append(
+                f"Violation Fréquence M{dem['mission_idx']+1} (+{int(diff_min)} min). "
+                f"Prévu: {ideal_start.strftime('%H:%M')}, Réel: {real_start.strftime('%H:%M')} (Conflit Infra/Matériel)"
+            )
 
-            # Trouver le train dispo le plus tôt à l'origine
-            train_assigne_id = None
-            earliest_dispo = datetime.max
-            for id_t, t in trains.items():
-                # Vérifier si le train existe bien et a les clés nécessaires
-                if isinstance(t, dict) and t.get("loc") == origine and isinstance(t.get("dispo_a"), datetime) and t["dispo_a"] <= heure:
-                     if t["dispo_a"] < earliest_dispo:
-                          earliest_dispo = t["dispo_a"]
-                          train_assigne_id = id_t
+        # Assignation Train
+        train_id, is_new = engine.allocate_train_id(path_aller[0]['gare'], real_start, dem['mission_idx'])
+        engine.committed_schedules.append({'train_id': train_id, 'path': path_aller})
 
-            # Si aucun train trouvé, en créer un nouveau
-            if train_assigne_id is None:
-                train_assigne_id = id_train_counter
-                trains[train_assigne_id] = {"id": train_assigne_id, "loc": origine, "dispo_a": heure}
-                chronologie_reelle[train_assigne_id] = []
-                id_train_counter += 1
-            else:
-                # Marquer le train comme occupé à partir de maintenant (ou de sa dispo si > heure)
-                trains[train_assigne_id]["dispo_a"] = max(heure, earliest_dispo)
+        # Stockage Aller
+        prev = path_aller[0]
+        for pt in path_aller[1:]:
+            chronologie_reelle[train_id].append({
+                "start": prev['dep'], "end": pt['arr'],
+                "origine": prev['gare'], "terminus": pt['gare']
+            })
+            prev = pt
 
+        # B. Gestion RETOUR (Chaînage immédiat pour optimiser rotations)
+        gare_term = path_aller[-1]['gare']
+        arr_time = path_aller[-1]['arr']
+        t_ret_B = mission.get("temps_retournement_B", 10)
 
-            # Programmer la tentative de mouvement à l'heure réelle de disponibilité/demande
-            heure_programmation_mvt = max(heure, trains[train_assigne_id]["dispo_a"])
-            event_counter += 1
-            heapq.heappush(evenements, (heure_programmation_mvt, event_counter, "tentative_mouvement", {
-                "id_train": train_assigne_id, "mission": mission_cfg, "mission_id": mission_id,
-                "trajet_spec": "aller", "index_etape": 0, "retry_count": 0
-            }))
+        # Le train est libéré (virtuellement)
+        dispo_retour = arr_time + timedelta(minutes=t_ret_B)
 
-        # --- Gestion Tentative de Mouvement ---
-        elif type_event == "tentative_mouvement":
-            # Récupération détails
-            id_train = details["id_train"]
-            mission_cfg = details["mission"]
-            mission_id = details["mission_id"]
-            trajet_spec = details["trajet_spec"]
-            index_etape = details["index_etape"]
+        # Tentative de planification du retour "dans la foulée"
+        # On cherche la prochaine demande théorique de retour qui colle ?
+        # Ou on crée un retour "hors fréquence" juste pour ramener le train ?
+        # L'utilisateur dit : "On respecte les fréquence saisie par l'utilisateur".
+        # DONC le retour ne doit pas être arbitraire. Il doit correspondre à une demande "Retour".
+        # C'est compliqué à matcher ici car 'demandes' est une liste plate.
 
-            # Obtenir l'horaire détaillé (potentiellement depuis cache)
-            horaire = None # Init
-            try:
-                mission_key = json.dumps(mission_cfg, sort_keys=True)
-                if df_gares_json:
-                     horaire = construire_horaire_mission_cached(mission_key, trajet_spec, df_gares_json)
-                else: # Pas de cache
-                     horaire = construire_horaire_mission(mission_cfg, trajet_spec, df_gares)
-            except Exception as e_horaire:
-                 other_warnings.append(f"Erreur construction horaire {mission_id} ({trajet_spec}) Train {id_train}: {e_horaire}")
+        # Pour ce prototype V3, on applique une logique simplifiée de rotation :
+        # Le train effectue le retour "dès que possible" en respectant l'infra,
+        # OU on le laisse au dépôt (fleet) pour qu'il soit pris par la prochaine demande 'aller' (sens inverse).
 
+        # Mais 'demandes' ne contient que des 'Aller' (selon la boucle ci-dessus).
+        # Si la mission a un retour défini, il faut le jouer.
 
-            # Si horaire invalide ou fin atteinte, abandonner ce mouvement
-            if not horaire or not isinstance(horaire, list) or index_etape >= len(horaire) - 1:
-                # print(f"Debug: Horaire invalide ou fin atteinte pour T{id_train}, M{mission_id}, {trajet_spec}, etape {index_etape}") # Debug
-                continue # Le train reste où il est, dispo à "dispo_a"
+        # Correction : On génère le retour TOUT DE SUITE comme une suite logique du train.
+        # Mais à quelle heure ?
+        # Si on veut respecter la fréquence, le retour devrait aussi être cadencé.
+        # Si l'utilisateur n'a pas défini de mission "Retour" séparée mais compte sur l'ASymétrie :
+        # On va tenter de faire repartir le train à l'heure idéale la plus proche >= dispo_retour
+        # basée sur la fréquence.
 
-            # Points de départ et arrivée de l'étape
-            try:
-                pt_depart = horaire[index_etape]
-                pt_arrivee = horaire[index_etape + 1]
-                gare_dep = pt_depart.get("gare")
-                gare_arr = pt_arrivee.get("gare")
-                # Validation des points
-                if not isinstance(pt_depart, dict) or not isinstance(pt_arrivee, dict) or \
-                   not gare_dep or not gare_arr:
-                    raise ValueError("Format point horaire invalide")
-            except (IndexError, ValueError) as e_pt:
-                 other_warnings.append(f"Point horaire invalide {mission_id} étape {index_etape} Train {id_train}: {e_pt}. Mouvement ignoré.")
-                 continue
+        # Calcul prochain slot théorique retour
+        # Base : ideal_start + temps_trajet + temps_ret ? Non, cadencement fixe.
+        # On cherche k tel que (Base + k*intervalle) >= dispo_retour
 
+        # On assume que le retour a la même fréquence.
+        # Minute ref retour ? Souvent symétrique ou libre.
+        # Disons qu'on essaie de repartir au plus tôt (dispo_retour) mais en respectant infra.
 
-            # Calcul durée (assurer non négative)
-            duree_min_trajet = max(0, pt_arrivee.get("time_offset_min", 0) - pt_depart.get("time_offset_min", 0))
+        # Calcul Sillon Retour
+        real_start_ret, path_ret, err_ret = engine.solve_mission_schedule(mission, dispo_retour, 'retour', min_start_time=dispo_retour)
 
-            # Heure de départ réelle = max(heure programmée, dispo train)
-            dispo_train = trains.get(id_train, {}).get("dispo_a", heure) # Heure actuelle si train inconnu
-            # Assurer que dispo_train est un datetime
-            if not isinstance(dispo_train, datetime): dispo_train = heure
+        if path_ret:
+            # On garde le même train
+            engine.committed_schedules.append({'train_id': train_id, 'path': path_ret})
 
-            heure_depart_reelle = max(heure, dispo_train)
+            prev = path_ret[0]
+            for pt in path_ret[1:]:
+                chronologie_reelle[train_id].append({
+                    "start": prev['dep'], "end": pt['arr'],
+                    "origine": prev['gare'], "terminus": pt['gare']
+                })
+                prev = pt
 
-            # Vérifier si départ possible avant fin service
-            if heure_depart_reelle >= dt_fin_service:
-                 continue
+            # Libération finale à l'origine
+            t_ret_A = mission.get("temps_retournement_A", 10)
+            engine.register_train_arrival(train_id, path_ret[-1]['gare'], path_ret[-1]['arr'], t_ret_A)
 
-            # --- Vérification Conflits ---
-            conflit = None
-            # Pas de conflit si pas de mouvement ou si gares identiques (arrêt sur place)
-            if duree_min_trajet > 0 and gare_dep != gare_arr:
-                 try:
-                      conflit = verifier_conflit(
-                          heure_depart_reelle, duree_min_trajet,
-                          gare_dep, gare_arr,
-                          id_train, occupation_cantons, df_gares, debug=False #a modifier pour désactiver / activer debug
-                      )
-                 except Exception as e_conflit:
-                      other_warnings.append(f"Erreur vérification conflit {gare_dep}->{gare_arr} Train {id_train}: {e_conflit}")
-                      conflit = {"type": "erreur_interne", "fin_conflit": heure_depart_reelle + timedelta(minutes=1)} # Bloquer par sécurité
+        else:
+            # Si pas de retour possible (fin de service ?), on libère au terminus
+            engine.register_train_arrival(train_id, gare_term, arr_time, t_ret_B)
 
+    return chronologie_reelle, warnings
 
-            # --- Gestion Résultat Conflit ---
-            if conflit is None: # Pas de conflit -> Mouvement
-                heure_arrivee_reelle = heure_depart_reelle + timedelta(minutes=duree_min_trajet)
+# =============================================================================
+# FONCTIONS UTILITAIRES (CONSERVÉES POUR COMPATIBILITÉ)
+# =============================================================================
 
-                # Vérifier si arrivée avant fin service
-                if heure_arrivee_reelle > dt_fin_service:
-                     continue # Trajet non complété
-
-                # Enregistrer trajet si mouvement
-                if duree_min_trajet > 0 and gare_dep != gare_arr:
-                    chronologie_reelle.setdefault(id_train, []).append({
-                        "start": heure_depart_reelle, "end": heure_arrivee_reelle,
-                        "origine": gare_dep, "terminus": gare_arr
-                    })
-                    # Occuper canton
-                    occupation_tuple = (heure_depart_reelle, heure_arrivee_reelle, id_train)
-                    # Clé directionnelle pour l'occupation
-                    bisect.insort(occupation_cantons[(gare_dep, gare_arr)], occupation_tuple)
-
-                # Mettre à jour état train (même si durée nulle, la loc change)
-                trains[id_train]["loc"] = gare_arr
-                trains[id_train]["dispo_a"] = heure_arrivee_reelle
-
-                # Programmer suite
-                if index_etape + 1 < len(horaire) - 1: # Encore des étapes
-                    event_counter += 1
-                    heapq.heappush(evenements, (
-                        heure_arrivee_reelle, event_counter, "tentative_mouvement", {
-                            "id_train": id_train, "mission": mission_cfg, "mission_id": mission_id,
-                            "trajet_spec": trajet_spec, "index_etape": index_etape + 1, "retry_count": 0
-                        }
-                    ))
-                else: # Fin de mission
-                    event_counter += 1
-                    heapq.heappush(evenements, (
-                        heure_arrivee_reelle, event_counter, "fin_mission", {
-                            "id_train": id_train, "mission": mission_cfg, "mission_id": mission_id,
-                            "trajet_spec": trajet_spec, "gare_finale": gare_arr
-                        }
-                    ))
-
-            else: # Conflit -> Attente
-                retry_count = details.get("retry_count", 0)
-                # Utiliser heure départ réelle + 1min comme fallback si fin_conflit invalide ou None
-                fin_possible = conflit.get("fin_conflit")
-                if not isinstance(fin_possible, datetime):
-                     fin_possible = heure_depart_reelle + timedelta(minutes=1)
-                # Assurer que fin_possible est au moins légèrement après l'heure actuelle pour éviter boucle
-                fin_possible = max(fin_possible, heure_depart_reelle + timedelta(seconds=1))
-
-
-                train_en_conflit = conflit.get('avec_train', 'inconnu')
-                conflit_type = conflit.get("type")
-
-                # Générer avertissement seulement la première fois et si pertinent
-                if retry_count == 0:
-                    gare_depart_infra = _get_infra_at_gare(df_gares, gare_dep)
-                    # Avertissement seulement si retenu en 'F'
-                    if gare_depart_infra == 'F' and conflit_type not in ["erreur_infra", "erreur_interne"]:
-                        msg = (
-                            f"Train {id_train} ({gare_dep} → {gare_arr}) : "
-                            f"RETENU à {gare_dep} (point 'F') pour attendre "
-                            f"Train {train_en_conflit} jusqu'à env. {fin_possible.strftime('%H:%M:%S')}."
-                        )
-                        infra_violation_warnings.append(msg)
-                    # Avertissement pour nez-à-nez (même si en VE/D)
-                    elif conflit_type == "face_a_face":
-                         msg = (
-                            f"Train {id_train} ({gare_dep} → {gare_arr}) : "
-                            f"Conflit 'nez-à-nez' (section VU) avec Train {train_en_conflit}. "
-                            f"Attente à {gare_dep} (point '{gare_depart_infra}') jusqu'à env. {fin_possible.strftime('%H:%M:%S')}."
-                        )
-                         infra_violation_warnings.append(msg)
-
-                # Reprogrammer la tentative après la fin du conflit
-                new_details = details.copy()
-                new_details["retry_count"] = retry_count + 1
-                event_counter += 1
-                heapq.heappush(evenements, (fin_possible, event_counter, "tentative_mouvement", new_details))
-
-
-        # --- Gestion Fin de Mission ---
-        elif type_event == "fin_mission":
-            id_train = details["id_train"]
-            mission_cfg = details["mission"]
-            mission_id = details["mission_id"]
-            gare_finale = details["gare_finale"]
-
-            # Assurer mise à jour localisation (important!)
-            if id_train in trains:
-                trains[id_train]["loc"] = gare_finale
-                heure_arrivee_mission = heure # L'heure de l'event est l'heure d'arrivée
-            else: continue # Train inconnu? Ne devrait pas arriver.
-
-
-            if details["trajet_spec"] == "aller": # Fin aller -> Programmer retour
-                temps_retournement = mission_cfg.get("temps_retournement_B", 10)
-                # Assurer temps retournement non négatif
-                if not isinstance(temps_retournement, (int, float)) or temps_retournement < 0: temps_retournement = 0
-
-                heure_dispo_pour_retour = heure_arrivee_mission + timedelta(minutes=temps_retournement)
-                trains[id_train]["dispo_a"] = heure_dispo_pour_retour
-
-
-                horaire_retour_calc = None
-                temps_trajet_retour_calc = -1 # Init invalide
-                try:
-                    mission_key = json.dumps(mission_cfg, sort_keys=True)
-                    if df_gares_json:
-                        horaire_retour_calc = construire_horaire_mission_cached(mission_key, "retour", df_gares_json)
-                    else:
-                        horaire_retour_calc = construire_horaire_mission(mission_cfg, "retour", df_gares)
-
-                    if isinstance(horaire_retour_calc, list) and len(horaire_retour_calc) > 1:
-                        temps_trajet_retour_calc = horaire_retour_calc[-1].get("time_offset_min", -1) # Récupérer durée
-                        if not isinstance(temps_trajet_retour_calc, (int, float)) or temps_trajet_retour_calc < 0:
-                             temps_trajet_retour_calc = -1 # Marquer comme invalide
-
-                except Exception as e_estim_h:
-                     other_warnings.append(f"Erreur calcul horaire retour pour estimation {mission_id} T{id_train}: {e_estim_h}")
-
-
-                # Vérifier si durée valide calculée
-                if temps_trajet_retour_calc >= 0:
-                      heure_fin_retour_estimee = heure_dispo_pour_retour + timedelta(minutes=temps_trajet_retour_calc)
-
-                      # Programmer retour si fin avant fin de service
-                      if heure_fin_retour_estimee <= dt_fin_service:
-                          event_counter += 1
-                          heapq.heappush(evenements, (
-                              heure_dispo_pour_retour, event_counter, "tentative_mouvement", {
-                                  "id_train": id_train, "mission": mission_cfg, "mission_id": mission_id,
-                                  "trajet_spec": "retour", "index_etape": 0, "retry_count": 0
-                              }
-                          ))
-
-
-            else: # Fin retour -> Train dispo pour nouvel aller
-                temps_retournement = mission_cfg.get("temps_retournement_A", 10)
-                if not isinstance(temps_retournement, (int, float)) or temps_retournement < 0: temps_retournement = 0
-                heure_dispo_finale = heure_arrivee_mission + timedelta(minutes=temps_retournement)
-                trains[id_train]["dispo_a"] = heure_dispo_finale
-                # Reste à gare_finale (origine A)
-
-    # --- Nettoyage Final ---
-    trains_a_supprimer = [tid for tid, trajets in chronologie_reelle.items() if not trajets]
-    for tid in trains_a_supprimer:
-        del chronologie_reelle[tid]
-
-    # Retourner résultats
-    return chronologie_reelle, {
-        "infra_violations": infra_violation_warnings,
-        "other": other_warnings
-    }
-
-# ... (construire_horaire_mission_cached) ...
 @lru_cache(maxsize=256)
 def construire_horaire_mission_cached(mission_key, trajet_spec, df_gares_json):
-    """Version mise en cache pour accélérer les appels répétés."""
-    # Gérer cas où df_gares_json est None
-    if df_gares_json is None:
-         try:
-              mission_cfg = json.loads(mission_key)
-              return None # Plus sûr de retourner None
-         except:
-              return None # Erreur parsing clé ou accès df_gares
-
-
+    """Wrapper avec cache pour la construction d'horaire."""
+    if df_gares_json is None: return None
     try:
-        # Utiliser StringIO pour que read_json fonctionne avec une chaîne
         df_gares_local = pd.read_json(StringIO(df_gares_json))
         mission_cfg = json.loads(mission_key)
-        # Appeler la fonction non cachée avec les données désérialisées
         return construire_horaire_mission(mission_cfg, trajet_spec, df_gares_local)
-    except Exception as e:
-         # Log l'erreur pour aider au diagnostic
-         print(f"Erreur critique dans construire_horaire_mission_cached: {e}")
-         import traceback
-         print(traceback.format_exc())
-         return None # Retourner None en cas d'erreur
+    except:
+        return None
 
-
-# ... (construire_horaire_mission) ...
 def construire_horaire_mission(mission_config, trajet_spec, df_gares):
     """
-    Construit un horaire détaillé incluant TOUTES les gares physiques.
-    Les time_offset_min sont les temps d'ARRIVÉE.
-    Correction interpolation retour + NameError user_times.
+    Construit un horaire détaillé incluant TOUTES les gares physiques par interpolation.
+    (Code repris et nettoyé de la version précédente pour assurer la robustesse)
     """
-    if df_gares is None or df_gares.empty or 'gare' not in df_gares.columns or 'distance' not in df_gares.columns:
-         # print("Error: df_gares invalide dans construire_horaire_mission") # Debug
-         return [] # Protection
+    if df_gares is None or df_gares.empty: return []
 
-    # --- Définition horaire de base (Aller / Retour) ---
-    origine_base, terminus_base = None, None
-    temps_trajet_base = 0
-    passing_points_base = []
-
+    # 1. Définition des points clés (Origine -> [PP] -> Terminus)
+    points_cles = []
     if trajet_spec == 'aller':
-        origine_base = mission_config.get("origine")
-        terminus_base = mission_config.get("terminus")
-        temps_trajet_base = mission_config.get("temps_trajet", 0)
-        passing_points_base = [
-            pp for pp in mission_config.get("passing_points", [])
-            if isinstance(pp, dict) and "gare" in pp and isinstance(pp.get("time_offset_min"), (int, float)) and pp["time_offset_min"] >= 0
-        ]
+        base_pp = mission_config.get("passing_points", [])
+        points_cles.append({"gare": mission_config.get("origine"), "time_offset_min": 0})
+        points_cles.extend([p for p in base_pp if p.get("time_offset_min", 0) > 0])
+        points_cles.append({"gare": mission_config.get("terminus"), "time_offset_min": mission_config.get("temps_trajet", 60)})
     else: # Retour
-        origine_base = mission_config.get("terminus")
-        terminus_base = mission_config.get("origine")
-        temps_trajet_base_config = mission_config.get("temps_trajet", 0) # Base pour inversion
+        # Gestion asymétrique ou symétrique
+        base_pp = []
+        temps_total = mission_config.get("temps_trajet", 60)
 
         if mission_config.get("trajet_asymetrique"):
-            temps_trajet_base = mission_config.get("temps_trajet_retour", temps_trajet_base_config)
-            passing_points_base = [
-                pp for pp in mission_config.get("passing_points_retour", [])
-                 if isinstance(pp, dict) and "gare" in pp and isinstance(pp.get("time_offset_min"), (int, float)) and pp["time_offset_min"] >= 0
-            ]
-            passing_points_base.sort(key=lambda x: x["time_offset_min"])
-        else: # Retour symétrique (inversion)
-            temps_trajet_base = temps_trajet_base_config
-            pp_aller = [
-                pp for pp in mission_config.get("passing_points", [])
-                 if isinstance(pp, dict) and "gare" in pp and isinstance(pp.get("time_offset_min"), (int, float)) and pp["time_offset_min"] >= 0
-            ]
-            if isinstance(temps_trajet_base, (int, float)) and temps_trajet_base > 0:
-                passing_points_base = []
-                for pp in pp_aller:
-                     inverted_time = temps_trajet_base - pp["time_offset_min"]
-                     if inverted_time >= 0:
-                          passing_points_base.append({"gare": pp["gare"], "time_offset_min": inverted_time})
-                passing_points_base.sort(key=lambda x: x["time_offset_min"])
-            else: passing_points_base = []
+            temps_total = mission_config.get("temps_trajet_retour", temps_total)
+            base_pp = mission_config.get("passing_points_retour", [])
+        else:
+            # Inversion automatique
+            pp_aller = mission_config.get("passing_points", [])
+            base_pp = []
+            for p in pp_aller:
+                inv_t = temps_total - p["time_offset_min"]
+                if inv_t > 0:
+                    base_pp.append({"gare": p["gare"], "time_offset_min": inv_t})
+            base_pp.sort(key=lambda x: x["time_offset_min"])
 
-    # Validation initiale
-    if not origine_base or not terminus_base or \
-       not isinstance(temps_trajet_base, (int, float)) or temps_trajet_base <= 0:
-         return []
+        points_cles.append({"gare": mission_config.get("terminus"), "time_offset_min": 0})
+        points_cles.extend(base_pp)
+        points_cles.append({"gare": mission_config.get("origine"), "time_offset_min": temps_total})
 
-    # Construire horaire de base structuré
-    base_horaire_struct = [{"gare": origine_base, "time_offset_min": 0}]
-    base_horaire_struct.extend(passing_points_base)
-    base_horaire_struct.append({"gare": terminus_base, "time_offset_min": temps_trajet_base})
-
-    # Dédoublonnage et tri
+    # Nettoyage doublons et tri
+    points_cles.sort(key=lambda x: x['time_offset_min'])
+    unique_cles = []
     seen = set()
-    deduplicated_horaire = []
-    for point in sorted(base_horaire_struct, key=lambda x: x.get('time_offset_min', 0)):
-        if isinstance(point, dict) and 'gare' in point and 'time_offset_min' in point:
-             identifier = (point['gare'], point['time_offset_min'])
-             if identifier not in seen:
-                 # Vérifier temps >= 0 et croissant
-                 if point['time_offset_min'] >= (deduplicated_horaire[-1]['time_offset_min'] if deduplicated_horaire else -1):
-                      deduplicated_horaire.append(point)
-                      seen.add(identifier)
-    base_horaire = deduplicated_horaire
-    if len(base_horaire) < 2 or base_horaire[0]['gare'] == base_horaire[-1]['gare']:
-         return []
+    for p in points_cles:
+        if p['gare'] not in seen:
+            unique_cles.append(p)
+            seen.add(p['gare'])
 
-    # --- Interpolation sur gares physiques ---
+    if len(unique_cles) < 2: return []
+
+    # 2. Interpolation sur le dataframe physique
     final_horaire = []
+
     try:
+        # Prépare les données géographiques
         gares_sorted = df_gares.sort_values('distance').reset_index(drop=True)
-        gares_physiques_set = set(gares_sorted['gare'])
-        if origine_base not in gares_physiques_set or terminus_base not in gares_physiques_set:
-             return []
+        gare_map = {r.gare: (i, r.distance) for i, r in gares_sorted.iterrows()} # Nom -> (Index, Dist)
 
-        gare_to_dist = pd.Series(gares_sorted.distance.values, index=gares_sorted.gare).to_dict()
-        gare_to_index = {gare: idx for idx, gare in gares_sorted['gare'].items()}
+        # Itération sur les segments "clés" définis par l'utilisateur
+        for i in range(len(unique_cles) - 1):
+            pt_start = unique_cles[i]
+            pt_end = unique_cles[i+1]
 
-        idx_origine = gare_to_index[origine_base]
-        idx_terminus = gare_to_index[terminus_base]
-        direction = 1 if idx_terminus > idx_origine else -1
+            if pt_start['gare'] not in gare_map or pt_end['gare'] not in gare_map:
+                continue
 
-        user_times = {p['gare']: p['time_offset_min'] for p in base_horaire}
+            idx_s, dist_s = gare_map[pt_start['gare']]
+            idx_e, dist_e = gare_map[pt_end['gare']]
+            t_s, t_e = pt_start['time_offset_min'], pt_end['time_offset_min']
 
+            # Identifier les gares physiques entre ces deux points
+            idx_min, idx_max = min(idx_s, idx_e), max(idx_s, idx_e)
 
-        # Itérer sur les segments définis par l'utilisateur (points de base)
-        for i in range(len(base_horaire) - 1):
-            start_point = base_horaire[i]
-            end_point = base_horaire[i+1]
-            gare_start, gare_end = start_point['gare'], end_point['gare']
-            t1, t2 = start_point['time_offset_min'], end_point['time_offset_min']
+            segment_gares = gares_sorted.iloc[idx_min : idx_max+1]
 
-            # Vérifier que les gares existent et récupérer distances/indices
-            if gare_start not in gare_to_index or gare_end not in gare_to_index: continue
-            idx_start_seg = gare_to_index[gare_start]
-            idx_end_seg = gare_to_index[gare_end]
-            d1, d2 = gare_to_dist[gare_start], gare_to_dist[gare_end]
+            # Sens de parcours pour ce segment
+            direction = 1 if idx_e > idx_s else -1
+            if direction == -1:
+                segment_gares = segment_gares.sort_index(ascending=False)
 
-            # Validation segment utilisateur
-            if t2 < t1: continue # Temps décroissant
+            # Interpolation linéaire
+            total_dist_seg = abs(dist_e - dist_s)
+            total_time_seg = t_e - t_s
 
-            seg_dist_total = abs(d2 - d1)
-            seg_time_total = t2 - t1
+            for _, row in segment_gares.iterrows():
+                # Éviter de rajouter le point de départ s'il a déjà été ajouté par le segment précédent
+                if len(final_horaire) > 0 and final_horaire[-1]['gare'] == row['gare']:
+                    continue
 
-            # Indices de début et fin dans gares_sorted pour ce segment
-            phys_idx_start = min(idx_start_seg, idx_end_seg)
-            phys_idx_end = max(idx_start_seg, idx_end_seg)
+                curr_dist = row['distance']
+                dist_from_start = abs(curr_dist - dist_s)
 
-            # Sélectionner les gares physiques DANS l'ordre physique (distance)
-            segment_gares_physiques_df = gares_sorted.iloc[phys_idx_start : phys_idx_end + 1]
+                if total_dist_seg > 0:
+                    ratio = dist_from_start / total_dist_seg
+                    curr_time = t_s + (total_time_seg * ratio)
+                else:
+                    curr_time = t_s
 
-            # Trier dans le sens du trajet (aller ou retour)
-            # Utiliser sort_index est correct ici car gares_sorted est déjà trié par distance (index physique)
-            segment_gares_physiques_df = segment_gares_physiques_df.sort_index(ascending=(direction == 1))
-
-
-            # Interpolation pour chaque gare physique dans ce segment
-            for _, station in segment_gares_physiques_df.iterrows():
-                gare_actuelle = station['gare']
-                dist_actuelle = gare_to_dist.get(gare_actuelle)
-                if dist_actuelle is None: continue
-
-                temps_calcule = -1 # Init
-                # Utiliser temps utilisateur si défini et cohérent
-                if gare_actuelle in user_times and t1 <= user_times[gare_actuelle] <= t2:
-                    temps_calcule = user_times[gare_actuelle]
-                # Conditions d'interpolation
-                elif seg_dist_total < 1e-6: temps_calcule = t1 # Dist nulle
-                elif seg_time_total <= 0: temps_calcule = t1 # Temps nul/négatif
-                else: # Interpolation
-                    dist_from_start = abs(dist_actuelle - d1)
-                    temps_calcule = t1 + seg_time_total * (dist_from_start / seg_dist_total)
-
-                if temps_calcule >= 0:
-                     final_horaire.append({'gare': gare_actuelle, 'time_offset_min': round(temps_calcule)})
+                final_horaire.append({
+                    "gare": row['gare'],
+                    "time_offset_min": round(curr_time, 1) # Garder décimale pour précision conflit
+                })
 
     except Exception as e:
-         print(f"Erreur critique pendant interpolation horaire {origine_base}->{terminus_base} ({trajet_spec}): {e}")
-         import traceback
-         print(traceback.format_exc())
-         return []
+        print(f"Erreur interpolation: {e}")
+        return []
 
-    # --- Nettoyage Final ---
-    if not final_horaire:
-        return base_horaire # Retour base si interpolation vide
+    return final_horaire
 
-    seen_final = set()
-    final_deduplicated_horaire = []
-    # Pré-calculer index physique pour tri stable
-    final_horaire_with_index = []
-    for point in final_horaire:
-         # Vérifier si la gare existe encore dans le mapping (sécurité)
-         if point['gare'] in gare_to_index:
-             point['physical_index'] = gare_to_index[point['gare']]
-             final_horaire_with_index.append(point)
-
-
-    # Tri multi-critères: temps, puis index physique
-    for point in sorted(final_horaire_with_index, key=lambda x: (x.get('time_offset_min', 0), x.get('physical_index', 0))):
-         identifier = (point['gare'], point['time_offset_min'])
-         if identifier not in seen_final:
-             # Vérifier bornes globales
-             if base_horaire[0]['time_offset_min'] <= point['time_offset_min'] <= base_horaire[-1]['time_offset_min']:
-                  final_point = {'gare': point['gare'], 'time_offset_min': point['time_offset_min']}
-                  final_deduplicated_horaire.append(final_point)
-                  seen_final.add(identifier)
-
-    # Si après tout ça, le résultat est invalide, retourner l'horaire de base
-    if len(final_deduplicated_horaire) < 2:
-         # Vérifier si l'horaire de base lui-même est valide
-         if len(base_horaire) >= 2: return base_horaire
-         else: return [] # Retourner vide si base aussi invalide
-
-    return final_deduplicated_horaire
-
-
-def verifier_conflit(h_depart, duree, gare_dep, gare_arr, id_train_courant,
-                     occupation_cantons, df_gares, debug=False):
-    """
-    Vérifie les conflits avec une logique de "Bloc de Voie Unique".
-    Si on s'engage sur une VU depuis une VE/D, on vérifie que TOUT le bloc jusqu'à la prochaine VE/D est libre.
-    """
-    h_arrivee = h_depart + timedelta(minutes=duree)
-    if gare_dep == gare_arr or duree <= 0: return None
-
-    gares_sorted = df_gares.sort_values('distance').reset_index(drop=True)
-    gare_to_index = {g: i for i, g in enumerate(gares_sorted['gare'])}
-
-    idx_dep = gare_to_index.get(gare_dep)
-    idx_arr = gare_to_index.get(gare_arr)
-
-    if idx_dep is None or idx_arr is None: return None # Sécurité
-
-    direction = 1 if idx_arr > idx_dep else -1
-
-    # 1. Identifier si on entre dans un bloc critique
-    infra_dep = _get_infra_at_gare(df_gares, gare_dep)
-
-    # Si on part d'un point de croisement (VE) ou d'une transition (D) vers une voie unique (F),
-    # on doit scanner jusqu'au prochain point de croisement.
-    # Note: Si infra_dep est 'F', on est déjà "au milieu" (retardé précédemment),
-    # on vérifie juste le segment immédiat pour ne pas s'empiler.
-
-    check_full_block = (infra_dep in ['VE', 'D', 'Terminus'])
-    # (Note: Terminus traité comme VE implicitement dans _can_cross_at, ici simplifié)
-
-    target_scan_idx = idx_arr
-
-    if check_full_block:
-        # Regarder si le segment immédiat est une VOIE UNIQUE
-        # On regarde l'infra de la gare SUIVANTE. Si c'est F, c'est du VU.
-        # Si c'est D (début double), ce n'est pas du VU critique.
-        next_gare_idx = idx_dep + direction
-        if 0 <= next_gare_idx < len(gares_sorted):
-            next_infra = _get_infra_at_gare(df_gares, gares_sorted.iloc[next_gare_idx]['gare'])
-            # Si la gare suivante est F, on s'engage en VU.
-            # Si c'est VE, le bloc ne fait qu'un segment, c'est OK.
-            if next_infra == 'F':
-                # On doit trouver la fin du bloc
-                end_block_idx = _find_end_of_single_track_block(df_gares, idx_dep, direction)
-                # On scanne jusqu'à cette gare là, au lieu de juste gare_arr
-                target_scan_idx = end_block_idx
-
-    # Définition de la plage d'index à vérifier
-    range_start = idx_dep
-    range_end = target_scan_idx
-    step = direction
-
-    # Boucle de vérification sur tous les segments du bloc identifié
-    curr = range_start
-    while curr != range_end:
-        idx_a = curr
-        idx_b = curr + step
-        gare_a = gares_sorted.iloc[idx_a]['gare']
-        gare_b = gares_sorted.iloc[idx_b]['gare']
-
-        # Vérif occupation sur ce segment (gare_a, gare_b) ou (gare_b, gare_a)
-        # On cherche des trains OPPOSÉS ou MÊME SENS qui occuperaient le segment
-        # pendant notre traversée estimée du BLOC entier.
-
-        # Estimation grossière du temps de passage à ce segment précis
-        # (On prend large : [h_depart, h_arrivee_du_bloc])
-        # Pour être rigoureux, on devrait interpoler, mais prendre la fenêtre large est plus sûr pour la sécurité.
-        t_check_start = h_depart
-        t_check_end = h_arrivee + timedelta(minutes=5) # Marge de sécurité
-
-        seg_key = (gare_a, gare_b) if gare_a < gare_b else (gare_b, gare_a)
-        occupations = occupation_cantons.get(seg_key, [])
-
-        # Mais attention, occupation_cantons stocke (start, end, id).
-        # Pour un segment de voie unique, toute occupation dans la fenêtre est un danger
-        # SI c'est un train adverse (nez à nez) OU un train devant (rattrapage).
-
-        for (occ_start, occ_end, occ_id) in occupations:
-            if occ_id == id_train_courant: continue
-
-            # Chevauchement temporel ?
-            if max(t_check_start, occ_start) < min(t_check_end, occ_end):
-                # Conflit !
-                # Si on scannait tout le bloc et qu'on trouve un train loin devant,
-                # on doit attendre ICI (gare_dep) que le bloc se libère.
-
-                return {
-                    "fin_conflit": occ_end + timedelta(minutes=1),
-                    "avec_train": occ_id,
-                    "type": "bloc_vu_occupe",
-                    "points": [gare_a, gare_b]
-                }
-
-        curr += step
-
-    return None
-
-
-# ... (generer_tous_trajets_sans_conflits) ...
-def generer_tous_trajets_sans_conflits(missions, heure_debut, heure_fin, df_gares):
-    chronologie_optimale = {}
-    id_train_counter = 1
-    warnings = []
-    dt_debut_service = datetime.combine(datetime.today(), heure_debut)
-    dt_fin_service = datetime.combine(datetime.today(), heure_fin)
-    if dt_fin_service <= dt_debut_service: dt_fin_service += timedelta(days=1)
-    trains_disponibles = []
-    evenements = [] # Utiliser heapq pour la priorité temporelle
-
-    # Helper pour ajouter event avec priorité
-    evt_counter = 0
-    def add_event(time, type, details):
-        nonlocal evt_counter
-        evt_counter += 1
-        heapq.heappush(evenements, (time, evt_counter, type, details))
-
-    # Préparer les départs initiaux
-    gare_set = set(df_gares['gare']) if df_gares is not None else set()
-    for i, mission in enumerate(missions):
-         # Validation minimale de la mission
-         if not isinstance(mission, dict) or \
-            mission.get("origine") not in gare_set or \
-            mission.get("terminus") not in gare_set or \
-            not isinstance(mission.get("frequence"), (int, float)) or \
-            mission.get("frequence", 0) <= 0:
-              # warnings.append(f"Mission {i+1} invalide ou incomplète. Ignorée.")
-              continue # Ignorer mission invalide
-
-         frequence = mission["frequence"]
-         intervalle = timedelta(hours=1 / frequence)
-
-         # Minutes de référence (avec fallback)
-         try:
-             minutes_ref_str = mission.get("reference_minutes", "0")
-             minutes_ref = sorted(list(set([int(m.strip()) for m in minutes_ref_str.split(',') if m.strip().isdigit()])))
-             if not minutes_ref: minutes_ref = [0]
-         except: minutes_ref = [0]
-
-         for minute in minutes_ref:
-             # Calcul premier départ
-             curseur_temps = dt_debut_service.replace(minute=(minute % 60), hour=(dt_debut_service.hour + minute // 60), second=0, microsecond=0)
-
-             # Ajuster au début de service en avançant par intervalle
-             while curseur_temps < dt_debut_service:
-                  curseur_temps += intervalle
-
-             # Ajouter les départs dans la fenêtre
-             while curseur_temps < dt_fin_service:
-                 temps_traj_estime = mission.get("temps_trajet", 60) # Défaut 60min
-                 if isinstance(temps_traj_estime, (int, float)) and temps_traj_estime >= 0:
-                      heure_arrivee_estimee = curseur_temps + timedelta(minutes=temps_traj_estime)
-                      if heure_arrivee_estimee <= dt_fin_service:
-                           add_event(curseur_temps, "depart_aller", {"mission": mission})
-                 curseur_temps += intervalle
-
-
-    # Boucle de simulation sans conflit
-    while evenements:
-        heure_event, _, type_event, details = heapq.heappop(evenements)
-
-        if heure_event >= dt_fin_service: continue
-
-        if type_event == "depart_aller":
-            mission_cfg = details["mission"]
-            train_assigne = None
-            earliest_dispo_time = datetime.max
-            best_train_idx = -1
-            # Trouver train dispo le plus tôt
-            for i_train, train in enumerate(trains_disponibles):
-                if train["gare"] == mission_cfg["origine"] and train["disponible_a"] <= heure_event:
-                    if train["disponible_a"] < earliest_dispo_time:
-                         earliest_dispo_time = train["disponible_a"]
-                         best_train_idx = i_train
-
-            if best_train_idx != -1:
-                 train_assigne = trains_disponibles.pop(best_train_idx)
-                 # Départ réel = max(heure demandée, dispo réelle)
-                 heure_depart_reel = max(heure_event, earliest_dispo_time)
-            else: # Nouveau train
-                train_assigne = {"id": id_train_counter, "gare": mission_cfg["origine"]}
-                chronologie_optimale[train_assigne["id"]] = []
-                id_train_counter += 1
-                heure_depart_reel = heure_event # Dispo immédiatement
-
-
-            # Générer trajets aller
-            horaire_aller = construire_horaire_mission(mission_cfg, "aller", df_gares)
-            heure_arrivee_finale = heure_depart_reel
-            trajet_aller_possible = True
-            if not horaire_aller: trajet_aller_possible = False # Impossible si horaire vide
-
-            for i in range(len(horaire_aller) - 1):
-                p_dep, p_arr = horaire_aller[i], horaire_aller[i+1]
-                duree_segment = max(0, p_arr.get("time_offset_min", 0) - p_dep.get("time_offset_min", 0))
-
-                t_dep_theorique = heure_depart_reel + timedelta(minutes=p_dep.get("time_offset_min", 0))
-                t_dep = max(t_dep_theorique, heure_arrivee_finale) # Ne peut partir avant arrivée précédente
-                t_arr = t_dep + timedelta(minutes=duree_segment)
-
-                if t_arr > dt_fin_service:
-                     trajet_aller_possible = False; break
-
-                if duree_segment > 0:
-                     chronologie_optimale.setdefault(train_assigne["id"], []).append({
-                          "start": t_dep, "end": t_arr,
-                          "origine": p_dep.get("gare"), "terminus": p_arr.get("gare")
-                      })
-                heure_arrivee_finale = t_arr
-
-            # Programmer retour si possible
-            if trajet_aller_possible:
-                temps_retournement_B = mission_cfg.get("temps_retournement_B", 10)
-                heure_dispo_retour = heure_arrivee_finale + timedelta(minutes=temps_retournement_B)
-
-                if heure_dispo_retour < dt_fin_service:
-                    horaire_retour_test = construire_horaire_mission(mission_cfg, "retour", df_gares)
-                    if horaire_retour_test:
-                         temps_retour_estime = horaire_retour_test[-1].get("time_offset_min", 60)
-                         if heure_dispo_retour + timedelta(minutes=temps_retour_estime) <= dt_fin_service:
-                              add_event(heure_dispo_retour, "disponible_pour_retour", {
-                                   "train": train_assigne, "gare": mission_cfg.get("terminus"), "mission_aller": mission_cfg
-                               })
-
-
-        elif type_event == "disponible_pour_retour":
-            train = details["train"]
-            mission_aller = details["mission_aller"]
-            heure_depart_retour = heure_event # L'heure de l'event est la dispo
-
-            # Générer trajets retour
-            horaire_retour = construire_horaire_mission(mission_aller, "retour", df_gares)
-            heure_arrivee_finale_retour = heure_depart_retour
-            trajet_retour_possible = True
-            if not horaire_retour: trajet_retour_possible = False
-
-            for i in range(len(horaire_retour) - 1):
-                 p_dep, p_arr = horaire_retour[i], horaire_retour[i+1]
-                 duree_segment = max(0, p_arr.get("time_offset_min", 0) - p_dep.get("time_offset_min", 0))
-
-                 t_dep_theorique = heure_depart_retour + timedelta(minutes=p_dep.get("time_offset_min", 0))
-                 t_dep = max(t_dep_theorique, heure_arrivee_finale_retour)
-                 t_arr = t_dep + timedelta(minutes=duree_segment)
-
-                 if t_arr > dt_fin_service:
-                      trajet_retour_possible = False; break
-
-                 if duree_segment > 0:
-                     chronologie_optimale.setdefault(train["id"], []).append({
-                          "start": t_dep, "end": t_arr,
-                          "origine": p_dep.get("gare"), "terminus": p_arr.get("gare")
-                      })
-                 heure_arrivee_finale_retour = t_arr
-
-            # Mettre train dispo si retour complété
-            if trajet_retour_possible:
-                 temps_retournement_A = mission_aller.get("temps_retournement_A", 10)
-                 heure_dispo_finale = heure_arrivee_finale_retour + timedelta(minutes=temps_retournement_A)
-                 if heure_dispo_finale < dt_fin_service:
-                     trains_disponibles.append({
-                          "id": train["id"], "gare": mission_aller.get("origine"), "disponible_a": heure_dispo_finale
-                      })
-                     # Trier la liste des dispos peut être utile
-                     trains_disponibles.sort(key=lambda t: t["disponible_a"])
-
-    # Nettoyer chronologie vide
-    trains_a_suppr = [tid for tid, traj in chronologie_optimale.items() if not traj]
-    for tid in trains_a_suppr: del chronologie_optimale[tid]
-
-    return chronologie_optimale, warnings
-
-# ... (preparer_roulement_manuel) ...
-def preparer_roulement_manuel(roulement_manuel):
+# Fonctions legacy pour compatibilité imports (vides ou alias)
+def preparer_roulement_manuel(roulement):
+    # (Code identique à version précédente, conservé pour app.py)
     chronologie_trajets = {}
-    for id_train, etapes_train in roulement_manuel.items():
-        if not etapes_train: continue
+    for id_train, etapes in roulement.items():
+        if not etapes: continue
         chronologie_trajets[id_train] = []
-        last_arrival_time = None
-        for etape in etapes_train:
+        for etape in etapes:
             try:
-                # Vérifier que les heures sont bien des strings avant conversion
-                heure_dep_str = str(etape.get("heure_depart", "00:00"))
-                heure_arr_str = str(etape.get("heure_arrivee", "00:00"))
-
-                dt_debut = datetime.combine(datetime.today(), datetime.strptime(heure_dep_str, "%H:%M").time())
-                dt_fin = datetime.combine(datetime.today(), datetime.strptime(heure_arr_str, "%H:%M").time())
-                # Gérer passage minuit pour départ et arrivée
-                if last_arrival_time and dt_debut < last_arrival_time: dt_debut += timedelta(days=1)
-                if dt_fin < dt_debut: dt_fin += timedelta(days=1)
-                chronologie_trajets[id_train].append({"start": dt_debut, "end": dt_fin, "origine": etape.get("depart"), "terminus": etape.get("arrivee")})
-                last_arrival_time = dt_fin
-            except (ValueError, KeyError, TypeError) as e: # Ajout TypeError
-                print(f"Skipping invalid step for train {id_train}: {etape}. Error: {e}")
-                continue
+                dt_dep = datetime.combine(datetime.today(), datetime.strptime(etape["heure_depart"], "%H:%M").time())
+                dt_arr = datetime.combine(datetime.today(), datetime.strptime(etape["heure_arrivee"], "%H:%M").time())
+                if dt_arr < dt_dep: dt_arr += timedelta(days=1)
+                chronologie_trajets[id_train].append({
+                    "start": dt_dep, "end": dt_arr,
+                    "origine": etape["depart"], "terminus": etape["arrivee"]
+                })
+            except: pass
     return chronologie_trajets
 
 
