@@ -22,7 +22,14 @@ from energy_logic import get_default_energy_params, calculer_consommation_trajet
 
 # --- Configuration de la page et initialisation de l'état de session ---
 st.set_page_config(layout="wide")
+
+# --- AJOUT DU LOGO (Haut gauche dans la sidebar) ---
+logo_url = "logo.png"
+st.image(logo_url, width=500)
+
+
 st.title("Graphique horaire ferroviaire - Prototype")
+
 
 # État de session (variables globales de l'application)
 if "gares" not in st.session_state: st.session_state.gares = None
@@ -224,7 +231,7 @@ if st.session_state.get('gares') is not None:
     # Le mode de génération n'est affiché qu'en mode "Standard"
     mode_generation = "Rotation optimisée" # Par défaut pour le mode Énergie
     if mode_calcul == "Standard":
-        mode_generation = st.radio("Mode de génération des trains", ["Manuel", "Rotation optimisée"])
+        mode_generation = st.radio("Mode de génération des trains", ["Manuel", "Rotation optimisée"],index=1)
     else:
         st.info("Le mode 'Calcul Energie' utilise la génération par 'Rotation optimisée' pour simuler les trajets.")
 
@@ -280,7 +287,7 @@ if st.session_state.get('gares') is not None:
             if mode_generation == "Rotation optimisée" or mode_calcul == "Calcul Energie":
                 ref_minutes = cols[2].text_input(
                     f"Minute(s) de réf. M{i+1}",
-                    mission.get("reference_minutes", "0,30"),
+                    mission.get("reference_minutes", "0"),
                     key=f"ref_mins{i}",
                     help="Minutes de départ après le début de chaque heure (ex: '15,45'). Peut être > 59 pour décaler (ex: '75' pour un départ à H+1h15)."
                 )
