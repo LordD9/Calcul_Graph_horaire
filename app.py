@@ -32,10 +32,7 @@ st.set_page_config(layout="wide")
 
 # --- AJOUT DU LOGO (Haut gauche dans la sidebar) ---
 logo_url = "logo.png"
-try:
-    st.sidebar.image(logo_url, width=200)
-except:
-    pass
+st.image(logo_url, width=500)
 
 
 st.title("Graphique horaire ferroviaire - Prototype")
@@ -867,7 +864,7 @@ if st.session_state.get('gares') is not None:
 
         # --- Affichage Homogénéité (NOUVEAU) ---
         if st.session_state.stats_homogeneite:
-            st.subheader("📊 Qualité du Cadencement")
+            st.subheader("Qualité du Cadencement")
             st.info("Indice d'homogénéité (Gini inverse) : 1.00 = Intervalles parfaitement réguliers.")
             stats = st.session_state.stats_homogeneite
             cols_metric = st.columns(4)
