@@ -15,7 +15,14 @@ import re # Import re, bien que les helpers soient supprimés
 
 # Import des modules locaux
 from utils import trouver_mission_pour_od, obtenir_temps_trajet_defaut_etape_manuelle, obtenir_temps_retournement_defaut
-from core_logic import generer_tous_trajets_optimises, preparer_roulement_manuel, importer_roulements_fichier, analyser_frequences_manuelles, generer_exports, construire_horaire_mission_cached
+from core_logic import (
+    generer_tous_trajets_optimises,
+    preparer_roulement_manuel,
+    importer_roulements_fichier,
+    analyser_frequences_manuelles,
+    generer_exports,
+    construire_horaire_mission_cached
+)
 from plotting import creer_graphique_horaire, creer_graphique_batterie
 from energy_logic import get_default_energy_params, calculer_consommation_trajet
 
@@ -25,7 +32,10 @@ st.set_page_config(layout="wide")
 
 # --- AJOUT DU LOGO (Haut gauche dans la sidebar) ---
 logo_url = "logo.png"
-st.image(logo_url, width=500)
+try:
+    st.sidebar.image(logo_url, width=200)
+except:
+    pass
 
 
 st.title("Graphique horaire ferroviaire - Prototype")
@@ -36,6 +46,9 @@ if "gares" not in st.session_state: st.session_state.gares = None
 if "missions" not in st.session_state: st.session_state.missions = []
 if "roulement_manuel" not in st.session_state: st.session_state.roulement_manuel = {}
 if "mode_calcul" not in st.session_state: st.session_state.mode_calcul = "Standard"
+if "chronologie_calculee" not in st.session_state: st.session_state.chronologie_calculee = None
+if "stats_homogeneite" not in st.session_state: st.session_state.stats_homogeneite = {}
+
 # Initialise avec les paramètres par défaut si nécessaire
 default_params = get_default_energy_params()
 if "energy_params" not in st.session_state: st.session_state.energy_params = {
@@ -263,6 +276,7 @@ if st.session_state.get('gares') is not None:
             origine = cols[0].selectbox(f"Origine M{i+1}", gares_list, index=gares_list.index(mission.get("origine", gares_list[0])) if mission.get("origine") in gares_list else 0, key=f"orig{i}")
             terminus = cols[0].selectbox(f"Terminus M{i+1}", gares_list, index=gares_list.index(mission.get("terminus", gares_list[-1])) if mission.get("terminus") in gares_list else len(gares_list)-1, key=f"term{i}")
 
+
             frequence = cols[1].number_input(f"Fréquence (train/h) M{i+1}", 0.1, 10.0, mission.get("frequence", 1.0), 0.1, key=f"freq{i}")
 
             # Ce temps est utilisé par core_logic pour le planning
@@ -291,6 +305,14 @@ if st.session_state.get('gares') is not None:
                     key=f"ref_mins{i}",
                     help="Minutes de départ après le début de chaque heure (ex: '15,45'). Peut être > 59 pour décaler (ex: '75' pour un départ à H+1h15)."
                 )
+
+            # --- NOUVEAUTÉ : INJECTION TERMINUS 2 ---
+            inject_t2 = st.checkbox(
+                f"Autoriser l'injection de nouvelles rames depuis {terminus} (Terminus 2)",
+                value=mission.get("inject_from_terminus_2", False),
+                key=f"inj_t2_{i}",
+                help="Cochez cette case pour autoriser le système à injecter des trains au départ du terminus retour si aucune rame n'est disponible depuis l'aller."
+            )
 
             st.markdown("**Points de passage optionnels :**")
             trajet_asymetrique = st.checkbox("Saisir un temps/parcours différent pour le retour", mission.get("trajet_asymetrique", False), key=f"asym_{i}")
@@ -441,6 +463,7 @@ if st.session_state.get('gares') is not None:
                 "passing_points_retour": sorted(passing_points_retour, key=lambda x: x['time_offset_min']),
                 "pp_raw_text": mission.get("pp_raw_text", ""),
                 "type_materiel": type_materiel,
+                "inject_from_terminus_2": inject_t2
             }
 
     # --- SECTION 4: Mode Manuel (uniquement en mode Standard) ---
@@ -735,27 +758,28 @@ if st.session_state.get('gares') is not None:
 
         chronologie = {}
         warnings = {}
+        homogeneite = {}
         st.session_state.energy_errors = []
 
         try:
             with st.spinner(spinner_text):
-                if mode_calcul == "Standard" and mode_generation == "Rotation optimisée":
-                    chronologie, warnings = generer_tous_trajets_optimises(st.session_state.missions, heure_debut_service, heure_fin_service, dataframe_gares)
-                elif mode_calcul == "Standard" and mode_generation == "Manuel":
+                if mode_generation == "Rotation optimisée" or mode_calcul == "Calcul Energie":
+                    chronologie, warnings, homogeneite = generer_tous_trajets_optimises(st.session_state.missions, heure_debut_service, heure_fin_service, dataframe_gares)
+                elif mode_generation == "Manuel":
                     chronologie = preparer_roulement_manuel(st.session_state.roulement_manuel)
                     warnings = {"infra_violations": [], "other": []} # Pas de détection de conflit en manuel
-                elif mode_calcul == "Calcul Energie":
-                    # En mode énergie, on utilise toujours le générateur optimisé
-                    chronologie, warnings = generer_tous_trajets_optimises(st.session_state.missions, heure_debut_service, heure_fin_service, dataframe_gares)
+                    homogeneite = {}
 
             st.session_state.chronologie_calculee = chronologie
             st.session_state.warnings_calcul = warnings
+            st.session_state.stats_homogeneite = homogeneite
             st.success("Calcul des horaires terminé.")
 
         except Exception as e:
             st.error(f"Une erreur est survenue lors de la génération du graphique : {e}")
             st.session_state.chronologie_calculee = None
             st.session_state.warnings_calcul = {}
+            st.session_state.stats_homogeneite = {}
             st.stop()
 
     # Affichage des résultats si un calcul a été fait
@@ -840,6 +864,20 @@ if st.session_state.get('gares') is not None:
                     st.warning(f"**{len(other_warns)} autre(s) avertissement(s)**")
                     for w in other_warns:
                         st.write(f"- {w}")
+
+        # --- Affichage Homogénéité (NOUVEAU) ---
+        if st.session_state.stats_homogeneite:
+            st.subheader("📊 Qualité du Cadencement")
+            st.info("Indice d'homogénéité (Gini inverse) : 1.00 = Intervalles parfaitement réguliers.")
+            stats = st.session_state.stats_homogeneite
+            cols_metric = st.columns(4)
+            for i, (mission_key, val) in enumerate(stats.items()):
+                with cols_metric[i % 4]:
+                    st.metric(
+                        label=mission_key.replace("Mission", "M"),
+                        value=f"{val:.2f}",
+                        delta="Bon" if val > 0.9 else "Irrégulier" if val < 0.8 else None
+                    )
 
         # --- Affichage du Graphique ---
         st.subheader("Graphique horaire")
@@ -946,4 +984,3 @@ if st.session_state.get('gares') is not None:
 
 else:
     st.warning("Veuillez d'abord définir et valider les gares à la section 1.")
-
