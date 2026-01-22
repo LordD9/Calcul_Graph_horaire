@@ -3,7 +3,9 @@
 plotting.py - Version "Lignes pures"
 
 Tracé du graphique horaire en respectant les temps RÉELS générés par core_logic.
-Modification : Suppression totale des points (ronds). Seules les lignes sont tracées.
+Principe :
+- en mode standard : tracé linéaire simple entre start et end
+- en mode calcul energie : tracé physique (accel / cruise / décel) basé sur la vitesse réel du segment
 """
 
 import matplotlib.pyplot as plt
@@ -29,8 +31,27 @@ def creer_graphique_horaire(
     all_energy_params=None
 ):
     """
-    Crée le graphique horaire (graphique espace-temps).
-    Version modifiée : Aucun point (marker), uniquement des lignes.
+    Args:
+
+        chronologie_trajets: Dict {id_train: [liste de trajets]}
+
+        chaque trajet contient "start", "end", "origine", "terminus"
+
+
+        df_gares: DataFrame des gares avec distances et infrastructure
+
+
+        heure_debut_service: time object pour le début du service
+
+
+        params_affichage: Dict avec 'duree_fenetre' et 'decalage_heure'
+
+
+        mode_calcul: "Standard" ou "Calcul Energie"
+
+
+        missions_par_train: Dict {id_train: mission} pour connaître le matériel
+
     """
     df_gares_triees = df_gares.sort_values("distance", ascending=True).reset_index(drop=True)
     gare_vers_distance = {row["gare"]: row["distance"] for _, row in df_gares_triees.iterrows()}

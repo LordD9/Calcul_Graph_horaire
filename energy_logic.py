@@ -26,21 +26,21 @@ def get_default_energy_params():
     basée sur les analyses et la nouvelle physique (Davis).
     """
     return {
-        "masse_tonne": 100,
-        "capacite_batterie_kwh": 600, # Basé sur l'analyse train actuel
+        "masse_tonne": 50,
+        "capacite_batterie_kwh": 800, # Basé sur l'analyse train actuel
         "facteur_charge_C": 4.0, # Facteur de charge max (XC)
         "recuperation_pct": 65, # Basé sur l'analyse
 
         # Coeff de Davis (Force en Newtons par tonne)
-        "davis_A_N_t": 20.0,  # Résistance mécanique (N/t)
-        "davis_B_N_t_kph": 0.5, # Résistance roulements (N/t/kph)
-        "davis_C_N_t_kph2": 0.005, # Résistance aéro (N/t/kph^2)
+        "davis_A_N_t": 16.0  # Résistance mécanique (N/t)
+        "davis_B_N_t_kph": 0.115, # Résistance roulements (N/t/kph)
+        "davis_C_N_t_kph2": 0,0042, # Résistance aéro (N/t/kph^2)
 
         # Performance (caractéristiques du matériel)
         "accel_ms2": 0.5,
         "decel_ms2": 0.8,
 
-        "facteur_aux_kwh_h": 50.0,
+        "facteur_aux_kwh_h": 20.0,
 
         # Rendements (basés sur l'analyse)
         "rendement_thermique_pct": 38,
