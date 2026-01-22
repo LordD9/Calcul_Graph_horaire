@@ -34,7 +34,7 @@ def get_default_energy_params():
         # Coeff de Davis (Force en Newtons par tonne)
         "davis_A_N_t": 16.0  # Résistance mécanique (N/t)
         "davis_B_N_t_kph": 0.115, # Résistance roulements (N/t/kph)
-        "davis_C_N_t_kph2": 0,0042, # Résistance aéro (N/t/kph^2)
+        "davis_C_N_t_kph2": 0.0042, # Résistance aéro (N/t/kph^2)
 
         # Performance (caractéristiques du matériel)
         "accel_ms2": 0.5,
