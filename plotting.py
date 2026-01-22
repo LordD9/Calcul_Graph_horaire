@@ -1,15 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-plotting.py - Version corrigée
+plotting.py - Version "Lignes pures"
 
 Tracé du graphique horaire en respectant les temps RÉELS générés par core_logic.
-
-Principe :
-- En mode Standard : tracé linéaire simple entre start et end
-- En mode Calcul Energie : tracé physique (accel/cruise/decel) basé sur la vitesse
-  calculée pour respecter le temps réel du segment
-
-
+Modification : Suppression totale des points (ronds). Seules les lignes sont tracées.
 """
 
 import matplotlib.pyplot as plt
@@ -36,16 +30,7 @@ def creer_graphique_horaire(
 ):
     """
     Crée le graphique horaire (graphique espace-temps).
-
-    Args:
-        chronologie_trajets: Dict {id_train: [liste de trajets]}
-                            Chaque trajet contient "start", "end", "origine", "terminus"
-        df_gares: DataFrame des gares avec distances et infrastructure
-        heure_debut_service: time object pour le début du service
-        params_affichage: Dict avec 'duree_fenetre' et 'decalage_heure'
-        mode_calcul: "Standard" ou "Calcul Energie"
-        missions_par_train: Dict {id_train: mission} pour connaître le matériel
-        all_energy_params: Dict {type_materiel: params} pour les calculs physiques
+    Version modifiée : Aucun point (marker), uniquement des lignes.
     """
     df_gares_triees = df_gares.sort_values("distance", ascending=True).reset_index(drop=True)
     gare_vers_distance = {row["gare"]: row["distance"] for _, row in df_gares_triees.iterrows()}
@@ -161,7 +146,8 @@ def creer_graphique_horaire(
 
         last_end_time = None
         last_end_dist = None
-        first_segment = True
+        # Indicateur pour placer le label sur le tout premier segment tracé
+        first_segment_to_label = True
 
         for j, trajet in enumerate(trajets_tries):
             if trajet["origine"] not in gare_vers_distance or trajet["terminus"] not in gare_vers_distance:
@@ -179,12 +165,6 @@ def creer_graphique_horaire(
                     [last_end_dist, start_dist_km],
                     linestyle='--', color=couleur_train, alpha=0.7, marker='None'
                 )
-                # Point de fin d'attente
-                ax_graph.plot(
-                    [trajet["start"]], [start_dist_km],
-                    linestyle='None', marker='o', markersize=4,
-                    color=couleur_train, alpha=0.7
-                )
                 v_precedente_kph = 0
 
             # ========== CAS 1 : ARRÊT ==========
@@ -195,27 +175,14 @@ def creer_graphique_horaire(
                     [start_dist_km, start_dist_km],
                     linestyle='--', color=couleur_train, alpha=0.7, marker='None'
                 )
-                # Point de fin d'arrêt
-                ax_graph.plot(
-                    [trajet["end"]], [start_dist_km],
-                    linestyle='None', marker='o', markersize=4,
-                    color=couleur_train, alpha=0.7
-                )
                 v_precedente_kph = 0
 
             # ========== CAS 2 : MOUVEMENT ==========
             elif start_dist_km != end_dist_km:
                 v_start_kph = v_precedente_kph
 
-                # Point de départ (uniquement pour le premier segment)
-                if first_segment:
-                    ax_graph.plot(
-                        [trajet["start"]], [start_dist_km],
-                        linestyle='None', marker='o', markersize=4,
-                        color=couleur_train, alpha=0.8,
-                        label=f"Train {id_train}"
-                    )
-                    first_segment = False
+                # Préparation du label (uniquement pour le premier segment du train)
+                label_arg = f"Train {id_train}" if first_segment_to_label else None
 
                 # Déterminer si arrêt après ce segment
                 is_explicit_stop_after = False
@@ -235,19 +202,18 @@ def creer_graphique_horaire(
                         [trajet["start"], trajet["end"]],
                         [start_dist_km, end_dist_km],
                         marker='None', color=couleur_train, linewidth=1.5,
+                        label=label_arg
                     )
-                    # Point de fin
-                    ax_graph.plot(
-                        [trajet["end"]], [end_dist_km],
-                        linestyle='None', marker='o', markersize=4,
-                        color=couleur_train, alpha=0.8
-                    )
+                    # Si on a tracé, on a utilisé le label
+                    if label_arg:
+                        first_segment_to_label = False
+
                     v_precedente_kph = 0 if is_explicit_stop_after else 50
 
                 else:
                     # ===== TRACÉ PHYSIQUE : Profil accel/cruise/decel =====
 
-                    # Temps RÉEL alloué (incluant délais éventuels)
+                    # Temps RÉEL alloué
                     temps_reel_sec = (trajet["end"] - trajet["start"]).total_seconds()
                     distance_m = abs(end_dist_km - start_dist_km) * 1000
                     dist_sign = 1 if end_dist_km > start_dist_km else -1
@@ -255,7 +221,7 @@ def creer_graphique_horaire(
                     # Vitesses cibles
                     v_end_kph_target = 0 if is_explicit_stop_after else v_start_kph
 
-                    # Calcul de la vitesse de croisière optimale pour le temps réel
+                    # Calcul de la vitesse de croisière optimale
                     v_cruise_kph = find_implicit_v_cruise(
                         distance_m, v_start_kph, v_end_kph_target,
                         params['accel_ms2'], params['decel_ms2'], temps_reel_sec
@@ -273,6 +239,14 @@ def creer_graphique_horaire(
                     current_time = trajet["start"]
                     current_dist_km = start_dist_km
 
+                    # Helper pour gérer le label sur le premier sous-segment visible
+                    def get_label():
+                        nonlocal first_segment_to_label
+                        if first_segment_to_label:
+                            first_segment_to_label = False
+                            return f"Train {id_train}"
+                        return None
+
                     # Phase Accélération
                     (d_a, t_a, v_a) = profile['accel']
                     if t_a > 0.1:
@@ -282,7 +256,8 @@ def creer_graphique_horaire(
                             [current_time, end_time_a],
                             [current_dist_km, end_dist_a],
                             marker='None', color=couleur_train,
-                            linewidth=1.5, alpha=0.8
+                            linewidth=1.5, alpha=0.8,
+                            label=get_label()
                         )
                         current_time = end_time_a
                         current_dist_km = end_dist_a
@@ -295,29 +270,23 @@ def creer_graphique_horaire(
                         ax_graph.plot(
                             [current_time, end_time_c],
                             [current_dist_km, end_dist_c],
-                            marker='None', color=couleur_train, linewidth=1.5
+                            marker='None', color=couleur_train, linewidth=1.5,
+                            label=get_label()
                         )
                         current_time = end_time_c
                         current_dist_km = end_dist_c
 
                     # Phase Décélération
                     (d_d, t_d, v_d) = profile['decel']
-                    # S'assurer qu'on arrive exactement à l'heure prévue
                     end_time_plot = trajet["end"]
                     if end_time_plot > current_time:
                         ax_graph.plot(
                             [current_time, end_time_plot],
                             [current_dist_km, end_dist_km],
                             marker='None', color=couleur_train,
-                            linewidth=1.5, alpha=0.8
+                            linewidth=1.5, alpha=0.8,
+                            label=get_label()
                         )
-
-                    # Point de fin du mouvement
-                    ax_graph.plot(
-                        [trajet["end"]], [end_dist_km],
-                        linestyle='None', marker='o', markersize=4,
-                        color=couleur_train, alpha=0.8
-                    )
 
                     v_precedente_kph = v_end_kph_real
 
@@ -406,8 +375,6 @@ def creer_graphique_batterie(batterie_log, train_id):
     fig, ax = plt.subplots(figsize=(10, 3))
 
     # Courbe principale
-    # step='post' permet de bien visualiser les paliers si on veut,
-    # mais 'plot' standard relie les points, ce qui est logique pour une batterie qui se décharge/charge continuement.
     ax.plot(times, socs, color='#2ca02c', linewidth=2, label='SoC (%)')
     ax.fill_between(times, socs, alpha=0.2, color='#2ca02c')
 
