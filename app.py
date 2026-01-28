@@ -12,6 +12,8 @@ import pandas as pd
 from datetime import datetime, timedelta
 import json
 import re # Import re, bien que les helpers soient supprimés
+from collections import defaultdict
+
 
 # Import des modules locaux
 from utils import trouver_mission_pour_od, obtenir_temps_trajet_defaut_etape_manuelle, obtenir_temps_retournement_defaut
@@ -21,7 +23,7 @@ from core_logic import (
     importer_roulements_fichier,
     analyser_frequences_manuelles,
     generer_exports,
-    construire_horaire_mission_cached
+    construire_horaire_mission
 )
 from plotting import creer_graphique_horaire, creer_graphique_batterie
 from energy_logic import get_default_energy_params, calculer_consommation_trajet
@@ -546,7 +548,7 @@ if st.session_state.get('gares') is not None:
                         mission_key = json.dumps(mission_associee, sort_keys=True) if mission_associee else None
 
                         if mission_associee:
-                            horaire_complet = construire_horaire_mission_cached(mission_key, "aller", df_gares_json)
+                            horaire_complet = construire_horaire_mission(mission_key, "aller", df_gares_json)
                         else:
                             horaire_complet = []
 
@@ -741,6 +743,39 @@ if st.session_state.get('gares') is not None:
     fenetre_heures = st.number_input("Durée de la fenêtre (h)", 1.0, duree_heures_s, min(5.0, duree_heures_s))
     decalage_heures = st.slider("Début de la fenêtre (h)", 0.0, max(0.0, duree_heures_s - fenetre_heures), 0.0, 0.5)
 
+    st.subheader("Options d'optimisation")
+
+    col_opt1, col_opt2 = st.columns(2)
+
+    with col_opt1:
+        allow_sharing = st.checkbox(
+            "Autoriser le partage des rames entre missions",
+            value=True,
+            key="allow_sharing_checkbox",
+            help="""
+            Si activé, les rames peuvent être réutilisées entre missions du MÊME type de matériel :
+            - ✅ Diesel avec Diesel
+            - ✅ Batterie avec Batterie
+            - ✅ Électrique avec Électrique
+            - ✅ Bimode avec Bimode
+            - ❌ JAMAIS entre types différents (ex: Diesel + Batterie)
+
+            Cela réduit le nombre total de rames nécessaires.
+            """
+        )
+
+    with col_opt2:
+        # Affichage du nombre attendu de rames (estimation)
+        if st.session_state.missions:
+            # Calcul approximatif du nombre de rames si pas de partage
+            nb_missions = len([m for m in st.session_state.missions if m.get("frequence", 0) > 0])
+            if nb_missions > 0:
+                if allow_sharing:
+                    st.info(f"📊 Partage activé : nombre de rames optimisé")
+                else:
+                    st.warning(f"⚠️ Sans partage : environ {nb_missions * 2}+ rames nécessaires")
+
+
     estimation = "N/A"
     if mode_generation == "Rotation optimisée" or mode_calcul == "Calcul Energie":
         estimation = estimer_temps_calcul(st.session_state.missions, heure_debut_service, heure_fin_service)
@@ -761,7 +796,14 @@ if st.session_state.get('gares') is not None:
         try:
             with st.spinner(spinner_text):
                 if mode_generation == "Rotation optimisée" or mode_calcul == "Calcul Energie":
-                    chronologie, warnings, homogeneite = generer_tous_trajets_optimises(st.session_state.missions, heure_debut_service, heure_fin_service, dataframe_gares)
+                    chronologie, warnings, stats_homogeneite = generer_tous_trajets_optimises(
+                        missions=st.session_state.missions,
+                        df_gares=st.session_state.gares,
+                        heure_debut=heure_debut_service,
+                        heure_fin=heure_fin_service,
+                        allow_sharing=allow_sharing  # NOUVEAU PARAMÈTRE
+                    )
+
                 elif mode_generation == "Manuel":
                     chronologie = preparer_roulement_manuel(st.session_state.roulement_manuel)
                     warnings = {"infra_violations": [], "other": []} # Pas de détection de conflit en manuel
@@ -769,7 +811,7 @@ if st.session_state.get('gares') is not None:
 
             st.session_state.chronologie_calculee = chronologie
             st.session_state.warnings_calcul = warnings
-            st.session_state.stats_homogeneite = homogeneite
+            st.session_state.stats_homogeneite = stats_homogeneite
             st.success("Calcul des horaires terminé.")
 
         except Exception as e:
@@ -783,6 +825,47 @@ if st.session_state.get('gares') is not None:
     if st.session_state.chronologie_calculee:
         chronologie = st.session_state.chronologie_calculee
         warnings = st.session_state.warnings_calcul
+
+        # Calcul des statistiques sur les rames utilisées
+        if chronologie:
+            nb_rames_total = len(set(chronologie.keys()))
+
+            # Comptage par type de matériel
+            rames_par_type = defaultdict(set)
+            for train_id in chronologie.keys():
+                # Trouver le type de matériel de ce train
+                for mission in st.session_state.missions:
+                    # Chercher dans les trajets pour identifier la mission
+                    # (cette partie nécessite d'enrichir les données retournées)
+                    pass
+
+            st.subheader("📊 Statistiques d'utilisation des rames")
+
+            col_stat1, col_stat2, col_stat3 = st.columns(3)
+
+            with col_stat1:
+                st.metric(
+                    label="Rames totales utilisées",
+                    value=nb_rames_total,
+                    help="Nombre total de rames différentes mobilisées"
+                )
+
+            with col_stat2:
+                nb_trains_total = sum(len(trajets) for trajets in chronologie.values())
+                st.metric(
+                    label="Trajets planifiés",
+                    value=nb_trains_total,
+                    help="Nombre total de trajets réalisés"
+                )
+
+            with col_stat3:
+                if nb_rames_total > 0:
+                    taux_utilisation = nb_trains_total / nb_rames_total
+                    st.metric(
+                        label="Trajets par rame",
+                        value=f"{taux_utilisation:.1f}",
+                        help="Nombre moyen de trajets par rame (indicateur d'efficacité)"
+                    )
 
         # --- Calcul énergétique (fait ici pour pouvoir remonter les erreurs) ---
         all_energy_errors = []
