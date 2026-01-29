@@ -608,23 +608,139 @@ class GeneticOptimizer:
         return best_solution, best_warnings, stats
     
     def _initialize_population(self) -> List[Dict]:
-        """Initialise la population de départ."""
-        population = []
+        """
+        Initialisation incrémentale - VERSION AMÉLIORÉE.
         
-        # Ajouter la solution par défaut
+        Stratégie :
+        1. Commencer avec la solution par défaut (la plus sûre)
+        2. Créer des variations légères (mutations de 1-3 missions)
+        3. Créer des variations moyennes (mutations de 25% des missions)
+        4. Créer des variations avec patterns intelligents
+        5. Compléter avec du totalement aléatoire
+        
+        Cette approche permet :
+        - D'explorer autour d'une solution connue (safe)
+        - De garder une diversité suffisante
+        - D'avoir plus de chances d'avoir des solutions valides dès le départ
+        
+        Returns:
+            List[Dict]: Population initiale de génomes
+        """
+        population = []
+        num_missions = len(self.search_space)
+        
+        # =================================================================
+        # 1. SOLUTION PAR DÉFAUT (toujours la première)
+        # =================================================================
         default_genome = {
             mission_id: info['default']
             for mission_id, info in self.search_space.items()
         }
         population.append(default_genome)
         
-        # Générer le reste aléatoirement
-        for _ in range(self.config.population_size - 1):
-            genome = {
-                mission_id: random.randint(info['range'][0], info['range'][1])
-                for mission_id, info in self.search_space.items()
-            }
-            population.append(genome)
+        # =================================================================
+        # 2. VARIATIONS LÉGÈRES (mutations minimales)
+        # =================================================================
+        # 20% de la population : mutations de 1 à 3 missions seulement
+        num_light_variants = max(1, int(self.config.population_size * 0.20))
+        
+        for i in range(num_light_variants):
+            variant = default_genome.copy()
+            
+            # Nombre de missions à muter (1 à 3)
+            num_mutations = random.randint(1, min(3, num_missions))
+            missions_to_mutate = random.sample(list(variant.keys()), num_mutations)
+            
+            for mission_id in missions_to_mutate:
+                info = self.search_space[mission_id]
+                current = variant[mission_id]
+                
+                # Mutation dans un rayon de ±10 minutes (léger)
+                delta = random.randint(-10, 10)
+                new_value = (current + delta) % 60
+                
+                # S'assurer que la valeur est dans la range autorisée
+                new_value = max(info['range'][0], min(info['range'][1], new_value))
+                variant[mission_id] = new_value
+            
+            population.append(variant)
+        
+        # =================================================================
+        # 3. VARIATIONS MOYENNES (mutations modérées)
+        # =================================================================
+        # 30% de la population : mutations de 25% des missions
+        num_medium_variants = max(1, int(self.config.population_size * 0.30))
+        
+        for i in range(num_medium_variants):
+            variant = default_genome.copy()
+            
+            # Muter environ 25% des missions
+            num_mutations = max(1, num_missions // 4)
+            missions_to_mutate = random.sample(list(variant.keys()), num_mutations)
+            
+            for mission_id in missions_to_mutate:
+                info = self.search_space[mission_id]
+                current = variant[mission_id]
+                
+                # Mutation dans un rayon de ±20 minutes (moyen)
+                delta = random.randint(-20, 20)
+                new_value = (current + delta) % 60
+                new_value = max(info['range'][0], min(info['range'][1], new_value))
+                variant[mission_id] = new_value
+            
+            population.append(variant)
+        
+        # =================================================================
+        # 4. VARIATIONS AVEC PATTERNS INTELLIGENTS
+        # =================================================================
+        # 20% de la population : patterns structurés
+        num_pattern_variants = max(1, int(self.config.population_size * 0.20))
+        
+        # Définir des patterns de distribution
+        patterns = [
+            # Pattern 1 : Décalage séquentiel (5 min entre chaque)
+            lambda base, idx: (base + idx * 5) % 60,
+            
+            # Pattern 2 : Décalage séquentiel large (10 min entre chaque)
+            lambda base, idx: (base + idx * 10) % 60,
+            
+            # Pattern 3 : Décalage par blocs (même offset pour groupes de missions)
+            lambda base, idx: (base + (idx // 2) * 15) % 60,
+            
+            # Pattern 4 : Alternance (+ ou - un offset fixe)
+            lambda base, idx: (base + (15 if idx % 2 == 0 else -15)) % 60,
+            
+            # Pattern 5 : Distribution "nombre premier" (évite les patterns réguliers)
+            lambda base, idx: (base + idx * 7) % 60,
+        ]
+        
+        for i in range(num_pattern_variants):
+            variant = {}
+            pattern = random.choice(patterns)
+            
+            for idx, (mission_id, info) in enumerate(self.search_space.items()):
+                base = info['default']
+                new_value = pattern(base, idx)
+                
+                # Assurer que c'est dans la range
+                new_value = max(info['range'][0], min(info['range'][1], new_value))
+                variant[mission_id] = new_value
+            
+            population.append(variant)
+        
+        # =================================================================
+        # 5. SOLUTIONS ALÉATOIRES (pour la diversité)
+        # =================================================================
+        # Le reste : totalement aléatoire pour assurer la diversité
+        remaining = self.config.population_size - len(population)
+        
+        if remaining > 0:
+            for i in range(remaining):
+                genome = {
+                    mission_id: random.randint(info['range'][0], info['range'][1])
+                    for mission_id, info in self.search_space.items()
+                }
+                population.append(genome)
         
         return population
     
