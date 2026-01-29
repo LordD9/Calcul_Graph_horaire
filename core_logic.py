@@ -3,17 +3,21 @@
 core_logic.py
 =============
 
-Version : 4.1 (Corrections Partage Intra-Mission + Flexibilité Allers)
+Version : 4.2 (Corrections des violations d'infrastructure et scoring amélioré)
 
 CORRECTIONS MAJEURES:
-1. allow_sharing redéfini:
-   - True: Partage autorisé entre missions ET au sein d'une mission
-   - False: Partage UNIQUEMENT au sein de la même mission (pas entre missions)
+1. Violations d'infrastructure = UNIQUEMENT croisements sur voie unique
+   - Deux trains qui se croisent ailleurs que sur VE, D ou Terminus
+   - Ce n'est PAS une violation si un trajet ne peut pas être planifié
    
-2. Flexibilité des Allers:
-   - Les horaires de départ peuvent être retardés pour éviter des conflits
-   - L'objectif reste de respecter l'horaire théorique, mais des compromis sont possibles
-   - Les retards sont pénalisés dans le score (×10 par minute)
+2. Scoring amélioré:
+   - Pénalise les trajets non planifiés (échecs de planification)
+   - Privilégie les solutions avec moins de rames
+   - Maintient la pénalité sur les retards
+   
+3. Performance:
+   - Suppression des prints inutiles pendant les calculs
+   - Messages uniquement pour l'interface web
 """
 
 from datetime import datetime, timedelta
@@ -22,9 +26,15 @@ from io import BytesIO
 from collections import defaultdict
 import itertools
 from functools import lru_cache
+import json
+
+from optimisation_logic import (
+    OptimizationConfig,
+    CrossingOptimization,
+    optimiser_graphique_horaire)
 
 # =============================================================================
-# 1. UTILITAIRES (inchangés)
+# 1. UTILITAIRES
 # =============================================================================
 
 def _get_infra_at_gare(df_gares, gare_name):
@@ -138,7 +148,7 @@ class SimulationEngine:
     def solve_mission_schedule(self, mission, ideal_start_time, direction):
         """
         Construit un sillon valide pour une mission donnée.
-        NOUVEAU: Accepte des retards pour trouver une solution.
+        Accepte des retards pour trouver une solution.
         """
         base_schedule = construire_horaire_mission(mission, direction, self.df_gares)
         if not base_schedule:
@@ -220,7 +230,7 @@ class SimulationEngine:
         """
         Alloue une rame à un départ.
         
-        NOUVEAU COMPORTEMENT:
+        COMPORTEMENT:
         - Partage TOUJOURS autorisé au sein d'une même mission
         - Partage entre missions différentes contrôlé par allow_cross_mission_sharing
         
@@ -271,7 +281,7 @@ class SimulationEngine:
         """
         Libère une rame dans une gare après son temps de retournement.
         
-        NOUVEAU: Enregistre également l'ID de la mission d'origine pour les règles de partage.
+        Enregistre également l'ID de la mission d'origine pour les règles de partage.
         
         Args:
             tid: ID de la rame
@@ -286,24 +296,31 @@ class SimulationEngine:
         )
 
 # =============================================================================
-# 3. FONCTION D'ÉVALUATION
+# 3. FONCTION D'ÉVALUATION (VERSION AMÉLIORÉE)
 # =============================================================================
 
 def evaluer_configuration(engine, requests, allow_cross_mission_sharing=True):
     """
-    Évalue une configuration complète avec score multi-critères.
+    Évalue une configuration complète avec score multi-critères amélioré.
     
-    NOUVEAU PARAMÈTRE:
-    - allow_cross_mission_sharing: Si False, les rames ne peuvent être partagées
-      QU'AU SEIN de leur mission d'origine
+    CHANGEMENTS IMPORTANTS:
+    1. Les violations d'infrastructure sont UNIQUEMENT les croisements sur voie unique
+    2. Les échecs de planification (trajets non planifiés) sont pénalisés mais ne sont PAS des violations
+    3. Le nombre de rames est plus fortement pénalisé pour privilégier les solutions économiques
     
-    Score = (Rames × 1000) + (Échecs × 1M) + (Retard × 10) - (Homogénéité × 5000)
+    Score = (Rames × 2000) + (Échecs × 5000) + (Retard × 10) - (Homogénéité × 3000)
+    
+    Returns:
+        tuple: (score, chronologie, failures, stats_homogeneite, total_delay, nb_rames)
     """
     engine.reset()
     total_delay_min = 0
     trajets_resultat = defaultdict(list)
     failures = []
     mission_station_times = defaultdict(lambda: defaultdict(list))
+    
+    # Compteurs pour violations RÉELLES d'infrastructure
+    infra_violations = []
 
     sorted_reqs = sorted(requests, key=lambda x: x['ideal_dep'])
 
@@ -315,10 +332,13 @@ def evaluer_configuration(engine, requests, allow_cross_mission_sharing=True):
         )
 
         if not path:
+            # IMPORTANT: Ce n'est PAS une violation d'infrastructure
+            # C'est un échec de planification (pénalisé dans le score)
             failures.append({
                 "time": req['ideal_dep'],
                 "mission": f"M{req.get('m_idx', 0)+1} ({req['type']})",
-                "reason": err or "Infrastructure saturée"
+                "reason": err or "Impossible de planifier",
+                "is_infra_violation": False  # Nouvelle propriété
             })
             continue
 
@@ -337,17 +357,19 @@ def evaluer_configuration(engine, requests, allow_cross_mission_sharing=True):
         )
 
         if tid is None:
+            # Pas de violation d'infrastructure, juste manque de matériel
             failures.append({
                 "time": req['ideal_dep'],
                 "mission": f"M{req.get('m_idx', 0)+1} ({req['type']})",
-                "reason": "Pas de rame disponible"
+                "reason": "Pas de rame disponible",
+                "is_infra_violation": False
             })
             continue
 
         tid = int(tid)
         engine.committed_schedules.append({'train_id': tid, 'path': path})
         
-        # Calcul du retard (IMPORTANT: pénalise les départs retardés)
+        # Calcul du retard (pénalise les départs retardés)
         delay = (real_dep - req['ideal_dep']).total_seconds() / 60
         total_delay_min += delay
 
@@ -357,20 +379,30 @@ def evaluer_configuration(engine, requests, allow_cross_mission_sharing=True):
             time_to_record = step['arr'] if is_terminus else step['dep']
             mission_station_times[m_key][step['gare']].append(time_to_record)
 
+        # Déterminer le label de la mission pour les stats
+        mission_label = f"{req['mission']['origine']} → {req['mission']['terminus']}"
+        if req['type'] == 'retour':
+             mission_label = f"{req['mission']['terminus']} → {req['mission']['origine']}"
+
         for k in range(len(path)-1):
             p_curr, p_next = path[k], path[k+1]
             trajets_resultat[tid].append({
                 "start": p_curr['dep'],
                 "end": p_next['arr'],
                 "origine": p_curr['gare'],
-                "terminus": p_next['gare']
+                "terminus": p_next['gare'],
+                "mission": mission_label,
+                "is_mission_start": (k == 0)
             })
             if p_next['dep'] > p_next['arr']:
                 trajets_resultat[tid].append({
                     "start": p_next['arr'],
                     "end": p_next['dep'],
                     "origine": p_next['gare'],
-                    "terminus": p_next['gare']
+                    "terminus": p_next['gare'],
+                    # Les arrêts ne sont pas des débuts de mission
+                    "mission": mission_label,
+                    "is_mission_start": False
                 })
 
         t_ret = req['mission'].get(
@@ -405,57 +437,65 @@ def evaluer_configuration(engine, requests, allow_cross_mission_sharing=True):
 
     avg_homogeneity = global_homogeneity_score / total_stations_checked if total_stations_checked > 0 else 1.0
 
-    # Score multi-critères
-    penalty_trains = engine.train_counter * 1000
-    penalty_failures = len(failures) * 1000000
-    penalty_delay = total_delay_min * 10  # Pénalise les retards
-    bonus_homogeneity = avg_homogeneity * 5000
+    # NOUVEAU SCORING: Pénalités renforcées
+    penalty_trains = engine.train_counter * 2000  # Augmenté de 1000 → 2000
+    penalty_failures = len(failures) * 5000  # Augmenté de 1M → 5000 (plus réaliste)
+    penalty_delay = total_delay_min * 10
+    bonus_homogeneity = avg_homogeneity * 3000  # Réduit de 5000 → 3000
 
     score = penalty_trains + penalty_failures + penalty_delay - bonus_homogeneity
 
     return score, dict(trajets_resultat), failures, homogeneite_par_mission, total_delay_min, engine.train_counter
 
 # =============================================================================
-# 4. OPTIMISATION GLOBALE
+# 4. OPTIMISATION GLOBALE (VERSION SANS PRINT EXCESSIFS)
 # =============================================================================
 
-def generer_tous_trajets_optimises(missions, heure_debut, heure_fin, df_gares, 
-                                   allow_sharing=True, search_strategy='smart'):
+def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin, 
+                                   allow_sharing=True, optimization_config=None, 
+                                   progress_callback=None, search_strategy='smart'):
     """
-    Optimisation vraiment globale avec correction des règles de partage.
+    Optimisation globale avec corrections des règles et affichage minimal.
     
-    NOUVEAU COMPORTEMENT DE allow_sharing:
-    - True: Partage autorisé ENTRE missions et AU SEIN des missions
-    - False: Partage UNIQUEMENT AU SEIN d'une même mission (pas entre missions)
-    
-    FLEXIBILITÉ DES ALLERS:
-    - Les horaires de départ peuvent être retardés pour éviter des conflits
-    - Les retards sont pénalisés dans le score (×10 par minute)
-    - L'optimisation trouvera le meilleur compromis retard vs nombre de rames
+    CHANGEMENTS:
+    - Suppression des prints pendant les calculs
+    - Messages uniquement via progress_callback pour l'interface
+    - Violations redéfinies correctement
     
     Args:
         missions: Liste des missions
         heure_debut, heure_fin: Période de service
         df_gares: Infrastructure
         allow_sharing: Contrôle le partage ENTRE missions (partage intra-mission toujours autorisé)
-        search_strategy: 'smart' (rapide) ou 'exhaustive' (optimal)
+        optimization_config: OptimizationConfig ou None (mode standard)
+        progress_callback: Fonction de callback pour la progression
+        search_strategy: 'smart' ou 'exhaustive'
     
     Returns:
         tuple: (chronologie, warnings, stats_homogeneite)
     """
+    # SI une configuration d'optimisation avancée est fournie
+    if optimization_config is not None:
+        from optimisation_logic import optimiser_graphique_horaire
+        
+        chronologie, warnings, stats = optimiser_graphique_horaire(
+            missions,
+            df_gares,
+            heure_debut,
+            heure_fin,
+            optimization_config,
+            allow_sharing=allow_sharing,
+            progress_callback=progress_callback
+        )
+        
+        # Calculer les statistiques d'homogénéité
+        stats_homogeneite = _calculer_stats_homogeneite(chronologie)
+        
+        return chronologie, warnings, stats_homogeneite
+    
     engine = SimulationEngine(df_gares, heure_debut, heure_fin)
     
-    print("=" * 80)
-    print("OPTIMISATION GLOBALE v4.1")
-    print("=" * 80)
-    print(f"Missions: {len(missions)}")
-    print(f"Stratégie: {search_strategy}")
-    print(f"Partage entre missions: {allow_sharing}")
-    print(f"Partage intra-mission: TOUJOURS activé")
-    print(f"Flexibilité allers: Retards autorisés (pénalisés ×10/min)")
-    print("-" * 80)
-    
-    # 1. Génération des Allers (horaires de départ SOUHAITÉS mais pas fixes)
+    # Génération des Allers
     aller_requests = []
     for m_idx, m in enumerate(missions):
         freq = m.get('frequence', 1)
@@ -475,16 +515,14 @@ def generer_tous_trajets_optimises(missions, heure_debut, heure_fin, df_gares,
 
             while curr < engine.dt_fin:
                 aller_requests.append({
-                    'ideal_dep': curr,  # Horaire SOUHAITÉ (peut être retardé)
+                    'ideal_dep': curr,
                     'mission': m, 
                     'type': 'aller', 
                     'm_idx': m_idx
                 })
                 curr += intervalle
-
-    print(f"Allers générés: {len(aller_requests)}")
     
-    # 2. Génération des cadencements possibles pour les retours
+    # Génération des cadencements possibles pour les retours
     missions_avec_retour = [m for m in missions if m.get('frequence', 0) > 0]
     
     if search_strategy == 'smart':
@@ -492,30 +530,20 @@ def generer_tous_trajets_optimises(missions, heure_debut, heure_fin, df_gares,
     else:
         cadencements_a_tester = list(range(60))
     
-    print(f"Cadencements par mission: {len(cadencements_a_tester)}")
-    
-    # 3. Génération de toutes les combinaisons
+    # Génération de toutes les combinaisons
     all_combinations = list(itertools.product(cadencements_a_tester, 
                                              repeat=len(missions_avec_retour)))
     
     total_combinations = len(all_combinations)
-    print(f"Combinaisons totales: {total_combinations:,}")
     
-    if total_combinations > 10000:
-        print("⚠️  Nombre élevé de combinaisons, calcul peut prendre du temps...")
-        if search_strategy == 'exhaustive' and total_combinations > 50000:
-            print("⚠️  Passage automatique en mode 'smart'")
-            search_strategy = 'smart'
-            cadencements_a_tester = list(range(0, 60, 5))
-            all_combinations = list(itertools.product(cadencements_a_tester, 
-                                                     repeat=len(missions_avec_retour)))
-            total_combinations = len(all_combinations)
-            print(f"    Nouvelles combinaisons: {total_combinations:,}")
+    if total_combinations > 10000 and search_strategy == 'exhaustive' and total_combinations > 50000:
+        search_strategy = 'smart'
+        cadencements_a_tester = list(range(0, 60, 5))
+        all_combinations = list(itertools.product(cadencements_a_tester, 
+                                                 repeat=len(missions_avec_retour)))
+        total_combinations = len(all_combinations)
     
-    print("-" * 80)
-    print("Recherche de l'optimum global...")
-    
-    # 4. Test de toutes les combinaisons
+    # Test de toutes les combinaisons
     best_score = float('inf')
     best_chronologie = {}
     best_stats = {}
@@ -527,7 +555,7 @@ def generer_tous_trajets_optimises(missions, heure_debut, heure_fin, df_gares,
     checkpoint = max(1, total_combinations // 20)
     
     for combo_idx, cadencements_combo in enumerate(all_combinations):
-        # Construction des requêtes retour pour cette combinaison
+        # Construction des requêtes retour
         retour_requests = []
         
         for mission_idx, (m_idx, m) in enumerate([(i, m) for i, m in enumerate(missions) 
@@ -552,12 +580,12 @@ def generer_tous_trajets_optimises(missions, heure_debut, heure_fin, df_gares,
                 })
                 curr += intervalle
         
-        # Évaluation de cette combinaison
+        # Évaluation
         all_requests = aller_requests + retour_requests
         score, chrono, fails, stats, delay, nb_rames = evaluer_configuration(
             engine, 
             all_requests,
-            allow_cross_mission_sharing=allow_sharing  # NOUVEAU: Paramètre corrigé
+            allow_cross_mission_sharing=allow_sharing
         )
         
         # Mise à jour si meilleur
@@ -569,52 +597,44 @@ def generer_tous_trajets_optimises(missions, heure_debut, heure_fin, df_gares,
             best_delay = delay
             best_rames = nb_rames
             
+            # Séparer les vraies violations des échecs de planification
             best_warnings = {'infra_violations': [], 'other': []}
             for fail in fails:
                 msg = f"{fail['mission']} à {fail['time'].strftime('%H:%M')}: {fail['reason']}"
-                if "Infrastructure" in fail['reason'] or "Impasse" in fail['reason']:
+                if fail.get('is_infra_violation', False):
                     best_warnings['infra_violations'].append(msg)
                 else:
                     best_warnings['other'].append(msg)
         
-        # Progression
-        if (combo_idx + 1) % checkpoint == 0 or combo_idx == total_combinations - 1:
-            progress = (combo_idx + 1) / total_combinations * 100
-            print(f"  {progress:.1f}% ({combo_idx+1:,}/{total_combinations:,}) "
-                  f"- Meilleur: score={best_score:.0f}, rames={best_rames}, retard={best_delay:.1f}min")
+        # Progression (uniquement via callback)
+        if progress_callback and ((combo_idx + 1) % checkpoint == 0 or combo_idx == total_combinations - 1):
+            progress = (combo_idx + 1) / total_combinations
+            progress_callback(combo_idx + 1, total_combinations, best_score, best_rames, best_delay)
     
-    print("-" * 80)
-    print("RÉSULTATS OPTIMUM GLOBAL:")
-    print(f"  Score: {best_score:.0f}")
-    print(f"  Cadencements: {best_combination}")
-    print(f"  Trains: {sum(len(t) for t in best_chronologie.values())}")
-    print(f"  Rames: {best_rames}")
-    print(f"  Retard total: {best_delay:.1f} min")
-    print("=" * 80)
-    
-    return best_chronologie, best_warnings, best_stats
+    # Recalculer les stats avec le format standardisé (A -> B)
+    final_stats = _calculer_stats_homogeneite(best_chronologie)
+    return best_chronologie, best_warnings, final_stats
 
 # =============================================================================
-# 5. FONCTIONS UTILITAIRES (inchangées)
+# 5. FONCTIONS UTILITAIRES
 # =============================================================================
 
 @lru_cache(maxsize=256)
 def construire_horaire_mission_cached(mission_key, trajet_spec, df_gares_json):
     """
     Wrapper avec cache pour la construction d'horaire.
-    Permet d'éviter de recalculer l'interpolation des gares à chaque itération de la simulation.
     """
     if df_gares_json is None: return None
     try:
-        df_gares_local = pd.read_json(StringIO(df_gares_json))
+        df_gares_local = pd.read_json(BytesIO(df_gares_json.encode('utf-8')))
         mission_cfg = json.loads(mission_key)
         return construire_horaire_mission(mission_cfg, trajet_spec, df_gares_local)
-    except: return None
+    except Exception as e:
+        return None
 
 def construire_horaire_mission(m, direction, df_gares):
     """
-    Interpole les horaires de passage à toutes les gares intermédiaires (physiques)
-    entre l'origine et le terminus, en se basant sur les points de passage définis.
+    Interpole les horaires de passage à toutes les gares intermédiaires.
     """
     if df_gares is None or df_gares.empty: return []
     pts = []
@@ -629,7 +649,6 @@ def construire_horaire_mission(m, direction, df_gares):
         if m.get("trajet_asymetrique"):
             base_pp = m.get("passing_points_retour", [])
         else:
-            # Inversion automatique des PP aller si symétrique
             base_pp = [{"gare": p["gare"], "time_offset_min": dur - p["time_offset_min"], "duree_arret_min": p.get("duree_arret_min", 0)} for p in m.get("passing_points", [])]
         pts.append({"gare": m.get("terminus"), "time_offset_min": 0, "duree_arret_min": 0})
         pts.extend(base_pp)
@@ -637,11 +656,13 @@ def construire_horaire_mission(m, direction, df_gares):
 
     pts.sort(key=lambda x: x['time_offset_min'])
 
-    # Interpolation linéaire entre les points pivots
+    # Interpolation linéaire
     unique = []
     seen = set()
     for p in pts:
-        if p['gare'] not in seen: unique.append(p); seen.add(p['gare'])
+        if p['gare'] not in seen:
+            unique.append(p)
+            seen.add(p['gare'])
 
     res = []
     gs = df_gares.sort_values('distance').reset_index(drop=True)
@@ -658,7 +679,7 @@ def construire_horaire_mission(m, direction, df_gares):
         for _, row in seg.iterrows():
             if res and res[-1]['gare'] == row['gare']: continue
 
-            # Récupération durée arrêt si c'est un point pivot
+            # Récupération durée arrêt
             d_arret = 0
             for op in unique:
                 if op['gare'] == row['gare']:
@@ -672,6 +693,7 @@ def construire_horaire_mission(m, direction, df_gares):
             t = s['time_offset_min'] + ((e['time_offset_min'] - s['time_offset_min']) * ratio)
 
             res.append({"gare": row['gare'], "time_offset_min": round(t, 1), "duree_arret_min": d_arret})
+    
     return res
 
 def preparer_roulement_manuel(roulement):
@@ -844,4 +866,81 @@ def generer_exports(chronologie, figure):
 
 def reset_caches():
     """Vide les caches."""
-    pass
+    construire_horaire_mission_cached.cache_clear()
+
+def _calculer_stats_homogeneite(chronologie):
+    """
+    Calcule les statistiques d'homogénéité par mission (origine -> terminus).
+    Gère les modes Automatique (tags) et Manuel (heuristique de coupure).
+    """
+    from collections import defaultdict
+    
+    stats = {}
+    missions_horaires = defaultdict(list)
+    
+    for train_id, trajets in chronologie.items():
+        if not trajets:
+            continue
+            
+        trajets_tries = sorted(trajets, key=lambda x: x['start'])
+        
+        # 1. Mode Automatique / Optimisé (si les tags existent)
+        if any('mission' in t for t in trajets_tries):
+            for t in trajets_tries:
+                if t.get('is_mission_start', False):
+                    missions_horaires[t['mission']].append(t['start'])
+            continue
+
+        # 2. Mode Manuel / Heuristique (Reconstruction des missions)
+        current_start = trajets_tries[0]
+        current_end = trajets_tries[0]
+        
+        for i in range(1, len(trajets_tries)):
+            seg = trajets_tries[i]
+            
+            # Critères de continuité : même gare de jonction et délai court (< 20 min)
+            gap_minutes = (seg['start'] - current_end['end']).total_seconds() / 60.0
+            is_connected = (seg['origine'] == current_end['terminus'])
+            
+            if is_connected and gap_minutes < 20:
+                current_end = seg # On prolonge la mission
+            else:
+                # Rupture : Fin de la mission précédente
+                key = f"{current_start['origine']} → {current_end['terminus']}"
+                missions_horaires[key].append(current_start['start'])
+                
+                # Nouvelle mission
+                current_start = seg
+                current_end = seg
+        
+        # Enregistrer la dernière mission
+        key = f"{current_start['origine']} → {current_end['terminus']}"
+        missions_horaires[key].append(current_start['start'])
+    
+    # Calcul du Gini
+    for mission_key, horaires in missions_horaires.items():
+        if len(horaires) < 2:
+            stats[mission_key] = 1.0
+            continue
+        
+        horaires_tries = sorted(horaires)
+        intervalles = []
+        
+        for i in range(len(horaires_tries) - 1):
+            diff = (horaires_tries[i+1] - horaires_tries[i]).total_seconds() / 60.0
+            if diff > 0.1: 
+                intervalles.append(diff)
+        
+        if not intervalles or sum(intervalles) == 0:
+            stats[mission_key] = 0.0
+            continue
+        
+        n = len(intervalles)
+        intervalles.sort()
+        somme_ponderee = sum((i + 1) * val for i, val in enumerate(intervalles))
+        somme_totale = sum(intervalles)
+        
+        gini = (2.0 * somme_ponderee) / (n * somme_totale) - (n + 1.0) / n
+        stats[mission_key] = max(0.0, 1.0 - gini)
+    
+    return stats

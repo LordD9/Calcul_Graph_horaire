@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 import json
 import re # Import re, bien que les helpers soient supprimés
 from collections import defaultdict
+import time
 
 
 # Import des modules locaux
@@ -28,6 +29,76 @@ from core_logic import (
 from plotting import creer_graphique_horaire, creer_graphique_batterie
 from energy_logic import get_default_energy_params, calculer_consommation_trajet
 
+from optimisation_logic import (
+    OptimizationConfig,
+    CrossingOptimization,
+    optimiser_graphique_horaire)
+
+class ProgressTracker:
+    """Tracker pour estimation dynamique du temps de calcul."""
+
+    def __init__(self, total_work):
+        self.total_work = total_work
+        self.start_time = time.time()
+        self.last_update = self.start_time
+        self.work_done = 0
+        self.speed_samples = []
+        self.max_samples = 10
+
+    def update(self, work_increment=1):
+        """Met à jour la progression et calcule le temps restant."""
+        self.work_done += work_increment
+        current_time = time.time()
+
+        # Calculer la vitesse actuelle
+        time_diff = current_time - self.last_update
+        if time_diff > 0:
+            current_speed = work_increment / time_diff
+            self.speed_samples.append(current_speed)
+
+            # Garder seulement les N derniers échantillons
+            if len(self.speed_samples) > self.max_samples:
+                self.speed_samples.pop(0)
+
+        self.last_update = current_time
+
+    def get_eta(self):
+        """Calcule le temps estimé restant."""
+        if not self.speed_samples or self.work_done == 0:
+            return "Calcul en cours..."
+
+        # Vitesse moyenne récente
+        avg_speed = sum(self.speed_samples) / len(self.speed_samples)
+
+        if avg_speed <= 0:
+            return "Calcul en cours..."
+
+        remaining_work = self.total_work - self.work_done
+        eta_seconds = remaining_work / avg_speed
+
+        if eta_seconds < 2:
+            return "< 2 secondes"
+        elif eta_seconds < 60:
+            return f"~{int(eta_seconds)} secondes"
+        else:
+            minutes = int(eta_seconds / 60)
+            return f"~{minutes} minute{'s' if minutes > 1 else ''}"
+
+    def get_progress_percent(self):
+        """Retourne le pourcentage de progression."""
+        if self.total_work == 0:
+            return 0
+        return int((self.work_done / self.total_work) * 100)
+
+    def get_elapsed_time(self):
+        """Retourne le temps écoulé."""
+        elapsed = time.time() - self.start_time
+        if elapsed < 60:
+            return f"{elapsed:.1f}s"
+        else:
+            minutes = int(elapsed / 60)
+            seconds = int(elapsed % 60)
+            return f"{minutes}m {seconds}s"
 
 # --- Configuration de la page et initialisation de l'état de session ---
 st.set_page_config(layout="wide")
@@ -47,6 +118,7 @@ if "roulement_manuel" not in st.session_state: st.session_state.roulement_manuel
 if "mode_calcul" not in st.session_state: st.session_state.mode_calcul = "Standard"
 if "chronologie_calculee" not in st.session_state: st.session_state.chronologie_calculee = None
 if "stats_homogeneite" not in st.session_state: st.session_state.stats_homogeneite = {}
+if "run_calculation" not in st.session_state: st.session_state.run_calculation = False
 
 # Initialise avec les paramètres par défaut si nécessaire
 default_params = get_default_energy_params()
@@ -197,6 +269,8 @@ with st.form("formulaire_gares"):
 
             st.session_state.gares = df
             st.success("Gares et infrastructure enregistrées !")
+            st.session_state.chronologie_calculee = None
+            st.session_state.run_calculation = False # Pour éviter le recalcul automatique
 
             # Affichage du récapitulatif
             df_display = df.copy()
@@ -730,9 +804,175 @@ if st.session_state.get('gares') is not None:
             if resultat["df"] is not None and not resultat["df"].empty:
                 st.dataframe(resultat["df"], width="stretch")
                 if resultat["conformite"] == 100: st.success(f"✅ Objectif respecté à 100%.")
-                elif resultat["conformite"] >= 75: st.warning(f"⚠️ Objectif respecté à {resultat['conformite']:.1f}%.")
-                else: st.error(f"❌ Objectif respecté seulement à {resultat['conformite']:.1f}%.")
+                elif resultat["conformite"] >= 75: st.warning(f"⚠️ Objectif respecté à {resultat['conformite']:.1f}%")
+                else: st.error(f"❌ Objectif respecté seulement à {resultat['conformite']:.1f}%")
 
+
+# =============================================================================
+# SECTION : PARAMÈTRES D'OPTIMISATION AVANCÉE
+# =============================================================================
+
+if st.session_state.gares is not None and st.session_state.missions:
+    st.markdown("---")
+    st.header("⚙️ Paramètres d'Optimisation Avancée")
+
+    # Choix d'activation
+    use_advanced_optimization = st.checkbox(
+        "🚀 Activer l'optimisation avancée",
+        value=False,
+        help="Active les algorithmes d'optimisation avancée (Smart/Exhaustif/Génétique)"
+    )
+
+    if use_advanced_optimization:
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.subheader("Mode d'optimisation")
+
+            optimization_mode = st.selectbox(
+                "Algorithme",
+                ["smart", "exhaustif", "genetic"],
+                format_func=lambda x: {
+                    "smart": "🎯 Smart - Rapide (< 5 sec)",
+                    "exhaustif": "🔍 Exhaustif - Complet (lent)",
+                    "genetic": "🧬 Génétique - Évolutionnaire"
+                }[x],
+                help="""
+                • Smart : Algorithme heuristique rapide
+                • Exhaustif : Teste toutes les combinaisons (< 4 missions recommandé)
+                • Génétique : Algorithme évolutionnaire pour grandes instances
+                """
+            )
+
+            # Paramètres spécifiques au mode génétique
+            if optimization_mode == "genetic":
+                st.info("Paramètres de l'algorithme génétique")
+
+                col1a, col1b = st.columns(2)
+                with col1a:
+                    population_size = st.number_input(
+                        "Taille population",
+                        min_value=10, max_value=200, value=50, step=10,
+                        help="Nombre d'individus par génération"
+                    )
+                with col1b:
+                    generations = st.number_input(
+                        "Générations",
+                        min_value=10, max_value=500, value=100, step=10,
+                        help="Nombre d'itérations"
+                    )
+
+                col1c, col1d = st.columns(2)
+                with col1c:
+                    mutation_rate = st.slider(
+                        "Taux mutation",
+                        min_value=0.0, max_value=0.5, value=0.1, step=0.05
+                    )
+                with col1d:
+                    crossover_rate = st.slider(
+                        "Taux croisement",
+                        min_value=0.3, max_value=1.0, value=0.7, step=0.05
+                    )
+
+            elif optimization_mode == "exhaustif":
+                st.warning("⚠️ Mode exhaustif : peut être très lent avec beaucoup de missions")
+                num_missions_retour = len([
+                    m for m in st.session_state.missions
+                    if any(
+                        m2['origine'] == m['terminus'] and m2['terminus'] == m['origine']
+                        for m2 in st.session_state.missions
+                    )
+                ])
+                st.info(f"📊 {num_missions_retour} mission(s) retour détectée(s)")
+                if num_missions_retour > 4:
+                    st.error("❌ Plus de 4 missions retour : Mode exhaustif NON recommandé")
+
+        with col2:
+            st.subheader("Optimisation des croisements")
+
+            enable_crossing_opt = st.checkbox(
+                "Activer l'optimisation des croisements",
+                value=False,
+                help="Prolonge stratégiquement les arrêts pour améliorer les croisements"
+            )
+
+            if enable_crossing_opt:
+                st.info("Paramètres des croisements")
+
+                max_delay = st.number_input(
+                    "Délai maximum (minutes)",
+                    min_value=1, max_value=15, value=5, step=1,
+                    help="Durée maximale de prolongement d'un arrêt"
+                )
+
+                delay_penalty = st.slider(
+                    "Pénalité par minute de retard",
+                    min_value=1.0, max_value=10.0, value=2.0, step=0.5,
+                    help="Poids de la pénalité dans le score"
+                )
+
+                st.caption("""
+                💡 **Fonctionnement** :
+                L'algorithme peut prolonger un arrêt à une voie d'évitement pour :
+                • Éviter un conflit avec un autre train
+                • Créer un croisement plus efficace
+                • Optimiser le flux global
+
+                ⚠️ **Garantie** : Aucune violation d'infrastructure ne sera créée
+                """)
+
+        # Récapitulatif
+        st.markdown("---")
+        st.subheader("📋 Récapitulatif de la configuration")
+
+        col_recap1, col_recap2, col_recap3 = st.columns(3)
+
+        with col_recap1:
+            st.metric("Mode", optimization_mode.upper())
+            if optimization_mode == "genetic":
+                st.caption(f"Pop: {population_size}, Gen: {generations}")
+
+        with col_recap2:
+            if enable_crossing_opt:
+                st.metric("Croisements", "✅ Activé")
+                st.caption(f"Max: {max_delay} min, Pénalité: {delay_penalty}")
+            else:
+                st.metric("Croisements", "❌ Désactivé")
+
+        with col_recap3:
+            # Estimation du temps
+            if optimization_mode == "smart":
+                time_est = "< 5 secondes"
+            elif optimization_mode == "exhaustif":
+                time_est = "Variable (1-10 min)"
+            else:
+                time_est = f"{int(generations * 0.5)}-{int(generations * 1.5)} sec"
+
+            st.metric("Temps estimé", time_est)
+
+        # Sauvegarder dans session_state
+        st.session_state.optimization_mode = optimization_mode
+        st.session_state.use_advanced_optimization = True
+
+        if optimization_mode == "genetic":
+            st.session_state.genetic_params = {
+                'population_size': population_size,
+                'generations': generations,
+                'mutation_rate': mutation_rate,
+                'crossover_rate': crossover_rate
+            }
+
+        if enable_crossing_opt:
+            st.session_state.crossing_params = {
+                'max_delay': max_delay,
+                'penalty': delay_penalty
+            }
+        else:
+            st.session_state.crossing_params = None
+
+    else:
+        # Optimisation standard
+        st.session_state.use_advanced_optimization = False
 
     # --- SECTION 6: Calcul et Affichage ---
     st.header("6. Calcul et Affichage")
@@ -783,43 +1023,225 @@ if st.session_state.get('gares') is not None:
     # Map pour lier les trains à leurs missions (nécessaire pour le plotting physique)
     missions_par_train = {}
 
-    if st.button("Lancer le calcul et afficher le graphique", type="primary"):
-        spinner_text = "Calcul des horaires..."
-        if mode_generation == "Rotation optimisée" or mode_calcul == "Calcul Energie":
-            spinner_text += f" (temps estimé : {estimation})"
+    if "run_calculation" not in st.session_state:
+        st.session_state.run_calculation = False
 
-        chronologie = {}
-        warnings = {}
-        homogeneite = {}
-        st.session_state.energy_errors = []
+    if st.button("🚀 Générer le graphique horaire", type="primary"):
+        st.session_state.run_calculation = True
 
-        try:
-            with st.spinner(spinner_text):
-                if mode_generation == "Rotation optimisée" or mode_calcul == "Calcul Energie":
+    if st.session_state.run_calculation:
+        st.session_state.run_calculation = False
+
+        # Déterminer si on utilise l'optimisation avancée
+        use_advanced = st.session_state.get('use_advanced_optimization', False)
+
+        if use_advanced:
+            # =====================================================================
+            # MODE OPTIMISATION AVANCÉE
+            # =====================================================================
+
+            st.info(f"Mode d'optimisation : **{optimization_mode.upper()}**")
+
+            # Configuration de l'optimisation
+            config = OptimizationConfig(
+                mode=optimization_mode,
+                crossing_optimization=CrossingOptimization(
+                    enable_crossing_opt,
+                    max_delay_minutes=15
+                ),
+                population_size=100 if optimization_mode == "genetic" else 50,
+                generations=150 if optimization_mode == "genetic" else 100,
+                use_parallel=True,  # Activer la parallélisation
+                num_workers=None  # Auto-detect
+            )
+
+            # Estimation initiale
+            total_events_estimate = 0
+            for mission in st.session_state.missions:
+                if mission.get("frequence", 0) > 0:
+                    freq_per_hour = mission["frequence"]
+                    total_events_estimate += int((heure_fin_service.hour - heure_debut_service.hour) * freq_per_hour)
+
+            if optimization_mode == "genetic":
+                total_work = config.population_size * config.generations
+            elif optimization_mode == "exhaustif":
+                # Compter les combinaisons possibles
+                mission_retours = []
+                for mission in st.session_state.missions:
+                    mission_retour_id = f"{mission['terminus']}→{mission['origine']}"
+                    has_return = any(
+                        f"{m['origine']}→{m['terminus']}" == mission_retour_id
+                        for m in st.session_state.missions
+                    )
+                    if has_return:
+                        mission_retours.append(12)  # 12 options par pas de 5 minutes
+
+                total_work = 1
+                for count in mission_retours:
+                    total_work *= count
+            else:
+                total_work = total_events_estimate
+
+            # Interface de progression
+            progress_container = st.empty()
+            stats_container = st.empty()
+
+            with progress_container.container():
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                eta_text = st.empty()
+                status_text.text("🔄 Initialisation de l'optimisation...")
+
+            # Tracker de progression
+            tracker = ProgressTracker(total_work)
+
+            def progress_callback(current, total, best_score, num_rames=0, delay=0):
+                """Callback pour mise à jour dynamique."""
+                tracker.update(1)
+
+                progress = tracker.get_progress_percent()
+                progress_bar.progress(progress)
+
+                # Message de statut
+                if best_score == float('inf'):
+                    status_msg = f"⏳ Recherche en cours ({current}/{total})..."
+                else:
+                    if optimization_mode == "genetic":
+                        status_msg = f"🧬 Génération {current}/{total} | Score: {best_score:.0f} | Rames: {num_rames}"
+                    elif optimization_mode == "exhaustif":
+                        status_msg = f"🔍 Test {current}/{total} | Score: {best_score:.0f} | Rames: {num_rames}"
+                    else:
+                        status_msg = f"⚡ Optimisation en cours ({current}/{total})"
+
+                status_text.text(status_msg)
+
+                # Estimation temps restant
+                eta = tracker.get_eta()
+                elapsed = tracker.get_elapsed_time()
+                eta_text.text(f"⏱️ Écoulé: {elapsed} | Restant: {eta}")
+
+            # Lancement de l'optimisation
+            try:
+                start_time = time.time()
+
+                chronologie, warnings, optim_stats = optimiser_graphique_horaire(
+                    st.session_state.missions,
+                    st.session_state.gares,
+                    heure_debut_service,
+                    heure_fin_service,
+                    config=config,
+                    allow_sharing=allow_sharing,
+                    progress_callback=progress_callback
+                )
+
+                elapsed_time = time.time() - start_time
+
+                progress_bar.progress(100)
+                status_text.text(f"✅ Optimisation terminée !")
+                eta_text.text(f"⏱️ Temps total: {elapsed_time:.1f} secondes")
+
+                # Vérification de sécurité
+                infra_violations = warnings.get("infra_violations", [])
+                if infra_violations:
+                    st.error("❌ ERREUR CRITIQUE : Des violations d'infrastructure ont été détectées !")
+                    st.error("Cela ne devrait JAMAIS arriver. Veuillez signaler ce bug.")
+                    for violation in infra_violations:
+                        st.write(f"  - {violation}")
+                else:
+                    num_trains = sum(len(trajets) for trajets in chronologie.values())
+                    st.success(f"✨ Solution optimale trouvée ! {len(chronologie)} rames, {num_trains} trajets, SANS violation.")
+
+                # Afficher les statistiques d'optimisation (UNE SEULE FOIS)
+                with stats_container.container():
+                    st.subheader("📊 Statistiques d'optimisation")
+
+                    col1, col2, col3 = st.columns(3)
+
+                    with col1:
+                        st.metric("Mode", optimization_mode.upper())
+
+                    with col2:
+                        if optimization_mode == "genetic":
+                            gens_completed = optim_stats.get('generations', 0)
+                            st.metric("Générations", f"{gens_completed}/{config.generations}")
+                        elif optimization_mode == "exhaustif":
+                            tested = optim_stats.get('combinations_tested', 0)
+                            st.metric("Combinaisons testées", f"{tested:,}")
+                        else:
+                            st.metric("Stratégie", "Heuristique rapide")
+
+                    with col3:
+                        final_score = optim_stats.get('final_score', optim_stats.get('best_score', 'N/A'))
+                        if final_score != 'N/A' and final_score != float('inf'):
+                            st.metric("Score final", f"{final_score:.0f}")
+
+                    # Graphique d'évolution pour génétique
+                    if optimization_mode == "genetic" and 'best_score_history' in optim_stats:
+                        with st.expander("📈 Évolution de l'optimisation", expanded=False):
+                            import matplotlib.pyplot as plt
+
+                            history = optim_stats['best_score_history']
+
+                            fig, ax = plt.subplots(figsize=(10, 4))
+                            ax.plot(range(len(history)), history, linewidth=2, color='green', marker='o', markersize=3)
+                            ax.set_xlabel('Génération')
+                            ax.set_ylabel('Meilleur Score')
+                            ax.set_title('Convergence de l\'algorithme génétique')
+                            ax.grid(True, alpha=0.3)
+                            st.pyplot(fig)
+                            plt.close(fig)
+
+                    # Stats pour exhaustif
+                    elif optimization_mode == "exhaustif":
+                        valid_count = optim_stats.get('valid_combinations', 0)
+                        tested_count = optim_stats.get('combinations_tested', 0)
+                        if tested_count > 0:
+                            success_rate = (valid_count / tested_count) * 100
+                            st.info(f"Taux de solutions valides : {success_rate:.1f}% ({valid_count}/{tested_count})")
+
+                # Sauvegarder les résultats
+                st.session_state.chronologie_calculee = chronologie
+                st.session_state.warnings_calcul = warnings
+
+                # Calculer les vraies stats d'homogénéité par mission et sens
+                from core_logic import _calculer_stats_homogeneite
+                stats_gini = _calculer_stats_homogeneite(chronologie)
+                st.session_state.stats_homogeneite = stats_gini
+
+            except Exception as e:
+                st.error(f"❌ Erreur lors de l'optimisation : {e}")
+                import traceback
+                with st.expander("Détails de l'erreur"):
+                    st.code(traceback.format_exc())
+
+        else:
+            # =====================================================================
+            # MODE STANDARD (code existant)
+            # =====================================================================
+
+            with st.spinner("Génération du graphique en cours..."):
+                try:
                     chronologie, warnings, stats_homogeneite = generer_tous_trajets_optimises(
-                        missions=st.session_state.missions,
-                        df_gares=st.session_state.gares,
-                        heure_debut=heure_debut_service,
-                        heure_fin=heure_fin_service,
-                        allow_sharing=allow_sharing  # NOUVEAU PARAMÈTRE
+                        st.session_state.missions,
+                        st.session_state.gares,
+                        heure_debut_service,
+                        heure_fin_service,
+                        allow_sharing=allow_sharing,
+                        search_strategy='smart'
                     )
 
-                elif mode_generation == "Manuel":
-                    chronologie = preparer_roulement_manuel(st.session_state.roulement_manuel)
-                    warnings = {"infra_violations": [], "other": []} # Pas de détection de conflit en manuel
-                    homogeneite = {}
+                    st.session_state.chronologie_calculee = chronologie
+                    st.session_state.warnings_calcul = warnings
+                    st.session_state.stats_homogeneite = stats_homogeneite
 
-            st.session_state.chronologie_calculee = chronologie
-            st.session_state.warnings_calcul = warnings
-            st.session_state.stats_homogeneite = stats_homogeneite
-            st.success("Calcul des horaires terminé.")
+                    st.success("✅ Graphique généré avec succès !")
 
-        except Exception as e:
-            st.error(f"Une erreur est survenue lors de la génération du graphique : {e}")
-            st.session_state.chronologie_calculee = None
-            st.session_state.warnings_calcul = {}
-            st.session_state.stats_homogeneite = {}
-            st.stop()
+                except Exception as e:
+                    st.error(f"Une erreur est survenue lors de la génération du graphique : {e}")
+                    st.session_state.chronologie_calculee = None
+                    st.session_state.warnings_calcul = {}
+                    st.session_state.stats_homogeneite = {}
+                    st.stop()
 
     # Affichage des résultats si un calcul a été fait
     if st.session_state.chronologie_calculee:
@@ -945,20 +1367,69 @@ if st.session_state.get('gares') is not None:
                     for w in other_warns:
                         st.write(f"- {w}")
 
-        # --- Affichage Homogénéité (NOUVEAU) ---
-        if st.session_state.stats_homogeneite:
-            st.subheader("Qualité du Cadencement")
-            st.info("Indice d'homogénéité (Gini inverse) : 1.00 = Intervalles parfaitement réguliers.")
-            stats = st.session_state.stats_homogeneite
-            cols_metric = st.columns(4)
-            for i, (mission_key, val) in enumerate(stats.items()):
-                with cols_metric[i % 4]:
-                    st.metric(
-                        label=mission_key.replace("Mission", "M"),
-                        value=f"{val:.2f}",
-                        delta="Bon" if val > 0.9 else "Irrégulier" if val < 0.8 else None
-                    )
 
+        # --- Affichage Homogénéité (PAR MISSION ET SENS) ---
+        if st.session_state.stats_homogeneite:
+            # Vérifier que c'est bien un dict de stats Gini et pas les stats d'optim
+            stats = st.session_state.stats_homogeneite
+
+            # Filtrer pour n'avoir que les missions (pas les stats d'optim)
+            mission_stats = {}
+            for key, val in stats.items():
+                if isinstance(val, (int, float)) and '→' in str(key):
+                    mission_stats[key] = val
+
+            if mission_stats:
+                st.subheader("📈 Qualité du Cadencement (par mission et sens)")
+                st.info("Indice d'homogénéité (Gini inverse) : 1.00 = Intervalles parfaitement réguliers.")
+
+                # Organiser par couple OD (Origine-Destination sans ordre)
+                missions_organisees = {}
+                for mission_key, gini_val in mission_stats.items():
+                    # Extraire origine et terminus
+                    parts = mission_key.split(' → ')
+                    if len(parts) == 2:
+                        origine, terminus = parts
+                        # Clé unique pour le couple de gares (ordre alphabétique pour regrouper A->B et B->A)
+                        base_key = f"{min(origine, terminus)} ↔ {max(origine, terminus)}"
+
+                        if base_key not in missions_organisees:
+                            missions_organisees[base_key] = []
+
+                        missions_organisees[base_key].append({
+                            'label': mission_key, # Le vrai sens : A → B
+                            'value': gini_val
+                        })
+
+                # Afficher par groupe
+                for base_key, directions in missions_organisees.items():
+                    st.markdown(f"**Liaison {base_key}**")
+                    
+                    # Trier pour afficher A->B puis B->A (ou autre ordre logique)
+                    directions.sort(key=lambda x: x['label'])
+                    
+                    cols = st.columns(len(directions)) if len(directions) > 0 else [st.container()]
+
+                    for idx, info in enumerate(directions):
+                        with cols[idx]:
+                            val = info['value']
+                            delta = None
+                            if val > 0.9:
+                                delta = "Excellent"
+                                delta_color = "normal"
+                            elif val < 0.8:
+                                delta = "À améliorer"
+                                delta_color = "inverse"
+                            else:
+                                delta = "Correct"
+                                delta_color = "off"
+
+                            st.metric(
+                                label=info['label'], # Affiche "Nîmes → Le Grau du Roi" explicitement
+                                value=f"{val:.2f}",
+                                delta=delta
+                            )
+                    st.markdown("---")
         # --- Affichage du Graphique ---
         st.subheader("Graphique horaire")
         if not chronologie or all(not t for t in chronologie.values()):
@@ -1064,3 +1535,19 @@ if st.session_state.get('gares') is not None:
 
 else:
     st.warning("Veuillez d'abord définir et valider les gares à la section 1.")
+
+
+# =============================================================================
+# FOOTER
+# =============================================================================
+
+st.markdown("---")
+st.caption("""
+🚄 **Chronofer**
+
+Modes d'optimisation :
+- **Smart** : Heuristique rapide basée sur un algorithme glouton
+- **Exhaustif** : Exploration complète de l'espace de recherche
+- **Génétique** : Algorithme évolutionnaire pour des solutions quasi-optimales
+
+""")
