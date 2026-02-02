@@ -553,7 +553,11 @@ if st.session_state.get('gares') is not None:
         tab1, tab2 = st.tabs(["Édition des roulements", "Vue d'ensemble"])
         with tab1:
             st.subheader("Importer des roulements")
-            uploaded_file = st.file_uploader("Choisissez un fichier CSV ou Excel", type=['csv', 'xlsx'])
+            uploaded_file = st.file_uploader(
+                "Sélectionner un fichier Excel de roulement",
+                type=['xlsx', 'xls'],
+                help="Format: Train | Début | Fin | Origine | Terminus"
+            )
             if uploaded_file is not None:
                 if st.button("Importer et remplacer les roulements actuels"):
                     roulement, err = importer_roulements_fichier(uploaded_file, dataframe_gares)
@@ -1221,14 +1225,22 @@ if st.session_state.gares is not None and st.session_state.missions:
 
             with st.spinner("Génération du graphique en cours..."):
                 try:
-                    chronologie, warnings, stats_homogeneite = generer_tous_trajets_optimises(
-                        st.session_state.missions,
-                        st.session_state.gares,
-                        heure_debut_service,
-                        heure_fin_service,
-                        allow_sharing=allow_sharing,
-                        search_strategy='smart'
-                    )
+                    if mode_generation == "Manuel":
+                        chronologie = preparer_roulement_manuel(st.session_state.roulement_manuel)
+                        warnings = {} # Pas de warnings en mode manuel pour l'instant
+
+                        # Calculer les stats d'homogénéité
+                        from core_logic import _calculer_stats_homogeneite
+                        stats_homogeneite = _calculer_stats_homogeneite(chronologie)
+                    else:
+                        chronologie, warnings, stats_homogeneite = generer_tous_trajets_optimises(
+                            st.session_state.missions,
+                            st.session_state.gares,
+                            heure_debut_service,
+                            heure_fin_service,
+                            allow_sharing=allow_sharing,
+                            search_strategy='smart'
+                        )
 
                     st.session_state.chronologie_calculee = chronologie
                     st.session_state.warnings_calcul = warnings
@@ -1263,8 +1275,27 @@ if st.session_state.gares is not None and st.session_state.missions:
 
             st.subheader("📊 Statistiques d'utilisation des rames")
 
-            col_stat1, col_stat2, col_stat3 = st.columns(3)
+            # Préparation des données pour les stats
+            gare_dist_map = {row['gare']: row['distance'] for _, row in st.session_state.gares.iterrows()}
 
+            nb_trajets_od = 0
+            total_km_parcourus = 0
+
+            for train_id, trajets in chronologie.items():
+                for t in trajets:
+                    # 1. Calcul des trajets OD (un trajet = une mission complète)
+                    # Dans le mode optimisé, is_mission_start est True uniquement au début de la mission
+                    # Dans le mode manuel, on considère chaque étape saisie comme un trajet (is_mission_start par défaut True)
+                    # On ignore aussi les arrêts techniques (origine == terminus)
+                    if t.get('is_mission_start', True) and t['origine'] != t['terminus']:
+                        nb_trajets_od += 1
+
+                    # 2. Calcul des km (tous les segments comptent, même si ce n'est pas un début de mission)
+                    if t['origine'] != t['terminus'] and t['origine'] in gare_dist_map and t['terminus'] in gare_dist_map:
+                        dist = abs(gare_dist_map[t['terminus']] - gare_dist_map[t['origine']])
+                        total_km_parcourus += dist
+
+            col_stat1, col_stat2, col_stat3 = st.columns(3)
             with col_stat1:
                 st.metric(
                     label="Rames totales utilisées",
@@ -1273,20 +1304,19 @@ if st.session_state.gares is not None and st.session_state.missions:
                 )
 
             with col_stat2:
-                nb_trains_total = sum(len(trajets) for trajets in chronologie.values())
                 st.metric(
-                    label="Trajets planifiés",
-                    value=nb_trains_total,
-                    help="Nombre total de trajets réalisés"
+                    label="Trajets (OD) réalisés",
+                    value=nb_trajets_od,
+                    help="Nombre total de trajets (missions) réalisés"
                 )
 
             with col_stat3:
                 if nb_rames_total > 0:
-                    taux_utilisation = nb_trains_total / nb_rames_total
+                    km_moyen = total_km_parcourus / nb_rames_total
                     st.metric(
-                        label="Trajets par rame",
-                        value=f"{taux_utilisation:.1f}",
-                        help="Nombre moyen de trajets par rame (indicateur d'efficacité)"
+                        label="Km moyen / rame",
+                        value=f"{km_moyen:.1f} km",
+                        help="Kilométrage moyen parcouru par rame sur la journée"
                     )
 
         # --- Calcul énergétique (fait ici pour pouvoir remonter les erreurs) ---
@@ -1404,10 +1434,10 @@ if st.session_state.gares is not None and st.session_state.missions:
                 # Afficher par groupe
                 for base_key, directions in missions_organisees.items():
                     st.markdown(f"**Liaison {base_key}**")
-                    
+
                     # Trier pour afficher A->B puis B->A (ou autre ordre logique)
                     directions.sort(key=lambda x: x['label'])
-                    
+
                     cols = st.columns(len(directions)) if len(directions) > 0 else [st.container()]
 
                     for idx, info in enumerate(directions):

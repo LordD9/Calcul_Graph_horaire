@@ -153,16 +153,12 @@ class SolutionScorer:
             float: Score de la solution (plus bas = meilleur)
                    float('inf') si la solution est INVALIDE
         """
-        # CRITÈRE ABSOLU : Pas de violations d'infrastructure
-        infra_violations = warnings.get("infra_violations", [])
-        if len(infra_violations) > 0:
-            return self.INVALID_SCORE
-        
         score = 0.0
         
-        # 1. Nombre de trains (plus = mieux)
-        total_trains = sum(len(trajets) for trajets in chronologie.values())
-        score -= total_trains * 10  # Bonus important
+        # 1 CRITÈRE ABSOLU : Pas de violations d'infrastructure donc pénalité très fortes
+        infra_violations = warnings.get("infra_violations", [])
+        score += len(infra_violations) * 50000
+        
         
         # 2. Nombre de rames (moins = mieux) - FORTEMENT pénalisé
         num_rames = len(chronologie)
@@ -178,7 +174,7 @@ class SolutionScorer:
                 for actual_start, theoretical_start in starts:
                     delay_minutes = (actual_start - theoretical_start).total_seconds() / 60
                     if delay_minutes > 0:
-                        score += delay_minutes * 5  # Pénalité modérée
+                        score += delay_minutes * 20  # Pénalité modérée
         
         # 5. Temps d'arrêt prolongés (si optimisation des croisements)
         if self.config.crossing_optimization.enabled:
@@ -195,7 +191,7 @@ class SolutionScorer:
         regularity_scores = self._calculate_regularity(chronologie)
         for mission_key, regularity in regularity_scores.items():
             # Pénalité pour irrégularité (0-30 points)
-            score += (1.0 - regularity) * 30
+            score += (1.0 - regularity) * 1000
         
         return score
     
@@ -456,13 +452,27 @@ class CrossingOptimizer:
 # =============================================================================
 
 def _evaluate_genome_worker(args):
-    """Worker function pour évaluation parallèle des génomes."""
-    genome, missions, df_gares, heure_debut, heure_fin, allow_sharing, config_dict = args
+    """
+    Worker function pour évaluation parallèle des génomes.
     
-    # Reconstruire config
-    config = OptimizationConfig(**config_dict)
+    CORRECTIF: Redirection de stdout/stderr pour éviter les warnings ScriptRunContext
+    car ce code s'exécute dans un thread sans contexte Streamlit.
+    """
+    import sys
+    import io
+    
+    # Rediriger stdout/stderr pour éviter les warnings ScriptRunContext
+    old_stdout = sys.stdout
+    old_stderr = sys.stderr
+    sys.stdout = io.StringIO()
+    sys.stderr = io.StringIO()
     
     try:
+        genome, missions, df_gares, heure_debut, heure_fin, allow_sharing, config_dict = args
+        
+        # Reconstruire config
+        config = OptimizationConfig(**config_dict)
+        
         from core_logic import generer_tous_trajets_optimises
         
         # Appliquer le génome
@@ -473,11 +483,12 @@ def _evaluate_genome_worker(args):
                     mission['reference_minutes'] = str(offset)
                     break
         
-        # Générer la solution
+        # Générer la solution (SANS progress_callback pour éviter accès Streamlit)
         chronologie, warnings, _ = generer_tous_trajets_optimises(
             adjusted_missions, df_gares, heure_debut, heure_fin,
             allow_sharing=allow_sharing,
-            search_strategy='smart'
+            search_strategy='smart',
+            progress_callback=None  # ← Important: pas de callback dans les workers !
         )
         
         # Scorer
@@ -485,8 +496,14 @@ def _evaluate_genome_worker(args):
         score = scorer.score_solution(chronologie, warnings)
         
         return (genome, chronologie, warnings, score)
+        
     except Exception as e:
         return (genome, {}, {"infra_violations": [], "other": [str(e)]}, float('inf'))
+    
+    finally:
+        # Restaurer stdout/stderr
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
 
 
 class GeneticOptimizer:

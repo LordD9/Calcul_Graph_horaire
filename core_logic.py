@@ -718,69 +718,54 @@ def preparer_roulement_manuel(roulement):
     return res
 
 def importer_roulements_fichier(uploaded_file, dataframe_gares):
-    """Importe un fichier CSV ou Excel de roulements."""
+    """
+    Import un roulement depuis un fichier Excel exporté.
+    
+    Format attendu:
+    - Train: numéro du train
+    - Début: datetime de début
+    - Fin: datetime de fin  
+    - Origine: gare d'origine
+    - Terminus: gare de terminus
+    
+    Returns:
+        tuple: (chronologie, error_message)
+    """
     try:
-        df_import = None
-        if uploaded_file.name.endswith('.csv'):
-            try:
-                df_import = pd.read_csv(uploaded_file, sep=';', dtype=str, encoding='utf-8')
-            except:
-                uploaded_file.seek(0)
-                df_import = pd.read_csv(uploaded_file, sep=';', dtype=str, encoding='latin1')
-        elif uploaded_file.name.endswith(('.xlsx', '.xls')):
-            df_import = pd.read_excel(uploaded_file, dtype=str)
-        else:
-            return None, "Format non supporté."
-
-        df_import.columns = (
-            df_import.columns.str.lower()
-            .str.normalize('NFKD')
-            .str.encode('ascii', errors='ignore')
-            .str.decode('utf-8')
-            .str.replace(r'[^a-z0-9_]', '', regex=True)
-        )
-
-        col_maps = {
-            "train_id": ["train", "trainid", "idtrain", "numero_train"],
-            "origine": ["depart", "origine", "gare_depart"],
-            "heure_depart": ["heure_depart", "heuredepart", "h_dep"],
-            "terminus": ["arrivee", "terminus", "gare_arrivee"],
-            "heure_arrivee": ["heure_arrivee", "heurearrivee", "h_arr"],
-            "temps_trajet": ["temps_trajet", "duree"]
-        }
-
-        rename_dict = {}
-        for target, possibles in col_maps.items():
-            for p in possibles:
-                if p in df_import.columns:
-                    rename_dict[p] = target
-                    break
-        df_import = df_import.rename(columns=rename_dict)
-
-        new_roulement = {}
-        for _, row in df_import.iterrows():
-            tid = str(row.get('train_id', '')).strip()
-            if not tid:
-                continue
-            try:
-                h_dep = pd.to_datetime(row['heure_depart']).strftime('%H:%M')
-                h_arr = pd.to_datetime(row['heure_arrivee']).strftime('%H:%M')
-                new_roulement.setdefault(int(float(tid)), []).append({
-                    "depart": row['origine'],
-                    "heure_depart": h_dep,
-                    "arrivee": row['terminus'],
-                    "heure_arrivee": h_arr,
-                    "temps_trajet": int(float(row.get('temps_trajet', 0)))
-                })
-            except:
-                continue
-
-        for tid in new_roulement:
-            new_roulement[tid].sort(key=lambda x: x['heure_depart'])
-
-        return new_roulement, None
+        # Lire le fichier Excel
+        df = pd.read_excel(uploaded_file)
+        
+        # Vérifier les colonnes
+        required_cols = ['Train', 'Début', 'Fin', 'Origine', 'Terminus']
+        if not all(col in df.columns for col in required_cols):
+            return None, f"Colonnes manquantes. Attendu: {required_cols}"
+        
+        # Convertir en chronologie
+        chronologie = {}
+        
+        for train_id, group in df.groupby('Train'):
+            trajets = []
+            
+            for _, row in group.iterrows():
+                debut = pd.to_datetime(row['Début'])
+                fin = pd.to_datetime(row['Fin'])
+                duree = int((fin - debut).total_seconds() / 60)
+                
+                trajet = {
+                    'depart': row['Origine'],
+                    'heure_depart': debut.strftime("%H:%M"),
+                    'arrivee': row['Terminus'],
+                    'heure_arrivee': fin.strftime("%H:%M"),
+                    'temps_trajet': duree
+                }
+                trajets.append(trajet)
+            
+            chronologie[train_id] = trajets
+        
+        return chronologie, None
+        
     except Exception as e:
-        return None, f"Erreur import : {e}"
+        return None, str(e)
 
 def analyser_frequences_manuelles(roulement_manuel, missions, heure_debut_service, heure_fin_service):
     """Analyse le respect des fréquences horaires."""
