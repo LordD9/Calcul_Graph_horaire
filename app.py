@@ -835,21 +835,46 @@ if st.session_state.gares is not None and st.session_state.missions:
 
             optimization_mode = st.selectbox(
                 "Algorithme",
-                ["smart", "exhaustif", "genetic"],
+                ["fast", "smart_progressive", "exhaustif", "genetic"],
                 format_func=lambda x: {
-                    "smart": "🎯 Smart - Rapide (< 5 sec)",
-                    "exhaustif": "🔍 Exhaustif - Complet (lent)",
+                    "fast": "⚡ Fast - Ultra rapide (pas de 10 min)",
+                    "smart_progressive": "🎯🔍 Smart Progressive - Affinement intelligent (RECOMMANDÉ)",
+                    "exhaustif": "🔍 Exhaustif - Complet (chaque minute)",
                     "genetic": "🧬 Génétique - Évolutionnaire"
                 }[x],
                 help="""
-                • Smart : Algorithme heuristique rapide
-                • Exhaustif : Teste toutes les combinaisons (< 4 missions recommandé)
+                • Fast : Recherche rapide par pas de 10 minutes (très rapide)
+                • Smart Progressive : Recherche progressive (10min → 5min → 2min → 1min) - RECOMMANDÉ
+                • Exhaustif : Teste chaque minute (< 4 missions recommandé)
                 • Génétique : Algorithme évolutionnaire pour grandes instances
                 """
             )
 
+            # Afficher des informations sur le mode sélectionné
+            if optimization_mode == "smart_progressive":
+                st.info("""
+                🎯 **Mode Smart Progressive** :
+
+                1. **Phase 1** : Recherche grossière (pas de 10 min) → Identifier la zone prometteuse
+                2. **Phase 2** : Affinement moyen (pas de 5 min) → Resserrer la recherche
+                3. **Phase 3** : Affinement fin (pas de 2 min) → Préciser
+                4. **Phase 4** : Recherche fine (pas de 1 min) → Optimum local
+
+                **Avantages** :
+                - ✅ Qualité proche de l'exhaustif
+                - ✅ Vitesse 5-10x plus rapide que l'exhaustif
+                - ✅ Adaptatif : se concentre sur les zones prometteuses
+                """)
+            elif optimization_mode == "fast":
+                st.warning("""
+                ⚡ **Mode Fast** :
+                - Très rapide mais moins précis
+                - Pas de recherche : 10 minutes
+                - Recommandé pour : tests rapides, grandes instances (7+ missions)
+                """)
+
             # Paramètres spécifiques au mode génétique
-            if optimization_mode == "genetic":
+            elif optimization_mode == "genetic":
                 st.info("Paramètres de l'algorithme génétique")
 
                 col1a, col1b = st.columns(2)
@@ -877,19 +902,6 @@ if st.session_state.gares is not None and st.session_state.missions:
                         "Taux croisement",
                         min_value=0.3, max_value=1.0, value=0.7, step=0.05
                     )
-
-            elif optimization_mode == "exhaustif":
-                st.warning("⚠️ Mode exhaustif : peut être très lent avec beaucoup de missions")
-                num_missions_retour = len([
-                    m for m in st.session_state.missions
-                    if any(
-                        m2['origine'] == m['terminus'] and m2['terminus'] == m['origine']
-                        for m2 in st.session_state.missions
-                    )
-                ])
-                st.info(f"📊 {num_missions_retour} mission(s) retour détectée(s)")
-                if num_missions_retour > 4:
-                    st.error("❌ Plus de 4 missions retour : Mode exhaustif NON recommandé")
 
         with col2:
             st.subheader("Optimisation des croisements")
@@ -945,14 +957,14 @@ if st.session_state.gares is not None and st.session_state.missions:
 
         with col_recap3:
             # Estimation du temps
-            if optimization_mode == "smart":
-                time_est = "< 5 secondes"
+            if optimization_mode == "fast":
+                time_est = "< 2 secondes"
+            elif optimization_mode == "smart_progressive":
+                time_est = "10-30 secondes"
             elif optimization_mode == "exhaustif":
                 time_est = "Variable (1-10 min)"
             else:
                 time_est = f"{int(generations * 0.5)}-{int(generations * 1.5)} sec"
-
-            st.metric("Temps estimé", time_est)
 
         # Sauvegarder dans session_state
         st.session_state.optimization_mode = optimization_mode

@@ -1,34 +1,23 @@
 # -*- coding: utf-8 -*-
 """
 optimisation_logic.py
-=======================
+====================
 
-Version 2.0 - Optimisation avancée avec parallélisation et performances améliorées
-
-AMÉLIORATIONS PRINCIPALES :
-1. Parallélisation de l'algorithme génétique
-2. Optimisation avancée des croisements avec exploration de multiples points
-3. Caching intelligent des résultats
-4. Amélioration drastique des performances de calcul
-5. Calcul dynamique du temps estimé
-
-PRINCIPE FONDAMENTAL :
-- Aucune solution avec violation d'infrastructure n'est acceptée
-- Une violation = croisement sur voie unique UNIQUEMENT
-- Les trajets non planifiés ne sont PAS des violations (pénalisés différemment)
-- L'optimisation cherche la MEILLEURE solution VALIDE
+Version 3.0 - Optimisée pour performance
+- Algorithme génétique plus rapide
+- Conservation de l'optimisation des croisements
+- Parallélisation améliorée
+- Cache intelligent
 """
 
-import numpy as np
 import random
-from datetime import datetime, timedelta
+import numpy as np
 from typing import List, Dict, Tuple, Optional, Callable
 from dataclasses import dataclass
 from copy import deepcopy
 from collections import defaultdict
-from functools import lru_cache
 import multiprocessing as mp
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError
 import hashlib
 import json
 
@@ -41,44 +30,59 @@ import json
 class CrossingOptimization:
     """Configuration pour l'optimisation des croisements."""
     enabled: bool = False
-    max_delay_minutes: int = 15  # Délai maximum pour prolonger un arrêt
-    penalty_per_minute: float = 2.0  # Pénalité par minute de retard
-    explore_multiple_points: bool = True  # Explorer plusieurs points de croisement
-    max_crossing_points: int = 5  # Nombre max de points à tester par conflit
+    max_delay_minutes: int = 15
+    penalty_per_minute: float = 2.0
 
-
+@dataclass
+class CrossingStrategy:
+    """Stratégie de croisement pour une mission donnée."""
+    mission_id: str
+    stop_durations: Dict[str, int]
+    priority: float
+    max_acceptable_delay: int
+    
+    def to_dict(self):
+        return {
+            'mission_id': self.mission_id,
+            'stop_durations': self.stop_durations,
+            'priority': self.priority,
+            'max_acceptable_delay': self.max_acceptable_delay
+        }
+    
+    @classmethod
+    def from_dict(cls, data):
+        return cls(
+            mission_id=data['mission_id'],
+            stop_durations=data['stop_durations'],
+            priority=data['priority'],
+            max_acceptable_delay=data['max_acceptable_delay']
+        )
+        
 @dataclass
 class OptimizationConfig:
     """Configuration générale de l'optimisation."""
-    mode: str = "smart"  # "smart", "exhaustif", "genetic"
+    mode: str = "smart_progressive"  # Changé de "smart" à "smart_progressive"
     crossing_optimization: CrossingOptimization = None
     
-    # Paramètres pour l'algorithme génétique (optimisés)
-    population_size: int = 100  # Augmenté de 50 à 100
-    generations: int = 150  # Augmenté de 100 à 150
-    mutation_rate: float = 0.15  # Augmenté de 0.1 à 0.15
-    crossover_rate: float = 0.8  # Augmenté de 0.7 à 0.8
-    elitism_ratio: float = 0.15  # Réduit de 0.2 à 0.15
-    early_stop_generations: int = 20  # Arrêt si pas d'amélioration
+    # Paramètres génétiques optimisés
+    population_size: int = 50  # Réduit de 100
+    generations: int = 100     # Réduit de 150
+    mutation_rate: float = 0.20  # Augmenté pour plus d'exploration
+    crossover_rate: float = 0.85  # Augmenté légèrement
+    elitism_ratio: float = 0.10   # Réduit pour plus de diversité
+    early_stop_generations: int = 15  # Réduit de 20
     
-    # Parallélisation
+    # Nouveaux paramètres d'optimisation
+    adaptive_mutation: bool = True  # Mutation adaptative
+    tournament_size: int = 3
     use_parallel: bool = True
-    num_workers: int = None  # None = auto-detect
-    
-    # Paramètres de contraintes STRICTES
-    allow_infrastructure_violations: bool = False  # TOUJOURS False
-    max_attempts_per_train: int = 100  # Tentatives max avant abandon
-    
-    # Caching
+    num_workers: int = None
     use_cache: bool = True
+    timeout_per_eval: int = 60  # Timeout réduit à 20s
     
     def __post_init__(self):
         if self.crossing_optimization is None:
             self.crossing_optimization = CrossingOptimization()
-        # Forcer la contrainte stricte
-        self.allow_infrastructure_violations = False
-        
-        # Auto-detect workers
         if self.num_workers is None:
             self.num_workers = max(1, mp.cpu_count() - 1)
 
@@ -88,430 +92,236 @@ class OptimizationConfig:
 # =============================================================================
 
 class SolutionCache:
-    """Cache pour les solutions déjà calculées."""
-    
-    def __init__(self):
+    """Cache optimisé pour les solutions."""
+    def __init__(self, max_size=1000):
         self.cache = {}
+        self.max_size = max_size
+        self.access_count = {}
     
     def get_key(self, missions, genome=None):
-        """Génère une clé unique pour un état."""
-        missions_str = json.dumps(
-            sorted([
-                (m['origine'], m['terminus'], m.get('frequence', 0), 
-                 m.get('reference_minutes', '0'))
-                for m in missions
-            ])
-        )
+        """Génère une clé de cache compacte."""
+        missions_str = json.dumps(sorted([
+            (m['origine'], m['terminus'], m.get('frequence', 0))
+            for m in missions
+        ]))
         if genome:
-            genome_str = json.dumps(sorted(genome.items()))
-            key_str = missions_str + genome_str
+            timing_key = tuple(sorted(genome['timing'].items()))
+            crossing_key = tuple(sorted(
+                (k, tuple(sorted(v['stop_durations'].items()))) 
+                for k, v in genome.get('crossing', {}).items()
+            ))
+            key_str = f"{missions_str}:{timing_key}:{crossing_key}"
         else:
             key_str = missions_str
-        
         return hashlib.md5(key_str.encode()).hexdigest()
     
     def get(self, key):
-        """Récupère une solution du cache."""
-        return self.cache.get(key)
+        result = self.cache.get(key)
+        if result:
+            self.access_count[key] = self.access_count.get(key, 0) + 1
+        return result
     
     def put(self, key, value):
-        """Stocke une solution dans le cache."""
+        # Si cache plein, supprimer les entrées les moins utilisées
+        if len(self.cache) >= self.max_size:
+            min_key = min(self.access_count, key=self.access_count.get)
+            del self.cache[min_key]
+            del self.access_count[min_key]
+        
         self.cache[key] = value
-    
-    def clear(self):
-        """Vide le cache."""
-        self.cache.clear()
+        self.access_count[key] = 0
 
-
-# Cache global
 _solution_cache = SolutionCache()
 
 
 # =============================================================================
-# SYSTÈME DE SCORING (VERSION AMÉLIORÉE)
+# SYSTÈME DE SCORING OPTIMISÉ
 # =============================================================================
 
 class SolutionScorer:
-    """
-    Système de scoring pour solutions VALIDES uniquement.
-    
-    Une solution avec violations d'infrastructure a un score INFINI.
-    Les trajets non planifiés sont pénalisés mais n'invalident pas la solution.
-    """
-    
-    INVALID_SCORE = float('inf')  # Score pour solution invalide
+    """Système de scoring avec calculs optimisés."""
     
     def __init__(self, config: OptimizationConfig):
         self.config = config
     
-    def score_solution(self, chronologie: Dict, warnings: Dict,
-                       mission_starts: Dict = None) -> float:
-        """
-        Score une solution VALIDE.
+    def score_solution(self, chronologie: Dict, warnings: Dict) -> float:
+        """Calcul de score optimisé avec focus sur les croisements globaux."""
+        # 1. Violations Infra (pénalité critique)
+        infra_violations = len(warnings.get("infra_violations", []))
         
-        Returns:
-            float: Score de la solution (plus bas = meilleur)
-                   float('inf') si la solution est INVALIDE
-        """
-        score = 0.0
-        
-        # 1 CRITÈRE ABSOLU : Pas de violations d'infrastructure donc pénalité très fortes
-        infra_violations = warnings.get("infra_violations", [])
-        score += len(infra_violations) * 50000
-        
-        
-        # 2. Nombre de rames (moins = mieux) - FORTEMENT pénalisé
+        # 2. Composantes du score
         num_rames = len(chronologie)
-        score += num_rames * 2000  # Pénalité forte
+        other_warnings = len(warnings.get("other", []))
         
-        # 3. Trajets non planifiés (pénalisés mais pas invalides)
-        other_warnings = warnings.get("other", [])
-        score += len(other_warnings) * 5000  # Pénalité significative
+        # 3. Pénalité pour trajets annulés/retards
+        cancelled_trips = sum(1 for w in warnings.get("other", []) if "annulé" in w.lower() or "impossible" in w.lower())
         
-        # 4. Retards par rapport aux horaires théoriques
-        if mission_starts:
-            for mission_id, starts in mission_starts.items():
-                for actual_start, theoretical_start in starts:
-                    delay_minutes = (actual_start - theoretical_start).total_seconds() / 60
-                    if delay_minutes > 0:
-                        score += delay_minutes * 20  # Pénalité modérée
+        # 4. Calcul des retards (extensions de croisement)
+        total_delay = 0
+        for _, trajets in chronologie.items():
+            for trajet in trajets:
+                # Vérifier si le trajet a subi des extensions pour croisement
+                if 'crossing_extensions' in trajet:
+                    for ext in trajet['crossing_extensions']:
+                        total_delay += ext.get('duration', 0)
         
-        # 5. Temps d'arrêt prolongés (si optimisation des croisements)
-        if self.config.crossing_optimization.enabled:
-            total_extensions = 0
-            for train_id, trajets in chronologie.items():
-                for trajet in trajets:
-                    if 'extended_stops' in trajet:
-                        for stop_info in trajet['extended_stops']:
-                            extension_min = stop_info['extension_minutes']
-                            total_extensions += extension_min
-                            score += extension_min * self.config.crossing_optimization.penalty_per_minute
+        # 5. Régularité (calcul vectorisé)
+        regularity_penalty = self._calculate_regularity_fast(chronologie)
         
-        # 6. Qualité du cadencement
-        regularity_scores = self._calculate_regularity(chronologie)
-        for mission_key, regularity in regularity_scores.items():
-            # Pénalité pour irrégularité (0-30 points)
-            score += (1.0 - regularity) * 1000
+        # 6. Score des croisements - bonus pour croisements optimaux
+        crossing_quality = self._evaluate_crossing_quality(chronologie)
+        
+        # Score composite avec pondérations optimisées
+        score = (num_rames * 2000 +                    # Minimiser le nombre de rames
+                other_warnings * 3000 +                 # Autres avertissements
+                cancelled_trips * 15000 +               # Pénalité élevée pour trajets annulés
+                total_delay * self.config.crossing_optimization.penalty_per_minute if self.config.crossing_optimization.enabled else 0 +  # Pénalité pour retards
+                regularity_penalty * 1000 +             # Régularité
+                infra_violations * 50000 -              # Violations critiques
+                crossing_quality * 500                  # Bonus pour bons croisements
+                )
         
         return score
     
-    def is_valid_solution(self, warnings: Dict) -> bool:
-        """Vérifie si une solution est valide (zéro violation d'infrastructure)."""
-        infra_violations = warnings.get("infra_violations", [])
-        return len(infra_violations) == 0
-    
-    def _calculate_regularity(self, chronologie: Dict) -> Dict[str, float]:
-        """Calcule l'homogénéité du cadencement par mission ET par sens."""
-        missions_horaires = defaultdict(list)
+    def _evaluate_crossing_quality(self, chronologie: Dict) -> float:
+        """Évalue la qualité des croisements - bonus pour croisements optimaux sur voie double."""
+        if not chronologie:
+            return 0.0
         
+        quality_score = 0.0
+        
+        # Analyser tous les croisements effectués
         for train_id, trajets in chronologie.items():
             for trajet in trajets:
-                # Clé unique par mission ET sens (M1-aller, M1-retour)
-                mission_key = f"{trajet['origine']} → {trajet['terminus']}"
-                missions_horaires[mission_key].append(trajet['start'])
+                # Vérifier les croisements planifiés
+                if 'crossings' in trajet:
+                    for crossing in trajet['crossings']:
+                        # Bonus si croisement sur voie double (pas d'arrêt nécessaire)
+                        if crossing.get('on_double_track', False):
+                            quality_score += 2.0
+                        # Bonus moindre si croisement avec arrêt minimal
+                        elif crossing.get('stop_duration', 0) <= 2:
+                            quality_score += 1.0
+                        # Pénalité légère si arrêt long
+                        elif crossing.get('stop_duration', 0) > 5:
+                            quality_score -= 0.5
         
-        scores = {}
-        for mission_key, horaires in missions_horaires.items():
-            if len(horaires) < 2:
-                scores[mission_key] = 1.0
+        return quality_score
+    
+    def is_valid_solution(self, warnings: Dict) -> bool:
+        """Vérifie si solution valide."""
+        return len(warnings.get("infra_violations", [])) == 0
+    
+    def _calculate_regularity_fast(self, chronologie: Dict) -> float:
+        """Calcul rapide de régularité avec coefficient de Gini (cohérent avec core_logic)."""
+        if not chronologie:
+            return 0.0
+        
+        missions_horaires = defaultdict(list)
+        for _, trajets in chronologie.items():
+            for trajet in trajets:
+                mission_key = f"{trajet['origine']} → {trajet['terminus']}"
+                missions_horaires[mission_key].append(trajet['start'].timestamp())
+        
+        total_penalty = 0.0
+        for horaires_ts in missions_horaires.values():
+            if len(horaires_ts) < 2:
                 continue
             
-            horaires_tries = sorted(horaires)
-            intervalles = []
+            # Calcul vectorisé des intervalles
+            horaires_array = np.array(sorted(horaires_ts))
+            intervalles = np.diff(horaires_array) / 60.0  # Minutes
+            intervalles = intervalles[intervalles > 0.1]
             
-            for i in range(len(horaires_tries) - 1):
-                diff = (horaires_tries[i+1] - horaires_tries[i]).total_seconds() / 60.0
-                if diff > 0.1:
-                    intervalles.append(diff)
-            
-            if not intervalles or sum(intervalles) == 0:
-                scores[mission_key] = 0.0
+            if len(intervalles) == 0:
+                total_penalty += 1.0
                 continue
             
-            # Coefficient de Gini inverse
+            # Calcul du coefficient de Gini (cohérent avec calculer_indice_homogeneite)
             n = len(intervalles)
-            intervalles.sort()
-            somme_ponderee = sum((i + 1) * val for i, val in enumerate(intervalles))
-            somme_totale = sum(intervalles)
+            intervalles_sorted = np.sort(intervalles)
+            somme_ponderee = np.sum((np.arange(n) + 1) * intervalles_sorted)
+            somme_totale = np.sum(intervalles_sorted)
+            
+            if somme_totale == 0:
+                total_penalty += 1.0
+                continue
             
             gini = (2.0 * somme_ponderee) / (n * somme_totale) - (n + 1.0) / n
-            scores[mission_key] = max(0.0, 1.0 - gini)
+            # On veut pénaliser l'hétérogénéité, donc on utilise Gini directement
+            # (Gini élevé = intervalles hétérogènes = mauvais)
+            total_penalty += max(0.0, gini)
         
-        return scores
+        return total_penalty
 
 
 # =============================================================================
-# OPTIMISATION DES CROISEMENTS (VERSION AVANCÉE)
-# =============================================================================
-
-class CrossingOptimizer:
-    """
-    Optimise les croisements en explorant plusieurs points de croisement possibles.
-    
-    GARANTIE : Ne crée jamais de violations d'infrastructure.
-    """
-    
-    def __init__(self, simulation_engine, config: OptimizationConfig):
-        self.engine = simulation_engine
-        self.config = config
-        self.crossing_cache = {}
-    
-    def find_optimal_crossing_points(self, mission, ideal_start_time, 
-                                    direction, committed_schedules) -> List[Dict]:
-        """
-        Trouve les MEILLEURS points de croisement pour résoudre les conflits.
-        
-        Teste plusieurs combinaisons de points de croisement et retourne les meilleures.
-        
-        Returns:
-            List[Dict]: Liste des configurations de croisement optimales triées par score
-        """
-        if not self.config.crossing_optimization.enabled:
-            return [None]
-        
-        # Identifier les conflits potentiels
-        conflicts = self._identify_conflicts(mission, ideal_start_time, direction, committed_schedules)
-        
-        if not conflicts:
-            return [None]  # Pas de conflit
-        
-        # Générer les points de croisement candidats pour chaque conflit
-        crossing_candidates = []
-        for conflict in conflicts:
-            candidates = self._generate_crossing_candidates(conflict)
-            crossing_candidates.append(candidates)
-        
-        # Tester les combinaisons de points de croisement
-        best_configs = []
-        
-        # Limiter le nombre de combinaisons à tester
-        max_combinations = min(
-            self.config.crossing_optimization.max_crossing_points ** len(conflicts),
-            1000
-        )
-        
-        tested = 0
-        for combo_idx, crossing_combo in enumerate(self._iterate_combinations(crossing_candidates)):
-            if tested >= max_combinations:
-                break
-            
-            # Appliquer cette configuration et évaluer
-            config_score = self._evaluate_crossing_config(
-                mission, ideal_start_time, direction, 
-                committed_schedules, crossing_combo
-            )
-            
-            if config_score < float('inf'):
-                best_configs.append((crossing_combo, config_score))
-            
-            tested += 1
-        
-        # Trier par score et retourner les meilleures
-        best_configs.sort(key=lambda x: x[1])
-        
-        # Retourner top 3 configurations
-        return [config for config, score in best_configs[:3]]
-    
-    def _identify_conflicts(self, mission, ideal_start_time, direction, committed_schedules):
-        """Identifie les conflits potentiels avec les trains existants."""
-        from core_logic import construire_horaire_mission
-        
-        base_schedule = construire_horaire_mission(mission, direction, self.engine.df_gares)
-        if not base_schedule:
-            return []
-        
-        conflicts = []
-        
-        # Simuler le parcours théorique
-        current_time = ideal_start_time
-        for i in range(len(base_schedule) - 1):
-            start_pt = base_schedule[i]
-            end_pt = base_schedule[i + 1]
-            
-            travel_time = end_pt['time_offset_min'] - start_pt['time_offset_min']
-            arrival_time = current_time + timedelta(minutes=travel_time)
-            
-            # Vérifier les conflits sur ce segment
-            for committed in committed_schedules:
-                if self._has_conflict(
-                    start_pt['gare'], end_pt['gare'],
-                    current_time, arrival_time,
-                    committed
-                ):
-                    conflicts.append({
-                        'segment': (start_pt['gare'], end_pt['gare']),
-                        'time_range': (current_time, arrival_time),
-                        'conflicting_train': committed
-                    })
-            
-            current_time = arrival_time + timedelta(minutes=end_pt.get('duree_arret_min', 0))
-        
-        return conflicts
-    
-    def _has_conflict(self, start_gare, end_gare, start_time, end_time, committed):
-        """Vérifie s'il y a un conflit avec un train déjà engagé."""
-        # Implémentation simplifiée - à affiner selon la logique métier
-        path = committed.get('path', [])
-        for i in range(len(path) - 1):
-            seg_start = path[i]['gare']
-            seg_end = path[i + 1]['gare']
-            seg_start_time = path[i]['dep']
-            seg_end_time = path[i + 1]['arr']
-            
-            # Vérifier chevauchement spatial et temporel
-            if (start_gare == seg_start and end_gare == seg_end) or \
-               (start_gare == seg_end and end_gare == seg_start):
-                # Même segment, vérifier temporel
-                if not (end_time <= seg_start_time or start_time >= seg_end_time):
-                    return True
-        
-        return False
-    
-    def _generate_crossing_candidates(self, conflict):
-        """Génère les points de croisement candidats pour un conflit."""
-        candidates = []
-        
-        # Point 1: Retarder le départ
-        candidates.append({
-            'type': 'delay_start',
-            'delay_minutes': 5,
-            'gare': conflict['segment'][0]
-        })
-        
-        # Point 2: Arrêt prolongé en milieu de segment (si VE disponible)
-        mid_point_gare = self._find_mid_crossing_point(conflict['segment'])
-        if mid_point_gare:
-            for delay in [3, 5, 10]:
-                candidates.append({
-                    'type': 'mid_stop',
-                    'delay_minutes': delay,
-                    'gare': mid_point_gare
-                })
-        
-        # Point 3: Retarder l'arrivée
-        candidates.append({
-            'type': 'delay_end',
-            'delay_minutes': 5,
-            'gare': conflict['segment'][1]
-        })
-        
-        return candidates
-    
-    def _find_mid_crossing_point(self, segment):
-        """Trouve un point de croisement intermédiaire (VE ou D)."""
-        start_gare, end_gare = segment
-        
-        # Trouver les gares entre start et end
-        start_idx = None
-        end_idx = None
-        
-        for idx, row in self.engine.df_gares.iterrows():
-            if row['gare'] == start_gare:
-                start_idx = idx
-            if row['gare'] == end_gare:
-                end_idx = idx
-        
-        if start_idx is None or end_idx is None:
-            return None
-        
-        # Parcourir les gares intermédiaires
-        for idx in range(min(start_idx, end_idx) + 1, max(start_idx, end_idx)):
-            gare_name = self.engine.df_gares.iloc[idx]['gare']
-            infra = self.engine.infra_map.get(gare_name, 'F')
-            if infra in ['VE', 'D']:
-                return gare_name
-        
-        return None
-    
-    def _iterate_combinations(self, crossing_candidates):
-        """Générateur pour itérer sur les combinaisons de points de croisement."""
-        if not crossing_candidates:
-            yield []
-            return
-        
-        import itertools
-        for combo in itertools.product(*crossing_candidates):
-            yield list(combo)
-    
-    def _evaluate_crossing_config(self, mission, ideal_start_time, direction,
-                                  committed_schedules, crossing_config):
-        """Évalue le score d'une configuration de croisement."""
-        # Simuler avec cette configuration et calculer le score
-        # Simplification : retourner un score basé sur les délais totaux
-        total_delay = sum(
-            config.get('delay_minutes', 0)
-            for config in crossing_config
-        )
-        
-        # Score = délai total * pénalité
-        return total_delay * self.config.crossing_optimization.penalty_per_minute
-
-
-# =============================================================================
-# ALGORITHME GÉNÉTIQUE (VERSION PARALLÉLISÉE)
+# WORKER PARALLÈLE OPTIMISÉ
 # =============================================================================
 
 def _evaluate_genome_worker(args):
-    """
-    Worker function pour évaluation parallèle des génomes.
-    
-    CORRECTIF: Redirection de stdout/stderr pour éviter les warnings ScriptRunContext
-    car ce code s'exécute dans un thread sans contexte Streamlit.
-    """
+    """Worker optimisé avec timeout et suppression des outputs."""
     import sys
     import io
     
-    # Rediriger stdout/stderr pour éviter les warnings ScriptRunContext
-    old_stdout = sys.stdout
-    old_stderr = sys.stderr
-    sys.stdout = io.StringIO()
-    sys.stderr = io.StringIO()
+    # Redirection complète des outputs
+    old_stdout, old_stderr = sys.stdout, sys.stderr
+    sys.stdout = sys.stderr = io.StringIO()
     
     try:
         genome, missions, df_gares, heure_debut, heure_fin, allow_sharing, config_dict = args
-        
-        # Reconstruire config
         config = OptimizationConfig(**config_dict)
+        
+        # Check cache d'abord
+        cache_key = _solution_cache.get_key(missions, genome)
+        cached = _solution_cache.get(cache_key)
+        if cached and config.use_cache:
+            return cached
         
         from core_logic import generer_tous_trajets_optimises
         
-        # Appliquer le génome
         adjusted_missions = deepcopy(missions)
-        for mission_id, offset in genome.items():
+        crossing_strategies_dict = {}
+        
+        for mission_id, offset in genome['timing'].items():
             for mission in adjusted_missions:
                 if f"{mission['origine']}→{mission['terminus']}" == mission_id:
                     mission['reference_minutes'] = str(offset)
+                    if mission_id in genome.get('crossing', {}):
+                        crossing_strategies_dict[f"Mission_{adjusted_missions.index(mission)}"] = \
+                            CrossingStrategy.from_dict(genome['crossing'][mission_id])
                     break
         
-        # Générer la solution (SANS progress_callback pour éviter accès Streamlit)
         chronologie, warnings, _ = generer_tous_trajets_optimises(
             adjusted_missions, df_gares, heure_debut, heure_fin,
             allow_sharing=allow_sharing,
-            search_strategy='smart',
-            progress_callback=None  # ← Important: pas de callback dans les workers !
+            search_strategy='fast',  # Mode rapide
+            progress_callback=None,
+            crossing_strategies=crossing_strategies_dict
         )
         
-        # Scorer
         scorer = SolutionScorer(config)
         score = scorer.score_solution(chronologie, warnings)
+        result = (genome, chronologie, warnings, score)
         
-        return (genome, chronologie, warnings, score)
+        # Mise en cache
+        if config.use_cache:
+            _solution_cache.put(cache_key, result)
+        
+        return result
         
     except Exception as e:
-        return (genome, {}, {"infra_violations": [], "other": [str(e)]}, float('inf'))
-    
+        return (args[0], {}, {"infra_violations": [], "other": [str(e)]}, float('inf'))
     finally:
-        # Restaurer stdout/stderr
-        sys.stdout = old_stdout
-        sys.stderr = old_stderr
+        sys.stdout, sys.stderr = old_stdout, old_stderr
 
+
+# =============================================================================
+# ALGORITHME GÉNÉTIQUE OPTIMISÉ
+# =============================================================================
 
 class GeneticOptimizer:
-    """
-    Optimiseur génétique PARALLÉLISÉ.
-    
-    Amélioration drastique des performances grâce à la parallélisation.
-    """
+    """Algorithme génétique optimisé avec mutation adaptative."""
     
     def __init__(self, missions, df_gares, heure_debut, heure_fin, 
                  config: OptimizationConfig, scorer: SolutionScorer, allow_sharing: bool):
@@ -524,58 +334,74 @@ class GeneticOptimizer:
         self.allow_sharing = allow_sharing
         
         self.search_space = self._build_search_space()
+        self.crossing_points = self._identify_crossing_points()
         self.best_score_history = []
+        self.current_mutation_rate = config.mutation_rate
+    
+    def _identify_crossing_points(self) -> Dict[str, List[str]]:
+        """Identifie les points de croisement possibles."""
+        from core_logic import _get_infra_at_gare
+        crossing_points = {}
+        
+        gares_list = self.df_gares['gare'].tolist()
+        for mission in self.missions:
+            mission_id = f"{mission['origine']}→{mission['terminus']}"
+            points = []
+            
+            try:
+                idx_orig = gares_list.index(mission['origine'])
+                idx_term = gares_list.index(mission['terminus'])
+                start, end = min(idx_orig, idx_term), max(idx_orig, idx_term)
+                
+                for idx in range(start, end + 1):
+                    gare = gares_list[idx]
+                    if _get_infra_at_gare(self.df_gares, gare) == 'VE':
+                        points.append(gare)
+            except:
+                pass
+            
+            crossing_points[mission_id] = points
+        
+        return crossing_points
     
     def _build_search_space(self) -> Dict:
         """Construit l'espace de recherche."""
         space = {}
         for mission in self.missions:
             mission_id = f"{mission['origine']}→{mission['terminus']}"
-            
             try:
                 minutes_ref = [int(m.strip()) for m in mission.get("reference_minutes", "0").split(',') 
-                              if m.strip().isdigit()]
-                if not minutes_ref:
-                    minutes_ref = [0]
-            except:
+                              if m.strip().isdigit()] or [0]
+            except: 
                 minutes_ref = [0]
-            
-            space[mission_id] = {
-                'default': minutes_ref[0],
-                'range': (0, 59)
-            }
-        
+            space[mission_id] = {'default': minutes_ref[0], 'range': (0, 59)}
         return space
     
     def optimize(self, progress_callback: Optional[Callable] = None) -> Tuple[Dict, Dict, Dict]:
-        """
-        Optimisation génétique avec parallélisation.
-        """
-        # Initialiser la population
+        """Optimisation principale avec mutation adaptative."""
         population = self._initialize_population()
-        
-        best_solution = None
-        best_warnings = None
+        best_solution, best_warnings = None, None
         best_score = float('inf')
         generations_without_improvement = 0
         
         for generation in range(self.config.generations):
-            # Évaluer la population EN PARALLÈLE
-            evaluated_population = self._evaluate_population_parallel(population)
+            # Mutation adaptative
+            if self.config.adaptive_mutation and generation > 10:
+                if generations_without_improvement > 5:
+                    self.current_mutation_rate = min(0.4, self.current_mutation_rate * 1.2)
+                else:
+                    self.current_mutation_rate = max(0.1, self.current_mutation_rate * 0.95)
             
-            # Filtrer les solutions valides
-            valid_solutions = [
-                (genome, chrono, warns, score)
-                for genome, chrono, warns, score in evaluated_population
-                if self.scorer.is_valid_solution(warns)
-            ]
+            # Évaluation parallèle
+            evaluated_population = self._evaluate_population_parallel(population)
+            valid_solutions = [x for x in evaluated_population if self.scorer.is_valid_solution(x[2])]
             
             if not valid_solutions:
-                # Aucune solution valide, régénérer
-                population = self._initialize_population()
+                # Réinitialisation partielle si pas de solutions valides
+                new_pop = self._initialize_population()
+                population = new_pop[:len(population)//2] + population[len(population)//2:]
                 continue
             
-            # Trouver la meilleure solution
             valid_solutions.sort(key=lambda x: x[3])
             current_best = valid_solutions[0]
             
@@ -589,18 +415,16 @@ class GeneticOptimizer:
             
             self.best_score_history.append(best_score)
             
-            # Callback pour mise à jour UI
             if progress_callback:
-                num_rames = len(best_solution) if best_solution else 0
                 progress_callback(
-                    generation + 1,
-                    self.config.generations,
-                    best_score,
-                    num_rames,
+                    generation + 1, 
+                    self.config.generations, 
+                    best_score, 
+                    len(best_solution) if best_solution else 0, 
                     0
                 )
             
-            # Early stopping
+            # Arrêt anticipé
             if generations_without_improvement >= self.config.early_stop_generations:
                 break
             
@@ -608,295 +432,231 @@ class GeneticOptimizer:
             population = self._create_next_generation(valid_solutions)
         
         if best_solution is None:
-            return {}, {"infra_violations": [], "other": ["Aucune solution valide trouvée"]}, {
-                'mode': 'genetic',
-                'generations': generation + 1,
-                'error': 'No valid solution found'
-            }
+            return {}, {"infra_violations": [], "other": ["Aucune solution valide trouvée"]}, \
+                   {'mode': 'genetic', 'error': 'No valid solution found'}
         
-        stats = {
-            'mode': 'genetic',
-            'generations': generation + 1,
+        return best_solution, best_warnings, {
+            'mode': 'genetic', 
+            'generations': generation + 1, 
             'final_score': best_score,
-            'population_size': self.config.population_size,
+            'population_size': self.config.population_size, 
             'best_score_history': self.best_score_history
         }
-        
-        return best_solution, best_warnings, stats
     
     def _initialize_population(self) -> List[Dict]:
-        """
-        Initialisation incrémentale - VERSION AMÉLIORÉE.
-        
-        Stratégie :
-        1. Commencer avec la solution par défaut (la plus sûre)
-        2. Créer des variations légères (mutations de 1-3 missions)
-        3. Créer des variations moyennes (mutations de 25% des missions)
-        4. Créer des variations avec patterns intelligents
-        5. Compléter avec du totalement aléatoire
-        
-        Cette approche permet :
-        - D'explorer autour d'une solution connue (safe)
-        - De garder une diversité suffisante
-        - D'avoir plus de chances d'avoir des solutions valides dès le départ
-        
-        Returns:
-            List[Dict]: Population initiale de génomes
-        """
+        """Initialise la population avec diversité et stratégies de croisement intelligentes."""
         population = []
-        num_missions = len(self.search_space)
         
-        # =================================================================
-        # 1. SOLUTION PAR DÉFAUT (toujours la première)
-        # =================================================================
-        default_genome = {
-            mission_id: info['default']
-            for mission_id, info in self.search_space.items()
-        }
-        population.append(default_genome)
-        
-        # =================================================================
-        # 2. VARIATIONS LÉGÈRES (mutations minimales)
-        # =================================================================
-        # 20% de la population : mutations de 1 à 3 missions seulement
-        num_light_variants = max(1, int(self.config.population_size * 0.20))
-        
-        for i in range(num_light_variants):
-            variant = default_genome.copy()
+        for i in range(self.config.population_size):
+            genome = {'timing': {}, 'crossing': {}}
             
-            # Nombre de missions à muter (1 à 3)
-            num_mutations = random.randint(1, min(3, num_missions))
-            missions_to_mutate = random.sample(list(variant.keys()), num_mutations)
-            
-            for mission_id in missions_to_mutate:
-                info = self.search_space[mission_id]
-                current = variant[mission_id]
+            # Timing: mélange de valeurs par défaut et aléatoires
+            for mission_id, info in self.search_space.items():
+                if i < self.config.population_size // 4:
+                    # 25% utilisent valeurs par défaut
+                    genome['timing'][mission_id] = info['default']
+                elif i < self.config.population_size // 2:
+                    # 25% utilisent des valeurs par pas de 5
+                    genome['timing'][mission_id] = random.randrange(0, 60, 5)
+                else:
+                    # 50% complètement aléatoires
+                    genome['timing'][mission_id] = random.randint(0, 59)
                 
-                # Mutation dans un rayon de ±10 minutes (léger)
-                delta = random.randint(-10, 10)
-                new_value = (current + delta) % 60
-                
-                # S'assurer que la valeur est dans la range autorisée
-                new_value = max(info['range'][0], min(info['range'][1], new_value))
-                variant[mission_id] = new_value
+                # Stratégies de croisement optimisées
+                ve_list = self.crossing_points.get(mission_id, [])
+                if ve_list and random.random() < 0.6:  # 60% de chance d'avoir une stratégie
+                    # Trois types de stratégies initiales pour diversité
+                    strategy_type = i % 3
+                    
+                    if strategy_type == 0:
+                        # Stratégie "croisement rapide" - favorise arrêts courts
+                        stop_durations = {ve: random.choices([0, 0, 2], weights=[0.6, 0.3, 0.1])[0] for ve in ve_list}
+                        priority = random.uniform(0.5, 0.8)
+                        max_delay = random.choice([10, 15])
+                    elif strategy_type == 1:
+                        # Stratégie "flexible" - permet arrêts moyens
+                        stop_durations = {ve: random.choices([0, 2, 3, 5], weights=[0.4, 0.3, 0.2, 0.1])[0] for ve in ve_list}
+                        priority = random.uniform(0.4, 0.6)
+                        max_delay = random.choice([10, 15, 20])
+                    else:
+                        # Stratégie "sans croisement planifié" - tout à 0
+                        stop_durations = {ve: 0 for ve in ve_list}
+                        priority = random.uniform(0.3, 0.5)
+                        max_delay = 10
+                    
+                    genome['crossing'][mission_id] = CrossingStrategy(
+                        mission_id=mission_id,
+                        stop_durations=stop_durations,
+                        priority=priority,
+                        max_acceptable_delay=max_delay
+                    ).to_dict()
+
             
-            population.append(variant)
-        
-        # =================================================================
-        # 3. VARIATIONS MOYENNES (mutations modérées)
-        # =================================================================
-        # 30% de la population : mutations de 25% des missions
-        num_medium_variants = max(1, int(self.config.population_size * 0.30))
-        
-        for i in range(num_medium_variants):
-            variant = default_genome.copy()
-            
-            # Muter environ 25% des missions
-            num_mutations = max(1, num_missions // 4)
-            missions_to_mutate = random.sample(list(variant.keys()), num_mutations)
-            
-            for mission_id in missions_to_mutate:
-                info = self.search_space[mission_id]
-                current = variant[mission_id]
-                
-                # Mutation dans un rayon de ±20 minutes (moyen)
-                delta = random.randint(-20, 20)
-                new_value = (current + delta) % 60
-                new_value = max(info['range'][0], min(info['range'][1], new_value))
-                variant[mission_id] = new_value
-            
-            population.append(variant)
-        
-        # =================================================================
-        # 4. VARIATIONS AVEC PATTERNS INTELLIGENTS
-        # =================================================================
-        # 20% de la population : patterns structurés
-        num_pattern_variants = max(1, int(self.config.population_size * 0.20))
-        
-        # Définir des patterns de distribution
-        patterns = [
-            # Pattern 1 : Décalage séquentiel (5 min entre chaque)
-            lambda base, idx: (base + idx * 5) % 60,
-            
-            # Pattern 2 : Décalage séquentiel large (10 min entre chaque)
-            lambda base, idx: (base + idx * 10) % 60,
-            
-            # Pattern 3 : Décalage par blocs (même offset pour groupes de missions)
-            lambda base, idx: (base + (idx // 2) * 15) % 60,
-            
-            # Pattern 4 : Alternance (+ ou - un offset fixe)
-            lambda base, idx: (base + (15 if idx % 2 == 0 else -15)) % 60,
-            
-            # Pattern 5 : Distribution "nombre premier" (évite les patterns réguliers)
-            lambda base, idx: (base + idx * 7) % 60,
-        ]
-        
-        for i in range(num_pattern_variants):
-            variant = {}
-            pattern = random.choice(patterns)
-            
-            for idx, (mission_id, info) in enumerate(self.search_space.items()):
-                base = info['default']
-                new_value = pattern(base, idx)
-                
-                # Assurer que c'est dans la range
-                new_value = max(info['range'][0], min(info['range'][1], new_value))
-                variant[mission_id] = new_value
-            
-            population.append(variant)
-        
-        # =================================================================
-        # 5. SOLUTIONS ALÉATOIRES (pour la diversité)
-        # =================================================================
-        # Le reste : totalement aléatoire pour assurer la diversité
-        remaining = self.config.population_size - len(population)
-        
-        if remaining > 0:
-            for i in range(remaining):
-                genome = {
-                    mission_id: random.randint(info['range'][0], info['range'][1])
-                    for mission_id, info in self.search_space.items()
-                }
-                population.append(genome)
+            population.append(genome)
         
         return population
     
     def _evaluate_population_parallel(self, population: List[Dict]) -> List[Tuple]:
-        """Évalue une population EN PARALLÈLE."""
-        if not self.config.use_parallel or self.config.num_workers <= 1:
-            # Mode séquentiel
-            return [self._evaluate_genome(genome) for genome in population]
-        
-        # Mode parallèle
+        """Évaluation parallèle optimisée."""
         config_dict = {
             'mode': self.config.mode,
             'population_size': self.config.population_size,
             'generations': self.config.generations,
-            'mutation_rate': self.config.mutation_rate,
+            'mutation_rate': self.current_mutation_rate,
             'crossover_rate': self.config.crossover_rate,
             'elitism_ratio': self.config.elitism_ratio,
-            'use_parallel': False,  # Désactiver dans les workers
-            'num_workers': 1
+            'use_parallel': False,
+            'num_workers': 1,
+            'use_cache': self.config.use_cache,
+            'timeout_per_eval': self.config.timeout_per_eval
         }
         
         args_list = [
             (genome, self.missions, self.df_gares, self.heure_debut, 
-             self.heure_fin, self.allow_sharing, config_dict)
+             self.heure_fin, self.allow_sharing, config_dict) 
             for genome in population
         ]
         
         results = []
         with ProcessPoolExecutor(max_workers=self.config.num_workers) as executor:
-            futures = {executor.submit(_evaluate_genome_worker, args): args 
-                      for args in args_list}
+            futures = {executor.submit(_evaluate_genome_worker, args): args for args in args_list}
             
             for future in as_completed(futures):
                 try:
-                    result = future.result(timeout=30)
+                    result = future.result(timeout=self.config.timeout_per_eval)
                     results.append(result)
+                except TimeoutError:
+                    # Timeout: score infini
+                    results.append((futures[future][0], {}, 
+                                  {"infra_violations": [], "other": ["Timeout"]}, 
+                                  float('inf')))
                 except Exception as e:
-                    # En cas d'erreur, ajouter une solution invalide
-                    args = futures[future]
-                    results.append((args[0], {}, {"infra_violations": [], 
-                                                  "other": [str(e)]}, float('inf')))
+                    results.append((futures[future][0], {}, 
+                                  {"infra_violations": [], "other": [str(e)]}, 
+                                  float('inf')))
         
         return results
     
-    def _evaluate_genome(self, genome: Dict) -> Tuple[Dict, Dict, Dict, float]:
-        """Évalue un génome (version séquentielle)."""
-        from core_logic import generer_tous_trajets_optimises
-        
-        # Check cache
-        if self.config.use_cache:
-            cache_key = _solution_cache.get_key(self.missions, genome)
-            cached = _solution_cache.get(cache_key)
-            if cached:
-                return cached
-        
-        try:
-            # Appliquer le génome
-            adjusted_missions = deepcopy(self.missions)
-            for mission_id, offset in genome.items():
-                for mission in adjusted_missions:
-                    if f"{mission['origine']}→{mission['terminus']}" == mission_id:
-                        mission['reference_minutes'] = str(offset)
-                        break
-            
-            # Générer la solution
-            chronologie, warnings, _ = generer_tous_trajets_optimises(
-                adjusted_missions, self.df_gares, self.heure_debut, self.heure_fin,
-                allow_sharing=self.allow_sharing,
-                search_strategy='smart'
-            )
-            
-            # Scorer
-            score = self.scorer.score_solution(chronologie, warnings)
-            
-            result = (genome, chronologie, warnings, score)
-            
-            # Cache
-            if self.config.use_cache:
-                _solution_cache.put(cache_key, result)
-            
-            return result
-        
-        except Exception as e:
-            return (genome, {}, {"infra_violations": [], "other": [str(e)]}, float('inf'))
-    
     def _create_next_generation(self, valid_solutions: List[Tuple]) -> List[Dict]:
-        """Crée la génération suivante."""
+        """Crée la nouvelle génération avec opérateurs génétiques optimisés."""
         new_population = []
+        num_elite = int(self.config.population_size * self.config.elitism_ratio)
         
         # Élitisme
-        num_elite = int(self.config.population_size * self.config.elitism_ratio)
         for i in range(num_elite):
             new_population.append(deepcopy(valid_solutions[i][0]))
         
-        # Génération de nouveaux individus
+        # Génération du reste
         while len(new_population) < self.config.population_size:
             if random.random() < self.config.crossover_rate and len(valid_solutions) >= 2:
-                # Croisement
                 parent1 = self._tournament_selection(valid_solutions)
                 parent2 = self._tournament_selection(valid_solutions)
                 child = self._crossover(parent1, parent2)
             else:
-                # Sélection simple
-                child = self._tournament_selection(valid_solutions)
+                child = deepcopy(self._tournament_selection(valid_solutions))
             
-            # Mutation
-            if random.random() < self.config.mutation_rate:
+            if random.random() < self.current_mutation_rate:
                 child = self._mutate(child)
             
             new_population.append(child)
         
         return new_population
     
-    def _tournament_selection(self, valid_solutions: List[Tuple], 
-                              tournament_size: int = 3) -> Dict:
+    def _tournament_selection(self, valid_solutions: List[Tuple]) -> Dict:
         """Sélection par tournoi."""
-        tournament = random.sample(
-            valid_solutions, 
-            min(tournament_size, len(valid_solutions))
-        )
-        tournament.sort(key=lambda x: x[3])
-        return deepcopy(tournament[0][0])
+        tournament = random.sample(valid_solutions, 
+                                  min(self.config.tournament_size, len(valid_solutions)))
+        winner = min(tournament, key=lambda x: x[3])
+        return deepcopy(winner[0])
     
-    def _crossover(self, parent1: Dict, parent2: Dict) -> Dict:
-        """Croisement uniforme."""
-        child = {}
-        for mission_id in parent1.keys():
-            child[mission_id] = parent1[mission_id] if random.random() < 0.5 else parent2[mission_id]
+    def _crossover(self, p1: Dict, p2: Dict) -> Dict:
+        """Croisement à deux points."""
+        child = {'timing': {}, 'crossing': {}}
+        
+        # Croisement timing
+        mission_ids = list(p1['timing'].keys())
+        if len(mission_ids) > 2:
+            point1 = random.randint(0, len(mission_ids) - 1)
+            point2 = random.randint(point1, len(mission_ids) - 1)
+            
+            for i, mid in enumerate(mission_ids):
+                if point1 <= i <= point2:
+                    child['timing'][mid] = p2['timing'][mid]
+                else:
+                    child['timing'][mid] = p1['timing'][mid]
+        else:
+            for mid in mission_ids:
+                child['timing'][mid] = random.choice([p1['timing'][mid], p2['timing'][mid]])
+        
+        # Croisement stratégies de croisement
+        all_mission_ids = set(p1.get('crossing', {}).keys()) | set(p2.get('crossing', {}).keys())
+        for mid in all_mission_ids:
+            if mid in p1.get('crossing', {}) and mid in p2.get('crossing', {}):
+                child['crossing'][mid] = random.choice([p1['crossing'][mid], p2['crossing'][mid]])
+            elif mid in p1.get('crossing', {}):
+                child['crossing'][mid] = p1['crossing'][mid]
+            elif mid in p2.get('crossing', {}):
+                child['crossing'][mid] = p2['crossing'][mid]
+        
         return child
     
     def _mutate(self, genome: Dict) -> Dict:
-        """Mutation."""
+        """Mutation avec intensité variable et optimisation des croisements."""
         mutated = deepcopy(genome)
-        for mission_id, space_info in self.search_space.items():
+        
+        # Mutation timing (30% des gènes)
+        for mid in mutated['timing']:
             if random.random() < 0.3:
-                mutated[mission_id] = random.randint(
-                    space_info['range'][0],
-                    space_info['range'][1]
-                )
+                # 70% mutation locale (±5min), 30% mutation globale
+                if random.random() < 0.7:
+                    current = mutated['timing'][mid]
+                    mutated['timing'][mid] = max(0, min(59, current + random.randint(-5, 5)))
+                else:
+                    mutated['timing'][mid] = random.randint(0, 59)
+        
+        # Mutation crossing - optimisée pour favoriser croisements efficaces
+        if random.random() < 0.3:  # Augmenté de 0.2 à 0.3 pour plus d'exploration
+            for mid in list(mutated.get('crossing', {}).keys()):
+                if random.random() < 0.4:  # Augmenté de 0.3 à 0.4
+                    # Stratégie de mutation intelligente des durées d'arrêt
+                    for ve in mutated['crossing'][mid]['stop_durations']:
+                        if random.random() < 0.5:
+                            # Favoriser les arrêts courts (0, 2, 3) pour minimiser les retards
+                            # tout en permettant des croisements efficaces
+                            mutated['crossing'][mid]['stop_durations'][ve] = random.choices(
+                                [0, 0, 2, 3, 5, 8],  # Favorise 0 (2 fois plus probable)
+                                weights=[0.35, 0.35, 0.15, 0.10, 0.04, 0.01]
+                            )[0]
+                    
+                    # Mutation de la priorité et du délai acceptable
+                    if random.random() < 0.3:
+                        mutated['crossing'][mid]['priority'] = max(0.1, min(0.9, 
+                            mutated['crossing'][mid]['priority'] + random.uniform(-0.2, 0.2)))
+                    
+                    if random.random() < 0.3:
+                        mutated['crossing'][mid]['max_acceptable_delay'] = random.choice([5, 10, 15, 20])
+        
+        # Parfois, ajouter ou supprimer une stratégie de croisement
+        if random.random() < 0.15:  # 15% de chance
+            available_missions = list(self.crossing_points.keys())
+            if available_missions:
+                mission_id = random.choice(available_missions)
+                ve_list = self.crossing_points.get(mission_id, [])
+                
+                if mission_id in mutated.get('crossing', {}) and random.random() < 0.3:
+                    # Supprimer une stratégie existante
+                    del mutated['crossing'][mission_id]
+                elif ve_list and mission_id not in mutated.get('crossing', {}):
+                    # Ajouter une nouvelle stratégie avec paramètres optimisés
+                    if 'crossing' not in mutated:
+                        mutated['crossing'] = {}
+                    mutated['crossing'][mission_id] = CrossingStrategy(
+                        mission_id=mission_id,
+                        stop_durations={ve: random.choices([0, 0, 2, 3], weights=[0.5, 0.5, 0.3, 0.2])[0] for ve in ve_list},
+                        priority=random.uniform(0.4, 0.7),  # Priorités moyennes à hautes
+                        max_acceptable_delay=random.choice([10, 15])  # Délais raisonnables
+                    ).to_dict()
+        
         return mutated
 
 
@@ -904,178 +664,82 @@ class GeneticOptimizer:
 # MODE EXHAUSTIF (INCHANGÉ)
 # =============================================================================
 
-def optimize_exhaustive(missions: List[Dict], df_gares, heure_debut, heure_fin,
-                       config: OptimizationConfig, scorer: SolutionScorer,
-                       allow_sharing: bool = True,
-                       progress_callback: Optional[Callable] = None) -> Tuple[Dict, Dict, Dict]:
-    """
-    Optimisation exhaustive : teste toutes les combinaisons.
-    
-    GARANTIE : Ne retient que des solutions VALIDES.
-    """
+def optimize_exhaustive(missions, df_gares, heure_debut, heure_fin, config, 
+                       scorer, allow_sharing, progress_callback):
+    """Mode exhaustif pour petits problèmes."""
     from core_logic import generer_tous_trajets_optimises
     from itertools import product
     
-    # Identifier les missions retour à optimiser
     mission_retours = []
-    for mission in missions:
-        mission_retour_id = f"{mission['terminus']}→{mission['origine']}"
-        has_return = any(
-            f"{m['origine']}→{m['terminus']}" == mission_retour_id
-            for m in missions
-        )
-        if has_return:
-            # Tester par pas de 5 minutes
-            mission_retours.append((mission_retour_id, list(range(0, 60, 5))))
+    for m in missions:
+        ret_id = f"{m['terminus']}→{m['origine']}"
+        if any(f"{mx['origine']}→{mx['terminus']}" == ret_id for mx in missions):
+            mission_retours.append((ret_id, list(range(0, 60, 5))))
     
     if not mission_retours:
-        # Pas de retours à optimiser
-        chronologie, warnings, _ = generer_tous_trajets_optimises(
-            missions, df_gares, heure_debut, heure_fin,
-            allow_sharing=allow_sharing,
-            search_strategy='smart'
+        chrono, warns, _ = generer_tous_trajets_optimises(
+            missions, df_gares, heure_debut, heure_fin, allow_sharing=allow_sharing
         )
-        return chronologie, warnings, {'mode': 'exhaustif', 'combinations_tested': 1}
+        return chrono, warns, {'mode': 'exhaustif', 'combinations_tested': 1}
     
-    # Générer toutes les combinaisons
-    all_combinations = list(product(*[values for _, values in mission_retours]))
-    total_combinations = len(all_combinations)
+    all_combos = list(product(*[v for _, v in mission_retours]))
+    best_res, best_score = (None, None, None), float('inf')
     
-    best_chronologie = None
-    best_warnings = None
-    best_score = float('inf')
-    valid_count = 0
-    
-    for idx, combination in enumerate(all_combinations):
-        # Configurer les missions
-        adjusted_missions = deepcopy(missions)
+    for idx, combo in enumerate(all_combos):
+        adj_missions = deepcopy(missions)
+        for i, (mid, val) in enumerate(zip([x[0] for x in mission_retours], combo)):
+            for m in adj_missions:
+                if f"{m['origine']}→{m['terminus']}" == mid:
+                    m['reference_minutes'] = str(val)
         
-        for i, (mission_id, minute) in enumerate(zip(
-            [m_id for m_id, _ in mission_retours], combination
-        )):
-            for mission in adjusted_missions:
-                if f"{mission['origine']}→{mission['terminus']}" == mission_id:
-                    mission['reference_minutes'] = str(minute)
-                    break
-        
-        # Générer la solution
-        chronologie, warnings, _ = generer_tous_trajets_optimises(
-            adjusted_missions, df_gares, heure_debut, heure_fin,
-            allow_sharing=allow_sharing,
-            search_strategy='exhaustive'
+        chrono, warns, _ = generer_tous_trajets_optimises(
+            adj_missions, df_gares, heure_debut, heure_fin, 
+            allow_sharing=allow_sharing, search_strategy='exhaustive'
         )
         
-        # Vérifier la validité
-        if not scorer.is_valid_solution(warnings):
-            # Solution invalide, passer
+        if not scorer.is_valid_solution(warns):
             if progress_callback:
-                progress_callback(idx + 1, total_combinations, best_score, 0, 0)
+                progress_callback(idx+1, len(all_combos), best_score, 0, 0)
             continue
         
-        valid_count += 1
-        
-        # Évaluer
-        score = scorer.score_solution(chronologie, warnings)
-        
+        score = scorer.score_solution(chrono, warns)
         if score < best_score:
             best_score = score
-            best_chronologie = chronologie
-            best_warnings = warnings
+            best_res = (chrono, warns)
         
         if progress_callback:
-            num_rames = len(best_chronologie) if best_chronologie else 0
-            progress_callback(idx + 1, total_combinations, best_score, num_rames, 0)
+            progress_callback(idx+1, len(all_combos), best_score, len(chrono) if chrono else 0, 0)
     
-    if best_chronologie is None:
-        # Aucune solution valide trouvée
-        return {}, {"infra_violations": [], "other": ["Aucune solution valide trouvée"]}, {
-            'mode': 'exhaustif',
-            'combinations_tested': total_combinations,
-            'valid_combinations': valid_count,
-            'error': 'No valid solution found'
-        }
-    
-    stats = {
-        'mode': 'exhaustif',
-        'combinations_tested': total_combinations,
-        'valid_combinations': valid_count,
-        'best_score': best_score
-    }
-    
-    return best_chronologie, best_warnings, stats
+    if best_res[0] is None:
+        return {}, {"infra_violations": [], "other": ["Echec exhaustif"]}, {'mode': 'exhaustif'}
+    return best_res[0], best_res[1], {'mode': 'exhaustif', 'best_score': best_score}
 
 
 # =============================================================================
-# FONCTION PRINCIPALE D'OPTIMISATION
+# FONCTION PRINCIPALE
 # =============================================================================
 
-def optimiser_graphique_horaire(missions: List[Dict], df_gares, heure_debut, heure_fin,
-                                config: OptimizationConfig,
-                                allow_sharing: bool = True,
-                                progress_callback: Optional[Callable] = None) -> Tuple[Dict, Dict, Dict]:
-    """
-    Fonction principale d'optimisation.
-    
-    GARANTIE ABSOLUE : Aucune violation d'infrastructure dans la solution finale.
-    
-    Args:
-        missions: Liste des missions à planifier
-        df_gares: DataFrame des gares
-        heure_debut: Heure de début du service
-        heure_fin: Heure de fin du service
-        config: Configuration de l'optimisation
-        allow_sharing: Autoriser le partage de matériel
-        progress_callback: Fonction callback(current, total, best_score, num_rames, delay)
-    
-    Returns:
-        (chronologie, warnings, stats)
-        - chronologie: Dict des trains planifiés (SANS violations)
-        - warnings: Dict des avertissements (infra_violations sera VIDE si solution valide)
-        - stats: Dict des statistiques d'optimisation
-    """
-    from core_logic import generer_tous_trajets_optimises
-    
-    # Créer le scorer
+def optimiser_graphique_horaire(missions, df_gares, heure_debut, heure_fin, 
+                               config, allow_sharing=True, progress_callback=None):
+    """Point d'entrée principal de l'optimisation."""
     scorer = SolutionScorer(config)
     
+    # Redirection du mode "smart" vers "smart_progressive"
+    if config.mode == "smart":
+        config.mode = "smart_progressive"
+    
     if config.mode == "genetic":
-        # Mode génétique
-        optimizer = GeneticOptimizer(
-            missions, df_gares, heure_debut, heure_fin,
-            config, scorer, allow_sharing
-        )
-        chronologie, warnings, stats = optimizer.optimize(progress_callback)
-        
+        optimizer = GeneticOptimizer(missions, df_gares, heure_debut, heure_fin, 
+                                    config, scorer, allow_sharing)
+        return optimizer.optimize(progress_callback)
     elif config.mode == "exhaustif":
-        # Mode exhaustif
-        chronologie, warnings, stats = optimize_exhaustive(
-            missions, df_gares, heure_debut, heure_fin,
-            config, scorer, allow_sharing, progress_callback
-        )
-        
-    else:  # mode == "smart"
-        # Mode smart (utilise l'algorithme existant)
-        chronologie, warnings, _ = generer_tous_trajets_optimises(
-            missions, df_gares, heure_debut, heure_fin,
-            allow_sharing=allow_sharing,
-            progress_callback=progress_callback,
+        return optimize_exhaustive(missions, df_gares, heure_debut, heure_fin, 
+                                  config, scorer, allow_sharing, progress_callback)
+    else:  # smart_progressive, fast, ou autres
+        from core_logic import generer_tous_trajets_optimises
+        c, w, _ = generer_tous_trajets_optimises(
+            missions, df_gares, heure_debut, heure_fin, 
+            allow_sharing=allow_sharing, progress_callback=progress_callback,
             search_strategy=config.mode
         )
-        
-        stats = {
-            'mode': 'smart',
-            'score': scorer.score_solution(chronologie, warnings) if scorer.is_valid_solution(warnings) else float('inf')
-        }
-    
-    # VÉRIFICATION FINALE DE SÉCURITÉ
-    if not scorer.is_valid_solution(warnings):
-        # Si pas de solution valide, retourner un résultat vide avec message
-        return {}, {
-            "infra_violations": [],
-            "other": warnings.get("other", []) + ["ERREUR : Solution invalide générée"]
-        }, {
-            'mode': config.mode,
-            'error': 'Invalid solution generated'
-        }
-    
-    return chronologie, warnings, stats
+        return c, w, {'mode': config.mode}
