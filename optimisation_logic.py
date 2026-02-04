@@ -61,7 +61,7 @@ class CrossingStrategy:
 @dataclass
 class OptimizationConfig:
     """Configuration générale de l'optimisation."""
-    mode: str = "smart_progressive"  # Changé de "smart" à "smart_progressive"
+    mode: str = "smart_progressive"  # Options: "simple", "fast", "smart_progressive", "exhaustif", "genetic"
     crossing_optimization: CrossingOptimization = None
     
     # Paramètres génétiques optimisés
@@ -735,6 +735,16 @@ def optimiser_graphique_horaire(missions, df_gares, heure_debut, heure_fin,
     elif config.mode == "exhaustif":
         return optimize_exhaustive(missions, df_gares, heure_debut, heure_fin, 
                                   config, scorer, allow_sharing, progress_callback)
+    elif config.mode == "simple":
+        # Mode simple : utilise la logique de base sans optimisation avancée
+        # L'utilisateur contrôle directement via les temps de retournement configurés
+        from core_logic import generer_tous_trajets_optimises
+        c, w, _ = generer_tous_trajets_optimises(
+            missions, df_gares, heure_debut, heure_fin, 
+            allow_sharing=allow_sharing, progress_callback=progress_callback,
+            search_strategy='simple'  # Mode simple sans recherche
+        )
+        return c, w, {'mode': 'simple', 'description': 'Simulation directe avec paramètres utilisateur'}
     else:  # smart_progressive, fast, ou autres
         from core_logic import generer_tous_trajets_optimises
         c, w, _ = generer_tous_trajets_optimises(

@@ -165,7 +165,7 @@ class SimulationEngine:
         self.last_crossing_extensions = []
     
         i = 0
-        max_attempts = 50
+        max_attempts = 500  # Augmenté de 50 à 500 pour plus de persistence
         
         while i < len(steps) - 1:
             # Trouver le prochain point de croisement
@@ -181,7 +181,7 @@ class SimulationEngine:
             travel_time_block += steps[target_idx]['run_time']
     
             current_departure = current_time
-            max_delay = timedelta(minutes=crossing_strategy.max_acceptable_delay if crossing_strategy else 60)
+            max_delay = timedelta(minutes=crossing_strategy.max_acceptable_delay if crossing_strategy else 240)  # 4h par défaut
             
             # Extension d'arrêt planifiée pour croisement
             planned_stop_extension = 0
@@ -461,6 +461,271 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
     
     # Génération des Retours avec optimisation
     missions_avec_retour = [m for m in missions if m.get('frequence', 0) > 0]
+    
+    if search_strategy == 'simple':
+        # MODE SIMPLE : Logique événementielle de l'ancienne version
+        # Seuls les ALLERS sont programmés initialement, les RETOURS sont créés dynamiquement
+        from collections import defaultdict
+        import heapq
+        
+        infra_violation_warnings = []
+        other_warnings = []
+        chronologie_reelle = {}
+        id_train_counter = 1
+        event_counter = 0
+        
+        trains = {}  # {id: {"loc": gare, "dispo_a": datetime}}
+        occupation_cantons = defaultdict(list)
+        evenements = []  # heapq
+        
+        # Générer UNIQUEMENT les demandes de départ ALLER
+        for m_idx, mission in enumerate(missions):
+            if mission.get('frequence', 0) <= 0:
+                continue
+            
+            mission_id = f"M{m_idx+1}"
+            frequence = mission['frequence']
+            intervalle = timedelta(hours=1.0 / frequence)
+            
+            # Minutes de référence
+            minutes_ref_str = mission.get("reference_minutes", "0")
+            try:
+                minutes_ref = sorted(list(set([
+                    int(m.strip()) for m in minutes_ref_str.split(',')
+                    if m.strip().isdigit()
+                ])))
+                if not minutes_ref:
+                    minutes_ref = [0]
+            except:
+                minutes_ref = [0]
+            
+            # Générer les événements de demande ALLER
+            for minute_ref in minutes_ref:
+                offset_hours = minute_ref // 60
+                offset_minutes = minute_ref % 60
+                
+                curseur_temps = engine.dt_debut.replace(
+                    minute=offset_minutes, second=0, microsecond=0
+                ) + timedelta(hours=offset_hours)
+                
+                # Ajuster au premier départ dans ou après dt_debut
+                while curseur_temps < engine.dt_debut:
+                    curseur_temps += intervalle
+                
+                # Générer les départs jusqu'à la fin de service
+                while curseur_temps < engine.dt_fin:
+                    event_counter += 1
+                    heapq.heappush(evenements, (
+                        curseur_temps, event_counter, "demande_depart_aller",
+                        {"mission": mission, "mission_id": mission_id}
+                    ))
+                    curseur_temps += intervalle
+        
+        # Boucle événementielle principale
+        while evenements:
+            heure, _, type_event, details = heapq.heappop(evenements)
+            
+            if heure >= engine.dt_fin:
+                continue
+            
+            # Gestion demande de départ ALLER
+            if type_event == "demande_depart_aller":
+                mission_cfg = details["mission"]
+                mission_id = details["mission_id"]
+                origine = mission_cfg["origine"]
+                
+                # Trouver train disponible à l'origine
+                train_assigne_id = None
+                earliest_dispo = datetime.max
+                
+                for id_t, t in trains.items():
+                    if t.get("loc") == origine and t.get("dispo_a", datetime.max) <= heure:
+                        if t["dispo_a"] < earliest_dispo:
+                            earliest_dispo = t["dispo_a"]
+                            train_assigne_id = id_t
+                
+                # Si pas de train, en créer un
+                if train_assigne_id is None:
+                    train_assigne_id = id_train_counter
+                    trains[train_assigne_id] = {"id": train_assigne_id, "loc": origine, "dispo_a": heure}
+                    chronologie_reelle[train_assigne_id] = []
+                    id_train_counter += 1
+                else:
+                    trains[train_assigne_id]["dispo_a"] = max(heure, earliest_dispo)
+                
+                # Programmer la tentative de mouvement
+                heure_programmation = max(heure, trains[train_assigne_id]["dispo_a"])
+                event_counter += 1
+                heapq.heappush(evenements, (heure_programmation, event_counter, "tentative_mouvement", {
+                    "id_train": train_assigne_id,
+                    "mission": mission_cfg,
+                    "mission_id": mission_id,
+                    "trajet_spec": "aller",
+                    "index_etape": 0,
+                    "retry_count": 0
+                }))
+            
+            # Gestion tentative de mouvement
+            elif type_event == "tentative_mouvement":
+                id_train = details["id_train"]
+                mission_cfg = details["mission"]
+                mission_id = details["mission_id"]
+                trajet_spec = details["trajet_spec"]
+                index_etape = details["index_etape"]
+                
+                # Construire l'horaire
+                horaire = construire_horaire_mission(mission_cfg, trajet_spec, df_gares)
+                
+                if not horaire or index_etape >= len(horaire) - 1:
+                    continue
+                
+                pt_depart = horaire[index_etape]
+                pt_arrivee = horaire[index_etape + 1]
+                gare_dep = pt_depart.get("gare")
+                gare_arr = pt_arrivee.get("gare")
+                
+                duree_min_trajet = max(0, pt_arrivee.get("time_offset_min", 0) - pt_depart.get("time_offset_min", 0))
+                
+                dispo_train = trains.get(id_train, {}).get("dispo_a", heure)
+                heure_depart_reelle = max(heure, dispo_train)
+                
+                if heure_depart_reelle >= engine.dt_fin:
+                    continue
+                
+                # Vérification conflit simple (check segment availability)
+                conflit = False
+                if duree_min_trajet > 0 and gare_dep != gare_arr:
+                    idx_dep = engine.gares_map.get(gare_dep)
+                    idx_arr = engine.gares_map.get(gare_arr)
+                    
+                    if idx_dep is not None and idx_arr is not None:
+                        idx_min = min(idx_dep, idx_arr)
+                        idx_max = max(idx_dep, idx_arr)
+                        t_enter = heure_depart_reelle
+                        t_exit = heure_depart_reelle + timedelta(minutes=duree_min_trajet)
+                        
+                        is_free, next_t = engine.check_segment_availability(idx_min, idx_max, t_enter, t_exit)
+                        if not is_free:
+                            conflit = True
+                            fin_conflit = next_t
+                
+                if not conflit:
+                    # Mouvement réussi
+                    heure_arrivee_reelle = heure_depart_reelle + timedelta(minutes=duree_min_trajet)
+                    
+                    if heure_arrivee_reelle > engine.dt_fin:
+                        continue
+                    
+                    # Enregistrer trajet
+                    if duree_min_trajet > 0 and gare_dep != gare_arr:
+                        chronologie_reelle.setdefault(id_train, []).append({
+                            "start": heure_depart_reelle,
+                            "end": heure_arrivee_reelle,
+                            "origine": gare_dep,
+                            "terminus": gare_arr
+                        })
+                        
+                        # Marquer occupation
+                        idx_dep = engine.gares_map[gare_dep]
+                        idx_arr = engine.gares_map[gare_arr]
+                        path_segment = [{
+                            'gare': gare_dep, 'index': idx_dep,
+                            'arr': heure_depart_reelle, 'dep': heure_depart_reelle
+                        }, {
+                            'gare': gare_arr, 'index': idx_arr,
+                            'arr': heure_arrivee_reelle, 'dep': heure_arrivee_reelle
+                        }]
+                        engine.committed_schedules.append({'train_id': id_train, 'path': path_segment})
+                    
+                    # Mettre à jour train
+                    trains[id_train]["loc"] = gare_arr
+                    trains[id_train]["dispo_a"] = heure_arrivee_reelle
+                    
+                    # Programmer étape suivante ou fin mission
+                    if index_etape + 1 < len(horaire) - 1:
+                        event_counter += 1
+                        heapq.heappush(evenements, (heure_arrivee_reelle, event_counter, "tentative_mouvement", {
+                            "id_train": id_train,
+                            "mission": mission_cfg,
+                            "mission_id": mission_id,
+                            "trajet_spec": trajet_spec,
+                            "index_etape": index_etape + 1,
+                            "retry_count": 0
+                        }))
+                    else:
+                        event_counter += 1
+                        heapq.heappush(evenements, (heure_arrivee_reelle, event_counter, "fin_mission", {
+                            "id_train": id_train,
+                            "mission": mission_cfg,
+                            "mission_id": mission_id,
+                            "trajet_spec": trajet_spec,
+                            "gare_finale": gare_arr
+                        }))
+                else:
+                    # Conflit -> Reprogrammer
+                    retry_count = details.get("retry_count", 0)
+                    if retry_count < 500:  # Limite de retry
+                        new_details = details.copy()
+                        new_details["retry_count"] = retry_count + 1
+                        event_counter += 1
+                        heapq.heappush(evenements, (fin_conflit, event_counter, "tentative_mouvement", new_details))
+            
+            # Gestion fin de mission
+            elif type_event == "fin_mission":
+                id_train = details["id_train"]
+                mission_cfg = details["mission"]
+                mission_id = details["mission_id"]
+                gare_finale = details["gare_finale"]
+                
+                if id_train in trains:
+                    trains[id_train]["loc"] = gare_finale
+                    heure_arrivee_mission = heure
+                else:
+                    continue
+                
+                if details["trajet_spec"] == "aller":
+                    # Fin aller -> Programmer retour
+                    temps_retournement = mission_cfg.get("temps_retournement_B", 10)
+                    heure_dispo_pour_retour = heure_arrivee_mission + timedelta(minutes=temps_retournement)
+                    trains[id_train]["dispo_a"] = heure_dispo_pour_retour
+                    
+                    # Calculer durée retour pour vérifier si faisable
+                    horaire_retour = construire_horaire_mission(mission_cfg, "retour", df_gares)
+                    if horaire_retour and len(horaire_retour) > 1:
+                        temps_trajet_retour = horaire_retour[-1].get("time_offset_min", 0)
+                        heure_fin_retour_estimee = heure_dispo_pour_retour + timedelta(minutes=temps_trajet_retour)
+                        
+                        if heure_fin_retour_estimee <= engine.dt_fin:
+                            event_counter += 1
+                            heapq.heappush(evenements, (heure_dispo_pour_retour, event_counter, "tentative_mouvement", {
+                                "id_train": id_train,
+                                "mission": mission_cfg,
+                                "mission_id": mission_id,
+                                "trajet_spec": "retour",
+                                "index_etape": 0,
+                                "retry_count": 0
+                            }))
+                else:
+                    # Fin retour -> Train dispo pour nouvel aller
+                    temps_retournement = mission_cfg.get("temps_retournement_A", 10)
+                    heure_dispo_finale = heure_arrivee_mission + timedelta(minutes=temps_retournement)
+                    trains[id_train]["dispo_a"] = heure_dispo_finale
+        
+        # Nettoyage
+        trains_a_supprimer = [tid for tid, trajets in chronologie_reelle.items() if not trajets]
+        for tid in trains_a_supprimer:
+            del chronologie_reelle[tid]
+        
+        warnings = {
+            "infra_violations": infra_violation_warnings,
+            "other": other_warnings
+        }
+        stats_homogeneite = _calculer_stats_homogeneite(chronologie_reelle)
+        
+        if progress_callback:
+            progress_callback(1, 1, 0, len(chronologie_reelle), 0)
+        
+        return chronologie_reelle, warnings, stats_homogeneite
     
     if search_strategy == 'smart_progressive':
         # Stratégie SMART PROGRESSIVE : recherche par affinement progressif

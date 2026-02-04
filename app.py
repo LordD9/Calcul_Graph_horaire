@@ -835,14 +835,16 @@ if st.session_state.gares is not None and st.session_state.missions:
 
             optimization_mode = st.selectbox(
                 "Algorithme",
-                ["fast", "smart_progressive", "exhaustif", "genetic"],
+                ["simple", "fast", "smart_progressive", "exhaustif", "genetic"],
                 format_func=lambda x: {
+                    "simple": "🎯 Simple - Simulation directe (ancienne méthode)",
                     "fast": "⚡ Fast - Ultra rapide (pas de 10 min)",
                     "smart_progressive": "🎯🔍 Smart Progressive - Affinement intelligent (RECOMMANDÉ)",
                     "exhaustif": "🔍 Exhaustif - Complet (chaque minute)",
                     "genetic": "🧬 Génétique - Évolutionnaire"
                 }[x],
                 help="""
+                • Simple : Simulation directe sans optimisation (vous contrôlez via temps de retournement)
                 • Fast : Recherche rapide par pas de 10 minutes (très rapide)
                 • Smart Progressive : Recherche progressive (10min → 5min → 2min → 1min) - RECOMMANDÉ
                 • Exhaustif : Teste chaque minute (< 4 missions recommandé)
@@ -957,7 +959,9 @@ if st.session_state.gares is not None and st.session_state.missions:
 
         with col_recap3:
             # Estimation du temps
-            if optimization_mode == "fast":
+            if optimization_mode == "simple":
+                time_est = "< 2 secondes"
+            elif optimization_mode == "fast":
                 time_est = "< 2 secondes"
             elif optimization_mode == "smart_progressive":
                 time_est = "10-30 secondes"
