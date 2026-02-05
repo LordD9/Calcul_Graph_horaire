@@ -751,21 +751,7 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
                         if not is_free:
                             conflit = True
                             fin_conflit = next_t
-                            
-                            # NOUVEAU : Avertissement si croisement en gare sans infrastructure
-                            # Vérifier si le conflit implique une gare intermédiaire sans VE
-                            for gare_info in bloc_gares[1:-1]:  # Gares intermédiaires
-                                gare_inter = gare_info["gare"]
-                                infra_inter = _get_infra_at_gare(df_gares, gare_inter)
-                                if not _is_crossing_point(infra_inter):
-                                    # Potentielle violation : croisement dans une gare sans infrastructure
-                                    infra_violation_warnings.append({
-                                        "time": heure_depart_reelle,
-                                        "gare": gare_inter,
-                                        "infra": infra_inter,
-                                        "mission": mission_id,
-                                        "reason": f"Conflit détecté dans le bloc incluant {gare_inter} (infra: {infra_inter}, pas de voie d'évitement)"
-                                    })
+                            # Note: L'avertissement sera généré seulement si échec de résolution (après 500 tentatives)
                 
                 if not conflit:
                     # Mouvement du bloc complet réussi
@@ -865,12 +851,25 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
                             new_details
                         ))
                     else:
-                        # Échec après trop de tentatives
+                        # Échec après trop de tentatives - VRAIE VIOLATION
+                        # Identifier les gares problématiques dans le bloc
+                        gares_sans_ve = []
+                        for gare_info in bloc_gares[1:-1]:  # Gares intermédiaires
+                            gare_inter = gare_info["gare"]
+                            infra_inter = _get_infra_at_gare(df_gares, gare_inter)
+                            if not _is_crossing_point(infra_inter):
+                                gares_sans_ve.append(f"{gare_inter} ({infra_inter})")
+                        
+                        reason_detail = f"Impossible de trouver un créneau libre après 500 tentatives pour le bloc {gare_dep_bloc} → {gare_arr_bloc}"
+                        if gares_sans_ve:
+                            reason_detail += f". Gares sans voie d'évitement dans le bloc : {', '.join(gares_sans_ve)}"
+                        
                         infra_violation_warnings.append({
                             "time": heure_depart_reelle,
                             "gare": f"{gare_dep_bloc} → {gare_arr_bloc}",
                             "mission": mission_id,
-                            "reason": "Impossible de trouver un créneau libre après 500 tentatives"
+                            "reason": reason_detail,
+                            "is_infra_violation": True
                         })
             
             # Gestion fin de mission
