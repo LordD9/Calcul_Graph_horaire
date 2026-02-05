@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-plotting.py - Version "Lignes pures"
+plotting.py
+===========
 
-Tracé du graphique horaire en respectant les temps RÉELS générés par core_logic.
-Principe :
-- en mode standard : tracé linéaire simple entre start et end
-- en mode calcul energie : tracé physique (accel / cruise / décel) basé sur la vitesse réel du segment
+Module de visualisation graphique.
+
+Ce module est responsable de la génération des graphiques espace-temps (Marey) et autres visualisations.
+
+Fonctions principales :
+- `creer_graphique_horaire` : Génère le graphique espace-temps principal.
 """
 
 import matplotlib.pyplot as plt
@@ -31,28 +34,22 @@ def creer_graphique_horaire(
     all_energy_params=None
 ):
     """
+    Génère le graphique espace-temps (diagramme de Marey) des circulations.
+
     Args:
+        chronologie_trajets (dict): Dictionnaire {train_id: [liste de trajets]}.
+            Chaque trajet est un dict avec clés 'start', 'end', 'origine', 'terminus'.
+        df_gares (pd.DataFrame): DataFrame des gares avec positions kilométriques et codes infra.
+        heure_debut_service (time): Heure de début de l'axe temporel.
+        params_affichage (dict): Paramètres de vue ('duree_fenetre', 'decalage_heure').
+        mode_calcul (str, optional): "Standard" (lignes droites) ou "Calcul Energie" (profils physiques).
+        missions_par_train (dict, optional): Mapping pour identifier la mission de chaque train.
+        all_energy_params (dict, optional): Paramètres énergétiques pour le tracé physique.
 
-        chronologie_trajets: Dict {id_train: [liste de trajets]}
-
-        chaque trajet contient "start", "end", "origine", "terminus"
-
-
-        df_gares: DataFrame des gares avec distances et infrastructure
-
-
-        heure_debut_service: time object pour le début du service
-
-
-        params_affichage: Dict avec 'duree_fenetre' et 'decalage_heure'
-
-
-        mode_calcul: "Standard" ou "Calcul Energie"
-
-
-        missions_par_train: Dict {id_train: mission} pour connaître le matériel
-
+    Returns:
+        matplotlib.figure.Figure: La figure générée contenant le graphique.
     """
+
     df_gares_triees = df_gares.sort_values("distance", ascending=True).reset_index(drop=True)
     gare_vers_distance = {row["gare"]: row["distance"] for _, row in df_gares_triees.iterrows()}
 

@@ -3,10 +3,20 @@
 core_logic.py
 =============
 
-Version : 5.0 (Nettoyée et optimisée)
-- Code mort supprimé
-- Cache optimisé
-- Fonctions non utilisées retirées
+Cœur du moteur de simulation ferroviaire.
+
+Ce module contient la logique fondamentale pour :
+1.  **La simulation des circulations** : Vérification des conflits de circulation sur voie unique (`SimulationEngine`).
+2.  **La génération d'horaires** : Calcul des heures de passage, gestion des croisements.
+3.  **L'interface avec l'optimisation** : Point d'entrée pour les algorithmes d'optimisation (`generer_tous_trajets_optimises`).
+4.  **L'analyse de performance** : Calcul de l'indice d'homogénéité (Gini), import/export de données.
+
+Classes principales :
+- `SimulationEngine` : Gère l'état de la simulation, la vérification des segments libres et l'allocation des rames.
+
+Fonctions clés :
+- `generer_tous_trajets_optimises` : Orchestrateur principal pour la génération d'horaires.
+- `evaluer_configuration` : Calcule le score d'une solution proposée.
 """
 
 from datetime import datetime, timedelta
@@ -22,7 +32,16 @@ import json
 # =============================================================================
 
 def _get_infra_at_gare(df_gares, gare_name):
-    """Récupère le type d'infrastructure pour une gare donnée."""
+    """
+    Récupère le code d'infrastructure pour une gare donnée.
+
+    Args:
+        df_gares (pd.DataFrame): DataFrame contenant les infos des gares (colonnes 'gare', 'infra').
+        gare_name (str): Nom de la gare recherchée.
+
+    Returns:
+        str: Code infra ('F', 'VE', 'D', 'Terminus', etc.). Retourne 'F' par défaut.
+    """
     try:
         if df_gares is None or 'gare' not in df_gares.columns or 'infra' not in df_gares.columns:
             return 'F'
@@ -35,11 +54,34 @@ def _get_infra_at_gare(df_gares, gare_name):
         return 'F'
 
 def _is_crossing_point(infra_code):
-    """Détermine si un train peut s'arrêter ou croiser à un point donné."""
+    """
+    Détermine si un train peut s'arrêter ou croiser à un point donné.
+    
+    Un point de croisement est une gare disposant d'une infrastructure adéquate :
+    - 'VE' (Voie d'Évitement)
+    - 'D' (Double voie / Début double voie)
+    - 'Terminus'
+
+    Args:
+        infra_code (str): Le code infrastructure de la gare.
+
+    Returns:
+        bool: True si le croisement est possible, False sinon.
+    """
     return infra_code in ['VE', 'D', 'Terminus']
 
 def calculer_indice_homogeneite(horaires):
-    """Calcule l'homogénéité du cadencement via coefficient de Gini inversé."""
+    """
+    Calcule l'homogénéité du cadencement via un coefficient de Gini inversé.
+
+    L'indice varie de 0.0 (très irrégulier) à 1.0 (cadencement parfaitement régulier).
+
+    Args:
+        horaires (list): Liste d'objets datetime ou timestamps représentant les passages.
+
+    Returns:
+        float: Score d'homogénéité entre 0.0 et 1.0.
+    """
     if len(horaires) < 2:
         return 1.0
 
@@ -73,9 +115,24 @@ def calculer_indice_homogeneite(horaires):
 # =============================================================================
 
 class SimulationEngine:
-    """Classe gérant l'état de la simulation avec optimisations."""
+    """
+    Moteur de simulation gérant l'état des circulations et la détection des conflits.
+
+    Cette classe maintient l'état global de la grille horaire en cours de construction :
+    - Segments de voie occupés.
+    - Disponibilité des rames (flotte).
+    - Respect des contraintes de voie unique (sécurité).
+    """
     
     def __init__(self, df_gares, heure_debut, heure_fin):
+        """
+        Initialise le moteur de simulation.
+
+        Args:
+            df_gares (pd.DataFrame): Données des gares (séquencées par distance).
+            heure_debut (time): Heure de début de service.
+            heure_fin (time): Heure de fin de service.
+        """
         self.df_gares = df_gares.sort_values('distance').reset_index(drop=True)
         self.gares_map = {r.gare: i for i, r in self.df_gares.iterrows()}
         self.infra_map = {r.gare: _get_infra_at_gare(df_gares, r.gare) for _, r in self.df_gares.iterrows()}
@@ -89,14 +146,19 @@ class SimulationEngine:
         self.reset()
 
     def reset(self):
-        """Réinitialise l'état pour une nouvelle tentative de simulation."""
+        """Réinitialise l'état complet (horaires validés, flotte) pour une nouvelle simulation."""
         self.committed_schedules = []
         self.fleet_availability = defaultdict(list)
         self.train_counter = 1
         self.last_crossing_extensions = []
 
     def _analyze_segments(self):
-        """Détermine pour chaque inter-gare si c'est VU ou DV."""
+        """
+        Analyse l'infrastructure pour identifier les segments à double voie.
+        
+        Returns:
+            dict: Mapping {index_segment: bool (True si double voie)}.
+        """
         is_double = {}
         n = len(self.df_gares)
         current_state_double = False
@@ -109,7 +171,18 @@ class SimulationEngine:
         return is_double
 
     def check_segment_availability(self, seg_idx_min, seg_idx_max, t_enter, t_exit):
-        """Vérifie si un tronçon est libre sur une plage horaire."""
+        """
+        Vérifie si un ensemble de segments (tronçon) est libre sur une plage horaire donnée.
+
+        Args:
+            seg_idx_min (int): Index de début du tronçon.
+            seg_idx_max (int): Index de fin du tronçon.
+            t_enter (datetime): Heure d'entrée sur le tronçon.
+            t_exit (datetime): Heure de sortie du tronçon.
+
+        Returns:
+            tuple: (bool is_free, datetime next_available_time_if_occupied)
+        """
         margin = timedelta(minutes=1)
 
         # Optimisation : vérifier si tous les segments sont en double voie
@@ -136,7 +209,22 @@ class SimulationEngine:
         return True, None
 
     def solve_mission_schedule(self, mission, ideal_start_time, direction, crossing_strategy=None):
-        """Construit un sillon valide avec gestion stratégique des croisements."""
+        """
+        Construit un sillon valide (horaire) pour une mission, en gérant les conflits de circulation.
+
+        Cette méthode tente de tracer le train point par point (bloc par bloc entre deux évitements).
+        Si un conflit est détecté sur une section à voie unique, elle retarde le départ
+        depuis le dernier point d'arrêt valide jusqu'à libération de la voie.
+
+        Args:
+            mission (dict): Configuration de la mission (gares, temps de parcours).
+            ideal_start_time (datetime): Heure de départ souhaitée.
+            direction (str): 'aller' ou 'retour'.
+            crossing_strategy (CrossingStrategy, optional): Stratégie d'optimisation des croisements.
+
+        Returns:
+            tuple: (datetime real_departure, list path_steps, str error_message)
+        """
         base_schedule = construire_horaire_mission(mission, direction, self.df_gares)
         if not base_schedule:
             return None, [], "Erreur itinéraire"
@@ -424,7 +512,31 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
                                    allow_sharing=True, optimization_config=None, 
                                    progress_callback=None, search_strategy='smart', 
                                    crossing_strategies=None):
-    """Optimisation globale avec support des stratégies de croisement et recherche progressive."""
+    """
+    Fonction principale de génération de la grille horaire (Orchestrateur).
+
+    Cette fonction pilote la création de l'ensemble des trajets pour toutes les missions demandées.
+    Elle peut fonctionner en plusieurs modes :
+    1.  **Délégation** : Si `optimization_config` est fourni, elle délègue à `optimisation_logic`.
+    2.  **Simulation directe** : Sinon, elle exécute une simulation séquentielle (avec ou sans stratégies simples).
+
+    Args:
+        missions (list): Liste des configurations de missions.
+        df_gares (pd.DataFrame): Données d'infrastructure.
+        heure_debut (time): Début de service.
+        heure_fin (time): Fin de service.
+        allow_sharing (bool): Si True, permet le chaînage de missions différentes (inter-opérabilité).
+        optimization_config (OptimizationConfig, optional): Configuration pour l'algo génétique/avancé.
+        progress_callback (callable, optional): Fonction de rappel pour la barre de progression UI.
+        search_strategy (str): Stratégie de recherche ('simple', 'smart', 'exhaustif', etc.).
+        crossing_strategies (dict, optional): Stratégies spécifiques de croisement pré-calculées.
+
+    Returns:
+        tuple: (dict chronologie, dict warnings, dict stats)
+            - chronologie : {train_id: [liste_trajets]}
+            - warnings : {infra_violations: [], other: []}
+            - stats : Statistiques de performance (homogénéité, etc.)
+    """
     
     # Délégation vers optimisation_logic si config présente
     if optimization_config is not None:
@@ -565,7 +677,7 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
                     "retry_count": 0
                 }))
             
-            # Gestion tentative de mouvement
+            # Gestion tentative de mouvement (LOGIQUE BLOC PHYSIQUE)
             elif type_event == "tentative_mouvement":
                 id_train = details["id_train"]
                 mission_cfg = details["mission"]
@@ -573,102 +685,193 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
                 trajet_spec = details["trajet_spec"]
                 index_etape = details["index_etape"]
                 
-                # Construire l'horaire
+                # Construire l'horaire complet de la mission
                 horaire = construire_horaire_mission(mission_cfg, trajet_spec, df_gares)
                 
                 if not horaire or index_etape >= len(horaire) - 1:
                     continue
                 
-                pt_depart = horaire[index_etape]
-                pt_arrivee = horaire[index_etape + 1]
-                gare_dep = pt_depart.get("gare")
-                gare_arr = pt_arrivee.get("gare")
+                # NOUVEAU : Identifier le bloc complet (jusqu'au prochain point de croisement)
+                bloc_gares = [horaire[index_etape]]
+                next_crossing_idx = index_etape + 1
                 
-                duree_min_trajet = max(0, pt_arrivee.get("time_offset_min", 0) - pt_depart.get("time_offset_min", 0))
+                # Chercher le prochain point de croisement valide
+                while next_crossing_idx < len(horaire):
+                    gare_name = horaire[next_crossing_idx]["gare"]
+                    infra = _get_infra_at_gare(df_gares, gare_name)
+                    bloc_gares.append(horaire[next_crossing_idx])
+                    
+                    # Arrêter au prochain point de croisement ou à la fin
+                    if _is_crossing_point(infra) or next_crossing_idx == len(horaire) - 1:
+                        break
+                    next_crossing_idx += 1
                 
+                # Calculer le temps total du bloc
+                pt_depart_bloc = bloc_gares[0]
+                pt_arrivee_bloc = bloc_gares[-1]
+                
+                duree_bloc_min = max(0, 
+                    pt_arrivee_bloc.get("time_offset_min", 0) - 
+                    pt_depart_bloc.get("time_offset_min", 0)
+                )
+                
+                # Ajouter le temps d'arrêt à destination si c'est un point de croisement
+                duree_arret_final = pt_arrivee_bloc.get("duree_arret_min", 0)
+                
+                gare_dep_bloc = pt_depart_bloc.get("gare")
+                gare_arr_bloc = pt_arrivee_bloc.get("gare")
+                
+                # Déterminer l'heure de départ effective
                 dispo_train = trains.get(id_train, {}).get("dispo_a", heure)
                 heure_depart_reelle = max(heure, dispo_train)
                 
                 if heure_depart_reelle >= engine.dt_fin:
                     continue
                 
-                # Vérification conflit simple (check segment availability)
+                # VÉRIFICATION CRUCIALE : Occupation du BLOC COMPLET
                 conflit = False
-                if duree_min_trajet > 0 and gare_dep != gare_arr:
-                    idx_dep = engine.gares_map.get(gare_dep)
-                    idx_arr = engine.gares_map.get(gare_arr)
+                fin_conflit = None
+                
+                if duree_bloc_min > 0 and gare_dep_bloc != gare_arr_bloc:
+                    idx_dep = engine.gares_map.get(gare_dep_bloc)
+                    idx_arr = engine.gares_map.get(gare_arr_bloc)
                     
                     if idx_dep is not None and idx_arr is not None:
                         idx_min = min(idx_dep, idx_arr)
                         idx_max = max(idx_dep, idx_arr)
-                        t_enter = heure_depart_reelle
-                        t_exit = heure_depart_reelle + timedelta(minutes=duree_min_trajet)
                         
+                        # Temps d'entrée et sortie du bloc
+                        t_enter = heure_depart_reelle
+                        # IMPORTANT : Inclure le temps d'arrêt à destination dans l'occupation
+                        t_exit = heure_depart_reelle + timedelta(minutes=duree_bloc_min + duree_arret_final)
+                        
+                        # Vérifier disponibilité du bloc complet
                         is_free, next_t = engine.check_segment_availability(idx_min, idx_max, t_enter, t_exit)
+                        
                         if not is_free:
                             conflit = True
                             fin_conflit = next_t
+                            
+                            # NOUVEAU : Avertissement si croisement en gare sans infrastructure
+                            # Vérifier si le conflit implique une gare intermédiaire sans VE
+                            for gare_info in bloc_gares[1:-1]:  # Gares intermédiaires
+                                gare_inter = gare_info["gare"]
+                                infra_inter = _get_infra_at_gare(df_gares, gare_inter)
+                                if not _is_crossing_point(infra_inter):
+                                    # Potentielle violation : croisement dans une gare sans infrastructure
+                                    infra_violation_warnings.append({
+                                        "time": heure_depart_reelle,
+                                        "gare": gare_inter,
+                                        "infra": infra_inter,
+                                        "mission": mission_id,
+                                        "reason": f"Conflit détecté dans le bloc incluant {gare_inter} (infra: {infra_inter}, pas de voie d'évitement)"
+                                    })
                 
                 if not conflit:
-                    # Mouvement réussi
-                    heure_arrivee_reelle = heure_depart_reelle + timedelta(minutes=duree_min_trajet)
+                    # Mouvement du bloc complet réussi
+                    heure_arrivee_finale = heure_depart_reelle + timedelta(minutes=duree_bloc_min)
                     
-                    if heure_arrivee_reelle > engine.dt_fin:
+                    if heure_arrivee_finale > engine.dt_fin:
                         continue
                     
-                    # Enregistrer trajet
-                    if duree_min_trajet > 0 and gare_dep != gare_arr:
-                        chronologie_reelle.setdefault(id_train, []).append({
-                            "start": heure_depart_reelle,
-                            "end": heure_arrivee_reelle,
-                            "origine": gare_dep,
-                            "terminus": gare_arr
-                        })
+                    # Enregistrer TOUS les segments du bloc dans chronologie
+                    for i in range(len(bloc_gares) - 1):
+                        pt_curr = bloc_gares[i]
+                        pt_next = bloc_gares[i + 1]
                         
-                        # Marquer occupation
-                        idx_dep = engine.gares_map[gare_dep]
-                        idx_arr = engine.gares_map[gare_arr]
-                        path_segment = [{
-                            'gare': gare_dep, 'index': idx_dep,
-                            'arr': heure_depart_reelle, 'dep': heure_depart_reelle
-                        }, {
-                            'gare': gare_arr, 'index': idx_arr,
-                            'arr': heure_arrivee_reelle, 'dep': heure_arrivee_reelle
-                        }]
-                        engine.committed_schedules.append({'train_id': id_train, 'path': path_segment})
+                        duree_segment = max(0, 
+                            pt_next.get("time_offset_min", 0) - 
+                            pt_curr.get("time_offset_min", 0)
+                        )
+                        
+                        if duree_segment > 0:
+                            offset_dep = pt_curr.get("time_offset_min", 0) - pt_depart_bloc.get("time_offset_min", 0)
+                            offset_arr = pt_next.get("time_offset_min", 0) - pt_depart_bloc.get("time_offset_min", 0)
+                            
+                            h_dep_segment = heure_depart_reelle + timedelta(minutes=offset_dep)
+                            h_arr_segment = heure_depart_reelle + timedelta(minutes=offset_arr)
+                            
+                            chronologie_reelle.setdefault(id_train, []).append({
+                                "start": h_dep_segment,
+                                "end": h_arr_segment,
+                                "origine": pt_curr["gare"],
+                                "terminus": pt_next["gare"]
+                            })
                     
-                    # Mettre à jour train
-                    trains[id_train]["loc"] = gare_arr
-                    trains[id_train]["dispo_a"] = heure_arrivee_reelle
+                    # Enregistrer l'occupation du BLOC COMPLET dans engine
+                    idx_dep = engine.gares_map[gare_dep_bloc]
+                    idx_arr = engine.gares_map[gare_arr_bloc]
                     
-                    # Programmer étape suivante ou fin mission
-                    if index_etape + 1 < len(horaire) - 1:
+                    path_bloc = [{
+                        'gare': gare_dep_bloc, 
+                        'index': idx_dep,
+                        'arr': heure_depart_reelle, 
+                        'dep': heure_depart_reelle
+                    }, {
+                        'gare': gare_arr_bloc, 
+                        'index': idx_arr,
+                        'arr': heure_arrivee_finale, 
+                        'dep': heure_arrivee_finale + timedelta(minutes=duree_arret_final)
+                    }]
+                    engine.committed_schedules.append({'train_id': id_train, 'path': path_bloc})
+                    
+                    # Mettre à jour l'état du train
+                    trains[id_train]["loc"] = gare_arr_bloc
+                    # IMPORTANT : Le train est dispo APRÈS le temps d'arrêt
+                    trains[id_train]["dispo_a"] = heure_arrivee_finale + timedelta(minutes=duree_arret_final)
+                    
+                    # Programmer la suite de la mission si nécessaire
+                    if next_crossing_idx < len(horaire) - 1:
                         event_counter += 1
-                        heapq.heappush(evenements, (heure_arrivee_reelle, event_counter, "tentative_mouvement", {
-                            "id_train": id_train,
-                            "mission": mission_cfg,
-                            "mission_id": mission_id,
-                            "trajet_spec": trajet_spec,
-                            "index_etape": index_etape + 1,
-                            "retry_count": 0
-                        }))
+                        heapq.heappush(evenements, (
+                            trains[id_train]["dispo_a"], 
+                            event_counter, 
+                            "tentative_mouvement", 
+                            {
+                                "id_train": id_train,
+                                "mission": mission_cfg,
+                                "mission_id": mission_id,
+                                "trajet_spec": trajet_spec,
+                                "index_etape": next_crossing_idx,
+                                "retry_count": 0
+                            }
+                        ))
                     else:
+                        # Fin de la mission
                         event_counter += 1
-                        heapq.heappush(evenements, (heure_arrivee_reelle, event_counter, "fin_mission", {
-                            "id_train": id_train,
-                            "mission": mission_cfg,
-                            "mission_id": mission_id,
-                            "trajet_spec": trajet_spec,
-                            "gare_finale": gare_arr
-                        }))
+                        heapq.heappush(evenements, (
+                            trains[id_train]["dispo_a"], 
+                            event_counter, 
+                            "fin_mission", 
+                            {
+                                "id_train": id_train,
+                                "mission": mission_cfg,
+                                "mission_id": mission_id,
+                                "trajet_spec": trajet_spec,
+                                "gare_finale": gare_arr_bloc
+                            }
+                        ))
                 else:
-                    # Conflit -> Reprogrammer
+                    # Conflit détecté -> Reprogrammer
                     retry_count = details.get("retry_count", 0)
                     if retry_count < 500:  # Limite de retry
                         new_details = details.copy()
                         new_details["retry_count"] = retry_count + 1
                         event_counter += 1
-                        heapq.heappush(evenements, (fin_conflit, event_counter, "tentative_mouvement", new_details))
+                        heapq.heappush(evenements, (
+                            fin_conflit, 
+                            event_counter, 
+                            "tentative_mouvement", 
+                            new_details
+                        ))
+                    else:
+                        # Échec après trop de tentatives
+                        infra_violation_warnings.append({
+                            "time": heure_depart_reelle,
+                            "gare": f"{gare_dep_bloc} → {gare_arr_bloc}",
+                            "mission": mission_id,
+                            "reason": "Impossible de trouver un créneau libre après 500 tentatives"
+                        })
             
             # Gestion fin de mission
             elif type_event == "fin_mission":
@@ -1100,7 +1303,7 @@ def reset_caches():
     construire_horaire_mission_cached.cache_clear()
 
 def _calculer_stats_homogeneite(chronologie):
-    """Calcule les statistiques d'homogénéité par mission."""
+    """Calcule les statistiques d'homogénéité PAR MISSION ET PAR SENS (aller/retour séparés)."""
     stats = {}
     missions_horaires = defaultdict(list)
     
@@ -1109,26 +1312,39 @@ def _calculer_stats_homogeneite(chronologie):
             continue
         trajets_tries = sorted(trajets, key=lambda x: x['start'])
         
+        # Si les trajets ont déjà l'info mission (mode optimisé)
         if any('mission' in t for t in trajets_tries):
             for t in trajets_tries:
-                if t.get('is_mission_start', False): 
+                if t.get('is_mission_start', False):
+                    # La clé mission contient déjà le sens (ex: "A → B" ou "B → A")
                     missions_horaires[t['mission']].append(t['start'])
             continue
         
-        # Heuristique pour mode manuel
+        # Mode manuel : reconstruire les missions EN DISTINGUANT LE SENS
         current_start = trajets_tries[0]
         current_end = trajets_tries[0]
+        
         for i in range(1, len(trajets_tries)):
             seg = trajets_tries[i]
+            # Vérifier si c'est la continuation de la mission actuelle
+            # (même origine/terminus ET temps de connexion < 20min)
             if (seg['origine'] == current_end['terminus']) and \
                ((seg['start'] - current_end['end']).total_seconds() / 60.0 < 20):
                 current_end = seg
             else:
-                missions_horaires[f"{current_start['origine']} → {current_end['terminus']}"].append(current_start['start'])
+                # Fin de mission - enregistrer avec le SENS EXPLICITE
+                # Format: "Gare A → Gare B" (le sens est dans la flèche →)
+                mission_key = f"{current_start['origine']} → {current_end['terminus']}"
+                missions_horaires[mission_key].append(current_start['start'])
                 current_start = seg
                 current_end = seg
-        missions_horaires[f"{current_start['origine']} → {current_end['terminus']}"].append(current_start['start'])
+        
+        # Ne pas oublier la dernière mission
+        mission_key = f"{current_start['origine']} → {current_end['terminus']}"
+        missions_horaires[mission_key].append(current_start['start'])
 
+    # Calculer le coefficient de Gini pour chaque mission/sens
+    # Chaque clé "A → B" aura son propre coefficient, distinct de "B → A"
     for mission_key, horaires in missions_horaires.items():
         if len(horaires) < 2:
             stats[mission_key] = 1.0

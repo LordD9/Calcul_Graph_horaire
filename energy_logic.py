@@ -1,13 +1,24 @@
 # -*- coding: utf-8 -*-
 """
 energy_logic.py
+===============
 
-Ce module contient la logique de calcul de la consommation d'énergie.
-Il est piloté par les horaires (temps planifié) fournis par core_logic.
-Il calcule le profil de vitesse le plus rapide possible correspondant
-à la vitesse moyenne de l'horaire et estime la consommation
-en utilisant un profil de vitesse trapézoïdal et l'équation de Davis.
+Module de calcul de la consommation énergétique des trains.
 
+Ce module modélise la physique du mouvement ferroviaire pour estimer la consommation
+d'énergie en fonction des horaires, de l'infrastructure et des caractéristiques du matériel roulant.
+
+Méthodologie :
+1.  **Profil de Vitesse** : Reconstitution d'un profil de vitesse réaliste (accélération, croisière, freinage) 
+    pour respecter les temps de parcours de la grille horaire.
+2.  **Résistance à l'avancement** : Utilisation de l'équation de Davis ($A + Bv + Cv^2$).
+3.  **Bilan Énergétique** : Intégration de la puissance instantanée pour calculer l'énergie consommée (traction)
+    et régénérée (freinage).
+4.  **Batterie** : Simulation de l'état de charge (SoC) pour les trains à batterie ou hybrides.
+
+Fonctions principales :
+- `calculer_consommation_trajet` : Calcule la consommation pour un trajet complet.
+- `get_physical_profile` : Génère les courbes de vitesse/position/énergie.
 """
 
 import pandas as pd
@@ -22,8 +33,13 @@ DEFAULT_V_MAX_KPH = 160.0 # Vitesse max par défaut si non calculable
 
 def get_default_energy_params():
     """
-    Retourne une structure de paramètres par défaut pour l'énergie,
-    basée sur les analyses et la nouvelle physique (Davis).
+    Retourne les paramètres énergétiques par défaut (Matériel TER standard).
+    
+    Returns:
+        dict: Dictionnaire contenant :
+            - Caractéristiques physiques (masse, coeff Davis).
+            - Performances (accélération, décélération).
+            - Paramètres électriques (rendement, batterie, auxiliaires).
     """
     return {
         "masse_tonne": 50,

@@ -1,13 +1,24 @@
 # -*- coding: utf-8 -*-
 """
 optimisation_logic.py
-====================
+=====================
 
-Version 3.0 - Optimisée pour performance
-- Algorithme génétique plus rapide
-- Conservation de l'optimisation des croisements
-- Parallélisation améliorée
-- Cache intelligent
+Module d'optimisation avancée des horaires ferroviaires.
+
+Ce module implémente des algorithmes pour trouver la meilleure grille horaire respectant les contraintes :
+- Minimisation du nombre de rames nécessaires.
+- Maximisation de la régularité (cadencement).
+- Gestion stricte des croisements sur voie unique.
+
+Algorithmes disponibles :
+- **Algorithme Génétique (`GeneticOptimizer`)** : Recherche heuristique parallèle pour explorer l'espace des solutions.
+- **Recherche Exhaustive** : Pour les petits problèmes.
+- **Stratégies Progressives** : Affinement successif du pas de temps.
+
+Classes Principales :
+- `GeneticOptimizer` : Cœur de l'optimisation génétique.
+- `OptimizationConfig` : Paramètres de configuration (taille population, mutations, etc.).
+- `SolutionScorer` : Fonction de coût évaluant la qualité d'une grille.
 """
 
 import random
@@ -80,6 +91,11 @@ class OptimizationConfig:
     use_cache: bool = True
     timeout_per_eval: int = 60  # Timeout réduit à 20s
     
+    # NOUVEAU : Optimisation des temps de retournement
+    optimize_turnaround: bool = False  # Activer l'optimisation des temps de retournement
+    turnaround_min_buffer: int = 0     # Minutes à ajouter au minimum utilisateur (par défaut : utiliser le minimum)
+    turnaround_max_buffer: int = 30    # Maximum de minutes supplémentaires autorisées
+    
     def __post_init__(self):
         if self.crossing_optimization is None:
             self.crossing_optimization = CrossingOptimization()
@@ -145,7 +161,7 @@ class SolutionScorer:
         self.config = config
     
     def score_solution(self, chronologie: Dict, warnings: Dict) -> float:
-        """Calcul de score optimisé avec focus sur les croisements globaux."""
+        """Calcul de score optimisé avec focus sur la régularité et les croisements globaux."""
         # 1. Violations Infra (pénalité critique)
         infra_violations = len(warnings.get("infra_violations", []))
         
@@ -165,18 +181,19 @@ class SolutionScorer:
                     for ext in trajet['crossing_extensions']:
                         total_delay += ext.get('duration', 0)
         
-        # 5. Régularité (calcul vectorisé)
+        # 5. Régularité (calcul vectorisé) - AUGMENTATION DU POIDS
         regularity_penalty = self._calculate_regularity_fast(chronologie)
         
         # 6. Score des croisements - bonus pour croisements optimaux
         crossing_quality = self._evaluate_crossing_quality(chronologie)
         
         # Score composite avec pondérations optimisées
+        # AUGMENTATION du poids de régularité de 1000 à 5000 pour favoriser les graphiques réguliers
         score = (num_rames * 2000 +                    # Minimiser le nombre de rames
                 other_warnings * 3000 +                 # Autres avertissements
                 cancelled_trips * 15000 +               # Pénalité élevée pour trajets annulés
                 total_delay * self.config.crossing_optimization.penalty_per_minute if self.config.crossing_optimization.enabled else 0 +  # Pénalité pour retards
-                regularity_penalty * 1000 +             # Régularité
+                regularity_penalty * 5000 +             # Régularité (AUGMENTÉ de 1000 à 5000)
                 infra_violations * 50000 -              # Violations critiques
                 crossing_quality * 500                  # Bonus pour bons croisements
                 )
@@ -321,7 +338,18 @@ def _evaluate_genome_worker(args):
 # =============================================================================
 
 class GeneticOptimizer:
-    """Algorithme génétique optimisé avec mutation adaptative."""
+    """
+    Optimiseur basé sur un algorithme génétique pour la planification ferroviaire.
+    
+    Cet optimiseur explore l'espace des horaires de départ (décalage de cadencement) 
+    et des stratégies de croisement (temps d'arrêt aux évitements) pour minimiser 
+    la fonction de coût définie par `SolutionScorer`.
+    
+    Caractéristiques :
+    - Mutation adaptative (ajuste le taux selon la stagnation).
+    - Évaluation parallèle (multiprocessing).
+    - Gestion explicite des stratégies de croisement.
+    """
     
     def __init__(self, missions, df_gares, heure_debut, heure_fin, 
                  config: OptimizationConfig, scorer: SolutionScorer, allow_sharing: bool):
@@ -339,7 +367,7 @@ class GeneticOptimizer:
         self.current_mutation_rate = config.mutation_rate
     
     def _identify_crossing_points(self) -> Dict[str, List[str]]:
-        """Identifie les points de croisement possibles."""
+        """Identifie les gares permettant le croisement pour chaque mission."""
         from core_logic import _get_infra_at_gare
         crossing_points = {}
         
@@ -365,7 +393,7 @@ class GeneticOptimizer:
         return crossing_points
     
     def _build_search_space(self) -> Dict:
-        """Construit l'espace de recherche."""
+        """Construit l'espace de recherche (plages de minutes possibles pour chaque mission)."""
         space = {}
         for mission in self.missions:
             mission_id = f"{mission['origine']}→{mission['terminus']}"
@@ -378,7 +406,15 @@ class GeneticOptimizer:
         return space
     
     def optimize(self, progress_callback: Optional[Callable] = None) -> Tuple[Dict, Dict, Dict]:
-        """Optimisation principale avec mutation adaptative."""
+        """
+        Exécute la boucle principale d'optimisation génétique.
+        
+        Args:
+            progress_callback (callable, optional): Fonction pour rapporter l'avancement.
+
+        Returns:
+            tuple: (Meilleure solution (génome), Warnings associés, Stats de l'algo).
+        """
         population = self._initialize_population()
         best_solution, best_warnings = None, None
         best_score = float('inf')
@@ -666,15 +702,20 @@ class GeneticOptimizer:
 
 def optimize_exhaustive(missions, df_gares, heure_debut, heure_fin, config, 
                        scorer, allow_sharing, progress_callback):
-    """Mode exhaustif pour petits problèmes."""
+    """Mode exhaustif pour petits problèmes - CORRIGÉ."""
     from core_logic import generer_tous_trajets_optimises
     from itertools import product
     
+    # CORRECTION : Identifier TOUTES les missions avec retour, pas seulement certaines
     mission_retours = []
     for m in missions:
-        ret_id = f"{m['terminus']}→{m['origine']}"
-        if any(f"{mx['origine']}→{mx['terminus']}" == ret_id for mx in missions):
-            mission_retours.append((ret_id, list(range(0, 60, 5))))
+        if m.get('frequence', 0) > 0:
+            # Créer une liste de cadencements possibles pour chaque mission
+            # Utiliser un pas fin (chaque minute) pour l'exhaustif
+            mission_retours.append((
+                f"{m['origine']}→{m['terminus']}", 
+                list(range(0, 60, 1))  # CORRECTION : Tester chaque minute
+            ))
     
     if not mission_retours:
         chrono, warns, _ = generer_tous_trajets_optimises(
@@ -682,19 +723,29 @@ def optimize_exhaustive(missions, df_gares, heure_debut, heure_fin, config,
         )
         return chrono, warns, {'mode': 'exhaustif', 'combinations_tested': 1}
     
+    # CORRECTION : Générer TOUTES les combinaisons possibles
     all_combos = list(product(*[v for _, v in mission_retours]))
+    
+    # Limitation de sécurité : si trop de combinaisons, réduire le pas
+    if len(all_combos) > 100000:
+        # Réduire au pas de 5 minutes si trop de combinaisons
+        mission_retours = [(mid, list(range(0, 60, 5))) for mid, _ in mission_retours]
+        all_combos = list(product(*[v for _, v in mission_retours]))
+    
     best_res, best_score = (None, None, None), float('inf')
     
     for idx, combo in enumerate(all_combos):
         adj_missions = deepcopy(missions)
-        for i, (mid, val) in enumerate(zip([x[0] for x in mission_retours], combo)):
+        # CORRECTION : Appliquer les cadencements à TOUTES les missions
+        for i, ((mid, _), val) in enumerate(zip(mission_retours, combo)):
             for m in adj_missions:
                 if f"{m['origine']}→{m['terminus']}" == mid:
                     m['reference_minutes'] = str(val)
         
+        # CORRECTION : Utiliser la stratégie 'simple' qui donne de bons résultats
         chrono, warns, _ = generer_tous_trajets_optimises(
             adj_missions, df_gares, heure_debut, heure_fin, 
-            allow_sharing=allow_sharing, search_strategy='exhaustive'
+            allow_sharing=allow_sharing, search_strategy='simple'  # Utilise la logique simple optimisée
         )
         
         if not scorer.is_valid_solution(warns):
@@ -711,8 +762,8 @@ def optimize_exhaustive(missions, df_gares, heure_debut, heure_fin, config,
             progress_callback(idx+1, len(all_combos), best_score, len(chrono) if chrono else 0, 0)
     
     if best_res[0] is None:
-        return {}, {"infra_violations": [], "other": ["Echec exhaustif"]}, {'mode': 'exhaustif'}
-    return best_res[0], best_res[1], {'mode': 'exhaustif', 'best_score': best_score}
+        return {}, {"infra_violations": [], "other": ["Echec exhaustif"]}, {'mode': 'exhaustif', 'combinations_tested': len(all_combos)}
+    return best_res[0], best_res[1], {'mode': 'exhaustif', 'best_score': best_score, 'combinations_tested': len(all_combos)}
 
 
 # =============================================================================

@@ -1,10 +1,26 @@
 # -*- coding: utf-8 -*-
 """
 app.py
+======
 
-Fichier principal de l'application Streamlit.
-Ce fichier gère l'ensemble de l'interface utilisateur (UI) et orchestre les appels
-aux modules de logique (`core_logic`) et de visualisation (`plotting`) ainsi que la gestion de l'énergie ('energy_logic')
+Fichier principal de l'application Chronofer (Streamlit).
+
+Ce module gère l'interface utilisateur (UI), la configuration de la session,
+et l'orchestration des différents modules fonctionnels :
+- `core_logic` : Moteur de simulation et gestion des horaires.
+- `optimisation_logic` : Algorithmes d'optimisation (génétique, etc.).
+- `energy_logic` : Calculs de consommation énergétique.
+- `plotting` : Visualisation graphique (grilles horaires, batteries).
+
+Fonctionnalités principales :
+- Définition de l'infrastructure (gares, distances, types de voies).
+- Configuration des missions (origines, terminus, fréquences).
+- Génération d'horaires (mode automatique optimisé ou manuel).
+- Analyse de performance (nombre de rames, régularité).
+- Simulation énergétique détaillée (profils de vitesse, consommation, batterie).
+
+Usage :
+    Lancer avec : `streamlit run app.py`
 """
 
 import streamlit as st
@@ -85,10 +101,11 @@ class ProgressTracker:
             return f"~{minutes} minute{'s' if minutes > 1 else ''}"
 
     def get_progress_percent(self):
-        """Retourne le pourcentage de progression."""
+        """Retourne le pourcentage de progression (limité à 0-100)."""
         if self.total_work == 0:
             return 0
-        return int((self.work_done / self.total_work) * 100)
+        percent = int((self.work_done / self.total_work) * 100)
+        return min(100, max(0, percent))  # Limite strictement à [0, 100]
 
     def get_elapsed_time(self):
         """Retourne le temps écoulé."""
@@ -818,16 +835,17 @@ if st.session_state.get('gares') is not None:
 
 if st.session_state.gares is not None and st.session_state.missions:
     st.markdown("---")
-    st.header("⚙️ Paramètres d'Optimisation Avancée")
+    st.header("⚙️ Configuration de l'Optimisation (OBLIGATOIRE)")
 
-    # Choix d'activation
-    use_advanced_optimization = st.checkbox(
-        "🚀 Activer l'optimisation avancée",
-        value=False,
-        help="Active les algorithmes d'optimisation avancée (Smart/Exhaustif/Génétique)"
-    )
+    st.markdown("""
+    **Sélectionnez un mode d'optimisation** pour générer les horaires de manière intelligente.
+    Le choix d'un mode est maintenant **obligatoire** pour garantir des résultats optimaux.
+    """)
 
-    if use_advanced_optimization:
+    # Le mode d'optimisation est maintenant OBLIGATOIRE (pas de checkbox)
+    use_advanced_optimization = True  # Toujours activé
+
+    if True:  # Toujours vrai
         col1, col2 = st.columns(2)
 
         with col1:
@@ -836,48 +854,67 @@ if st.session_state.gares is not None and st.session_state.missions:
             optimization_mode = st.selectbox(
                 "Algorithme",
                 ["simple", "fast", "smart_progressive", "exhaustif", "genetic"],
+                index=2,  # Smart progressive par défaut
                 format_func=lambda x: {
-                    "simple": "🎯 Simple - Simulation directe (ancienne méthode)",
-                    "fast": "⚡ Fast - Ultra rapide (pas de 10 min)",
-                    "smart_progressive": "🎯🔍 Smart Progressive - Affinement intelligent (RECOMMANDÉ)",
-                    "exhaustif": "🔍 Exhaustif - Complet (chaque minute)",
+                    "simple": "🎯 Simple - Simulation directe (respect strict paramètres)",
+                    "fast": "⚡ Fast - Ultra rapide avec logique optimisée (pas de 10 min)",
+                    "smart_progressive": "🎯🔍 Smart Progressive - Affinement intelligent",
+                    "exhaustif": "🔍 Exhaustif",
                     "genetic": "🧬 Génétique - Évolutionnaire"
                 }[x],
                 help="""
-                • Simple : Simulation directe sans optimisation (vous contrôlez via temps de retournement)
-                • Fast : Recherche rapide par pas de 10 minutes (très rapide)
-                • Smart Progressive : Recherche progressive (10min → 5min → 2min → 1min) - RECOMMANDÉ
-                • Exhaustif : Teste chaque minute (< 4 missions recommandé)
-                • Génétique : Algorithme évolutionnaire pour grandes instances
+                • Simple : Simulation directe (fort respect temps retournement - TRÈS EFFICACE)
+                • Fast : Recherche rapide intégrant les forces du mode simple
+                • Smart Progressive : Recherche progressive optimisée (10min → 1min) - RECOMMANDÉ
+                • Exhaustif
+                • Génétique : Algorithme amélioré pour grandes instances
+
                 """
             )
 
             # Afficher des informations sur le mode sélectionné
-            if optimization_mode == "smart_progressive":
+            if optimization_mode == "simple":
+                st.success("""
+                🎯 **Mode Simple** :
+
+                - Utilise directement les temps de retournement configurés
+                - **TRÈS EFFICACE** : Produit souvent de meilleurs graphiques que les algos complexes
+                - Contrôle total sur les paramètres
+                - Exécution ultra-rapide (< 1 seconde)
+
+                **Forces du mode Simple (désormais intégrées aux autres modes)** :
+                - ✅ Respect strict des contraintes de retournement
+                - ✅ Gestion intelligente des conflits
+                - ✅ Graphiques propres et réguliers
+                """)
+            elif optimization_mode == "smart_progressive":
                 st.info("""
-                🎯 **Mode Smart Progressive** :
+                🎯 **Mode Smart Progressive**  :
 
                 1. **Phase 1** : Recherche grossière (pas de 10 min) → Identifier la zone prometteuse
                 2. **Phase 2** : Affinement moyen (pas de 5 min) → Resserrer la recherche
                 3. **Phase 3** : Affinement fin (pas de 2 min) → Préciser
                 4. **Phase 4** : Recherche fine (pas de 1 min) → Optimum local
-
-                **Avantages** :
-                - ✅ Qualité proche de l'exhaustif
-                - ✅ Vitesse 5-10x plus rapide que l'exhaustif
-                - ✅ Adaptatif : se concentre sur les zones prometteuses
                 """)
             elif optimization_mode == "fast":
                 st.warning("""
                 ⚡ **Mode Fast** :
-                - Très rapide mais moins précis
                 - Pas de recherche : 10 minutes
                 - Recommandé pour : tests rapides, grandes instances (7+ missions)
+                """)
+            elif optimization_mode == "exhaustif":
+                st.warning("""
+                🔍 **Mode Exhaustif**:
+                - Garantit la solution optimale
+                - Intègre la logique optimisée du mode Simple
+                - **ATTENTION** : Très lent pour > 3-4 missions
+                - Temps de calcul exponentiel
+                - Recommandé uniquement pour petites instances
                 """)
 
             # Paramètres spécifiques au mode génétique
             elif optimization_mode == "genetic":
-                st.info("Paramètres de l'algorithme génétique")
+                st.info("Paramètres de l'algorithme génétique (AMÉLIORÉS)")
 
                 col1a, col1b = st.columns(2)
                 with col1a:
@@ -897,12 +934,14 @@ if st.session_state.gares is not None and st.session_state.missions:
                 with col1c:
                     mutation_rate = st.slider(
                         "Taux mutation",
-                        min_value=0.0, max_value=0.5, value=0.1, step=0.05
+                        min_value=0.0, max_value=0.5, value=0.20, step=0.05,
+                        help="Valeur optimisée : 0.20"
                     )
                 with col1d:
                     crossover_rate = st.slider(
                         "Taux croisement",
-                        min_value=0.3, max_value=1.0, value=0.7, step=0.05
+                        min_value=0.3, max_value=1.0, value=0.85, step=0.05,
+                        help="Valeur optimisée : 0.85"
                     )
 
         with col2:
@@ -972,7 +1011,7 @@ if st.session_state.gares is not None and st.session_state.missions:
 
         # Sauvegarder dans session_state
         st.session_state.optimization_mode = optimization_mode
-        st.session_state.use_advanced_optimization = True
+        st.session_state.use_advanced_optimization = True  # Toujours True maintenant
 
         if optimization_mode == "genetic":
             st.session_state.genetic_params = {
@@ -990,9 +1029,7 @@ if st.session_state.gares is not None and st.session_state.missions:
         else:
             st.session_state.crossing_params = None
 
-    else:
-        # Optimisation standard
-        st.session_state.use_advanced_optimization = False
+    # L'optimisation est maintenant toujours active - pas besoin de "else"
 
     # --- SECTION 6: Calcul et Affichage ---
     st.header("6. Calcul et Affichage")
@@ -1156,7 +1193,7 @@ if st.session_state.gares is not None and st.session_state.missions:
 
                 elapsed_time = time.time() - start_time
 
-                progress_bar.progress(100)
+                progress_bar.progress(100)  # Garanti d'être dans [0, 100] grâce à get_progress_percent
                 status_text.text(f"✅ Optimisation terminée !")
                 eta_text.text(f"⏱️ Temps total: {elapsed_time:.1f} secondes")
 
