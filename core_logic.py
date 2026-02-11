@@ -232,7 +232,18 @@ class SimulationEngine:
         steps = []
         for i, pt in enumerate(base_schedule):
             idx = self.gares_map.get(pt['gare'])
-            duration = pt['time_offset_min'] - base_schedule[i-1]['time_offset_min'] if i > 0 else 0
+            if i > 0:
+                # Calcul du temps écoulé total entre les deux arrivées (selon saisie utilisateur)
+                delta_total = pt['time_offset_min'] - base_schedule[i-1]['time_offset_min']
+                
+                # On soustrait le temps d'arrêt de la gare précédente pour obtenir le temps de roulage pur
+                prev_arret = base_schedule[i-1].get('duree_arret_min', 0)
+                
+                # Le temps de marche ne peut pas être négatif (max 0)
+                duration = max(0, delta_total - prev_arret)
+            else:
+                duration = 0
+            
             steps.append({
                 'gare': pt['gare'],
                 'index': idx,
@@ -765,10 +776,9 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
                         pt_curr = bloc_gares[i]
                         pt_next = bloc_gares[i + 1]
                         
-                        duree_segment = max(0, 
-                            pt_next.get("time_offset_min", 0) - 
-                            pt_curr.get("time_offset_min", 0)
-                        )
+                        delta_total = pt_next.get("time_offset_min", 0) - pt_curr.get("time_offset_min", 0)
+                        prev_arret = pt_curr.get("duree_arret_min", 0)
+                        duree_segment = max(0, delta_total - prev_arret) 
                         
                         if duree_segment > 0:
                             offset_dep = pt_curr.get("time_offset_min", 0) - pt_depart_bloc.get("time_offset_min", 0)
