@@ -6,15 +6,15 @@
 
 ## Fonctionnalités Principales
 
-*   **Modélisation d'Infrastructure :** Définition simple des gares, distances, et types de voies (voie unique, évitement, double voie).
+*   **Modélisation d'Infrastructure :** Définition simple des gares, distances, types de voies et électrification.
 *   **Planification des Missions :** Création de missions avec fréquences, origines, terminus et arrêts intermédiaires.
 *   **Génération d'Horaires :**
-    *   **Automatique (Optimisé) :** Algorithme génétique (parallélisé) pour minimiser le nombre de rames et optimiser les croisements.
+    *   **Automatique (Optimisé) :** Algorithmes avancés pour minimiser le nombre de rames et optimiser les croisements.
     *   **Manuel :** Construction train par train ou **import depuis Excel**.
 *   **Analyse de Performance :**
     *   **Statistiques de Flotte :** Nombre de rames, trajets par rame, kilométrage moyen.
-    *   **Qualité de Service :** Analyse de la régularité du cadencement (Indice d'homogénéité).
-*   **Simulation Énergétique :** Calcul précis de la consommation (Diesel, Électrique, Batterie) basé sur la physique du mouvement (équation de Davis).
+    *   **Qualité de Service :** Analyse de la régularité du cadencement (Indice d'homogénéité / Gini).
+*   **Simulation Énergétique :** Calcul précis de la consommation (Diesel, Électrique, Batterie, Bi-mode) basé sur la physique du mouvement (équation de Davis, profils de vitesse réels).
 
 ## Guide d'Utilisation Rapide
 
@@ -36,15 +36,39 @@ streamlit run app.py
 
 ### 3. Workflow Typique
 
-1.  **Infrastructure :** Saisissez la liste des gares (Format: `Nom;Position_KM;[Infra]`).
-    *   *Infra codes :* `F` (Voie unique standard), `VE` (Voie d'évitement/Croisement possible), `D` (Double voie), `T` (Terminus).
+1.  **Infrastructure :** Saisissez la liste des gares (Format: `Nom;Position_KM;[Infra];[Electrification]`).
+    *   *Infra codes :* 
+        *   `F` : Voie unique standard (croisement impossible).
+        *   `VE` : Voie d'évitement (croisement possible).
+        *   `D` : Double voie (croisement possible sans arrêt).
+        *   `T` : Terminus.
+    *   *Electrification codes (Optionnel) :*
+        *   `F` : Non électrifié.
+        *   `C1500` : Caténaire 1500V DC.
+        *   `C25` : Caténaire 25kV AC.
+        *   `R<Puissance_kW>` : Point de recharge statique (ex: `R400` pour 400kW).
 2.  **Missions :** Définissez vos missions (ex: Paris -> Lyon, fréquence 1 train/h).
-3.  **Génération :**
-    *   Cliquez sur "Générer le graphique horaire" pour laisser l'algorithme optimiser les croisements.
-    *   Ou passez en mode "Manuel" pour importer un fichier Excel existant.
-4.  **Analyse :** Consultez le graphique espace-temps, les statistiques d'utilisation des rames et, si activé, le bilan énergétique.
+3.  **Génération :** Sélectionnez un mode d'optimisation (obligatoire en mode automatique) pour générer le graphique.
+4.  **Analyse :** Consultez le graphique espace-temps, les statistiques d'utilisation des rames et le bilan énergétique détaillé.
 
-### 4. Mode Manuel & Import Excel
+### 4. Modes d'Optimisation
+
+Le système propose plusieurs algorithmes pour trouver la meilleure grille horaire :
+*   **Simple :** Simulation directe respectant strictement les temps de retournement configurés.
+*   **Fast :** Recherche rapide (pas de 10 min) pour les grandes instances.
+*   **Smart Progressive :** Affinement intelligent et progressif du pas de temps (10min → 1min).
+*   **Génétique :** Algorithme évolutionnaire parallèle explorant les décalages horaires et les stratégies de croisement.
+*   **Exhaustif :** Exploration complète de l'espace (recommandé pour < 3 missions).
+
+### 5. Mode Énergie & Batterie
+
+Le mode Énergie simule la physique du train seconde par seconde :
+*   **Résistance de Davis :** $F = A + Bv + Cv^2$.
+*   **Récupération :** Freinage régénératif paramétrable.
+*   **Gestion Batterie :** Suivi du SoC (State of Charge), recharge dynamique sous caténaire et statique aux gares équipées.
+*   **Visualisation :** Profil de charge batterie par train.
+
+### 6. Mode Manuel & Import Excel
 
 En mode "Manuel", vous pouvez importer un roulement existant via un fichier Excel.
 **Format attendu du fichier Excel :**
@@ -54,12 +78,6 @@ Le fichier doit contenir les colonnes suivantes :
 *   `Fin` : Date et heure d'arrivée (Format datetime).
 *   `Origine` : Nom de la gare de départ.
 *   `Terminus` : Nom de la gare d'arrivée.
-
-### 5. Indicateurs de Performance
-
-*   **Rames utilisées :** Nombre total de rames nécessaires pour assurer le service.
-*   **Km moyen / rame :** Indicateur d'efficience de l'utilisation du matériel roulant.
-*   **Indice d'homogénéité :** Mesure la régularité des intervalles entre les trains (1.0 = cadencement parfait).
 
 ## Auteurs & Licence
 

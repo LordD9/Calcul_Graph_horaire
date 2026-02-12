@@ -882,7 +882,7 @@ if st.session_state.gares is not None and st.session_state.missions:
                 - Contrôle total sur les paramètres
                 - Exécution ultra-rapide (< 1 seconde)
 
-                **Forces du mode Simple (désormais intégrées aux autres modes)** :
+                **Forces du mode Simple** :
                 - ✅ Respect strict des contraintes de retournement
                 - ✅ Gestion intelligente des conflits
                 - ✅ Graphiques propres et réguliers
@@ -1626,11 +1626,11 @@ else:
 
 st.markdown("---")
 st.caption("""
-🚄 **Chronofer**
+🚄 **Chronofer** - Développé par le Cerema.
 
 Modes d'optimisation :
-- **Smart** : Heuristique rapide basée sur un algorithme glouton
-- **Exhaustif** : Exploration complète de l'espace de recherche
-- **Génétique** : Algorithme évolutionnaire pour des solutions quasi-optimales
-
+- **Simple** : Simulation directe basée sur les temps de retournement.
+- **Fast / Smart** : Heuristiques de recherche progressive.
+- **Exhaustif** : Exploration complète pour solutions optimales (petites instances).
+- **Génétique** : Algorithme évolutionnaire parallèle pour grandes instances.
 """)

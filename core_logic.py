@@ -391,30 +391,29 @@ def evaluer_configuration(engine, requests, allow_cross_mission_sharing=True, cr
     mission_station_times = defaultdict(lambda: defaultdict(list))
     
     sorted_reqs = sorted(requests, key=lambda x: x['ideal_dep'])
-
+    
     for req in sorted_reqs:
-        mission_id = f"Mission_{req.get('m_idx', 0)}"
-        strategy = crossing_strategies.get(mission_id)
+        mission_id = f"M{req.get('m_idx', 0)}"
+        type_materiel = req['mission'].get('type_materiel', 'electrique')
+        inject_allowed = True
+        
+        if req['type'] == 'retour':
+            inject_allowed = req['mission'].get('inject_from_terminus_2', False)
+        
+        crossing_strategy = crossing_strategies.get(mission_id, None)
         
         real_dep, path, err = engine.solve_mission_schedule(
-            req['mission'], 
-            req['ideal_dep'], 
-            req['type'],
-            crossing_strategy=strategy
+            req['mission'], req['ideal_dep'], req['type'], crossing_strategy
         )
 
-        if not path:
+        if err or not path:
             failures.append({
                 "time": req['ideal_dep'],
                 "mission": f"M{req.get('m_idx', 0)+1} ({req['type']})",
-                "reason": err or "Impossible de planifier",
-                "is_infra_violation": False
+                "reason": err or "Échec construction horaire",
+                "is_infra_violation": ("infra" in (err or "").lower())
             })
             continue
-
-        type_materiel = req['mission'].get('type_materiel', 'diesel')
-        inject_allowed = (req['type'] == 'aller') or \
-                        (req['type'] == 'retour' and req['mission'].get('inject_from_terminus_2', False))
         
         tid = engine.allocate_train_id(
             path[0]['gare'], 
@@ -519,6 +518,27 @@ def evaluer_configuration(engine, requests, allow_cross_mission_sharing=True, cr
 # 4. OPTIMISATION GLOBALE
 # =============================================================================
 
+def _calculer_duree_mission_max(missions, df_gares):
+    """
+    Calcule la durée maximale d'une mission aller.
+    
+    Args:
+        missions (list): Liste des missions
+        df_gares (pd.DataFrame): DataFrame des gares
+        
+    Returns:
+        int: Durée maximale en minutes
+    """
+    duree_max = 0
+    for mission in missions:
+        if mission.get('frequence', 0) <= 0:
+            continue
+        horaire = construire_horaire_mission(mission, 'aller', df_gares)
+        if horaire and len(horaire) > 0:
+            duree = horaire[-1].get('time_offset_min', 0)
+            duree_max = max(duree_max, duree)
+    return duree_max
+
 def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin, 
                                    allow_sharing=True, optimization_config=None, 
                                    progress_callback=None, search_strategy='smart', 
@@ -601,7 +621,10 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
         occupation_cantons = defaultdict(list)
         evenements = []  # heapq
         
-        # Générer UNIQUEMENT les demandes de départ ALLER
+        # NOUVEAU : Calculer la durée max des missions aller pour savoir combien de temps avant de commencer
+        duree_mission_max_min = _calculer_duree_mission_max(missions, df_gares)
+        
+        # Générer les demandes de départ ALLER (y compris les allers fictifs avant le début du service)
         for m_idx, mission in enumerate(missions):
             if mission.get('frequence', 0) <= 0:
                 continue
@@ -622,25 +645,43 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
             except:
                 minutes_ref = [0]
             
-            # Générer les événements de demande ALLER
+            # NOUVEAU : Déterminer l'heure de début pour cette mission
+            # Si injection depuis terminus 2 autorisée, commencer plus tôt pour générer des allers fictifs
+            heure_debut_mission = engine.dt_debut
+            
+            if mission.get('inject_from_terminus_2', False):
+                # Calculer combien de temps avant le début du service on doit commencer
+                # pour avoir des trains disponibles au terminus 2 au début du service
+                horaire_aller = construire_horaire_mission(mission, "aller", df_gares)
+                if horaire_aller:
+                    temps_trajet_aller = horaire_aller[-1].get("time_offset_min", 0)
+                    temps_retournement_B = mission.get("temps_retournement_B", 10)
+                    
+                    # On commence (temps_aller + temps_retournement + 1h) avant le début du service
+                    # Le +1h assure qu'on a au moins un cycle complet avant le début
+                    temps_avant_service = temps_trajet_aller + temps_retournement_B + 60
+                    heure_debut_mission = engine.dt_debut - timedelta(minutes=temps_avant_service)
+            
+            # Générer les événements de demande ALLER (y compris les allers fictifs si besoin)
             for minute_ref in minutes_ref:
                 offset_hours = minute_ref // 60
                 offset_minutes = minute_ref % 60
                 
-                curseur_temps = engine.dt_debut.replace(
+                curseur_temps = heure_debut_mission.replace(
                     minute=offset_minutes, second=0, microsecond=0
                 ) + timedelta(hours=offset_hours)
                 
-                # Ajuster au premier départ dans ou après dt_debut
-                while curseur_temps < engine.dt_debut:
+                # Ajuster au premier départ dans ou après heure_debut_mission
+                while curseur_temps < heure_debut_mission:
                     curseur_temps += intervalle
                 
                 # Générer les départs jusqu'à la fin de service
                 while curseur_temps < engine.dt_fin:
                     event_counter += 1
+                    is_fictif = curseur_temps < engine.dt_debut  # Marqueur pour les allers avant le début du service
                     heapq.heappush(evenements, (
                         curseur_temps, event_counter, "demande_depart_aller",
-                        {"mission": mission, "mission_id": mission_id}
+                        {"mission": mission, "mission_id": mission_id, "is_aller_fictif": is_fictif}
                     ))
                     curseur_temps += intervalle
         
@@ -656,6 +697,7 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
                 mission_cfg = details["mission"]
                 mission_id = details["mission_id"]
                 origine = mission_cfg["origine"]
+                is_aller_fictif = details.get("is_aller_fictif", False)
                 
                 # Trouver train disponible à l'origine
                 train_assigne_id = None
@@ -670,7 +712,11 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
                 # Si pas de train, en créer un
                 if train_assigne_id is None:
                     train_assigne_id = id_train_counter
-                    trains[train_assigne_id] = {"id": train_assigne_id, "loc": origine, "dispo_a": heure}
+                    trains[train_assigne_id] = {
+                        "id": train_assigne_id, 
+                        "loc": origine, 
+                        "dispo_a": heure
+                    }
                     chronologie_reelle[train_assigne_id] = []
                     id_train_counter += 1
                 else:
@@ -685,7 +731,8 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
                     "mission_id": mission_id,
                     "trajet_spec": "aller",
                     "index_etape": 0,
-                    "retry_count": 0
+                    "retry_count": 0,
+                    "is_trajet_fictif": is_aller_fictif  # Propagation du flag
                 }))
             
             # Gestion tentative de mouvement (LOGIQUE BLOC PHYSIQUE)
@@ -695,6 +742,7 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
                 mission_id = details["mission_id"]
                 trajet_spec = details["trajet_spec"]
                 index_etape = details["index_etape"]
+                is_trajet_fictif = details.get("is_trajet_fictif", False)
                 
                 # Construire l'horaire complet de la mission
                 horaire = construire_horaire_mission(mission_cfg, trajet_spec, df_gares)
@@ -771,28 +819,31 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
                     if heure_arrivee_finale > engine.dt_fin:
                         continue
                     
-                    # Enregistrer TOUS les segments du bloc dans chronologie
-                    for i in range(len(bloc_gares) - 1):
-                        pt_curr = bloc_gares[i]
-                        pt_next = bloc_gares[i + 1]
-                        
-                        delta_total = pt_next.get("time_offset_min", 0) - pt_curr.get("time_offset_min", 0)
-                        prev_arret = pt_curr.get("duree_arret_min", 0)
-                        duree_segment = max(0, delta_total - prev_arret) 
-                        
-                        if duree_segment > 0:
-                            offset_dep = pt_curr.get("time_offset_min", 0) - pt_depart_bloc.get("time_offset_min", 0)
-                            offset_arr = pt_next.get("time_offset_min", 0) - pt_depart_bloc.get("time_offset_min", 0)
+                    # NOUVEAU : Ne tracer que si le trajet n'est pas fictif
+                    # Un trajet est fictif si c'est un aller avant le début du service
+                    if not is_trajet_fictif:
+                        # Enregistrer TOUS les segments du bloc dans chronologie
+                        for i in range(len(bloc_gares) - 1):
+                            pt_curr = bloc_gares[i]
+                            pt_next = bloc_gares[i + 1]
                             
-                            h_dep_segment = heure_depart_reelle + timedelta(minutes=offset_dep)
-                            h_arr_segment = heure_depart_reelle + timedelta(minutes=offset_arr)
+                            delta_total = pt_next.get("time_offset_min", 0) - pt_curr.get("time_offset_min", 0)
+                            prev_arret = pt_curr.get("duree_arret_min", 0)
+                            duree_segment = max(0, delta_total - prev_arret) 
                             
-                            chronologie_reelle.setdefault(id_train, []).append({
-                                "start": h_dep_segment,
-                                "end": h_arr_segment,
-                                "origine": pt_curr["gare"],
-                                "terminus": pt_next["gare"]
-                            })
+                            if duree_segment > 0:
+                                offset_dep = pt_curr.get("time_offset_min", 0) - pt_depart_bloc.get("time_offset_min", 0)
+                                offset_arr = pt_next.get("time_offset_min", 0) - pt_depart_bloc.get("time_offset_min", 0)
+                                
+                                h_dep_segment = heure_depart_reelle + timedelta(minutes=offset_dep)
+                                h_arr_segment = heure_depart_reelle + timedelta(minutes=offset_arr)
+                                
+                                chronologie_reelle.setdefault(id_train, []).append({
+                                    "start": h_dep_segment,
+                                    "end": h_arr_segment,
+                                    "origine": pt_curr["gare"],
+                                    "terminus": pt_next["gare"]
+                                })
                     
                     # Enregistrer l'occupation du BLOC COMPLET dans engine
                     idx_dep = engine.gares_map[gare_dep_bloc]
@@ -829,7 +880,8 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
                                 "mission_id": mission_id,
                                 "trajet_spec": trajet_spec,
                                 "index_etape": next_crossing_idx,
-                                "retry_count": 0
+                                "retry_count": 0,
+                                "is_trajet_fictif": is_trajet_fictif
                             }
                         ))
                     else:
@@ -844,7 +896,8 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
                                 "mission": mission_cfg,
                                 "mission_id": mission_id,
                                 "trajet_spec": trajet_spec,
-                                "gare_finale": gare_arr_bloc
+                                "gare_finale": gare_arr_bloc,
+                                "is_trajet_fictif": is_trajet_fictif
                             }
                         ))
                 else:
@@ -888,6 +941,7 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
                 mission_cfg = details["mission"]
                 mission_id = details["mission_id"]
                 gare_finale = details["gare_finale"]
+                is_trajet_fictif = details.get("is_trajet_fictif", False)
                 
                 if id_train in trains:
                     trains[id_train]["loc"] = gare_finale
@@ -908,6 +962,9 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
                         heure_fin_retour_estimee = heure_dispo_pour_retour + timedelta(minutes=temps_trajet_retour)
                         
                         if heure_fin_retour_estimee <= engine.dt_fin:
+                            # NOUVEAU : Le retour n'est plus fictif si on est après le début du service
+                            is_retour_fictif = heure_dispo_pour_retour < engine.dt_debut
+                            
                             event_counter += 1
                             heapq.heappush(evenements, (heure_dispo_pour_retour, event_counter, "tentative_mouvement", {
                                 "id_train": id_train,
@@ -915,7 +972,8 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
                                 "mission_id": mission_id,
                                 "trajet_spec": "retour",
                                 "index_etape": 0,
-                                "retry_count": 0
+                                "retry_count": 0,
+                                "is_trajet_fictif": is_retour_fictif
                             }))
                 else:
                     # Fin retour -> Train dispo pour nouvel aller
@@ -923,7 +981,7 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
                     heure_dispo_finale = heure_arrivee_mission + timedelta(minutes=temps_retournement)
                     trains[id_train]["dispo_a"] = heure_dispo_finale
         
-        # Nettoyage
+        # Nettoyage - supprimer les trains sans trajets
         trains_a_supprimer = [tid for tid, trajets in chronologie_reelle.items() if not trajets]
         for tid in trains_a_supprimer:
             del chronologie_reelle[tid]
@@ -941,10 +999,16 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
     
     if search_strategy == 'smart_progressive':
         # Stratégie SMART PROGRESSIVE : recherche par affinement progressif
-        return _optimisation_smart_progressive(
-            engine, missions, missions_avec_retour, aller_requests, 
-            allow_sharing, crossing_strategies, progress_callback
-        )
+        # Cette fonction doit être définie dans optimisation_logic.py
+        try:
+            from optimisation_logic import _optimisation_smart_progressive
+            return _optimisation_smart_progressive(
+                engine, missions, missions_avec_retour, aller_requests, 
+                allow_sharing, crossing_strategies, progress_callback
+            )
+        except ImportError:
+            # Si la fonction n'existe pas, utiliser la stratégie smart normale
+            search_strategy = 'smart'
     
     # Stratégies classiques
     if search_strategy == 'smart':
@@ -997,161 +1061,83 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
             best_warnings = {'infra_violations': [], 'other': []}
             for fail in fails:
                 msg = f"{fail['mission']} à {fail['time'].strftime('%H:%M')}: {fail['reason']}"
-                if fail.get('is_infra_violation', False): 
+                if fail.get('is_infra_violation', False):
                     best_warnings['infra_violations'].append(msg)
-                else: 
+                else:
                     best_warnings['other'].append(msg)
         
-        if progress_callback and ((combo_idx + 1) % checkpoint == 0 or combo_idx == len(all_combinations) - 1):
-            progress_callback(combo_idx + 1, len(all_combinations), best_score, best_rames, 0)
+        if (combo_idx + 1) % checkpoint == 0 and progress_callback:
+            progress_callback(combo_idx + 1, len(all_combinations), 0, best_rames, 0)
     
-    final_stats = _calculer_stats_homogeneite(best_chronologie)
-    return best_chronologie, best_warnings, final_stats
-
-
-def _optimisation_smart_progressive(engine, missions, missions_avec_retour, aller_requests,
-                                     allow_sharing, crossing_strategies, progress_callback):
-    """
-    Recherche progressive par affinement :
-    1. Recherche grossière (pas de 10 min)
-    2. Affinement autour des meilleures zones (pas de 5 min)
-    3. Recherche fine dans la zone optimale (pas de 1 min)
-    """
-    
-    # Phase 1 : Recherche grossière (pas de 10 min)
-    step_sizes = [10, 5, 2, 1]  # Pas progressifs
-    best_overall_score = float('inf')
-    best_overall_chronologie = {}
-    best_overall_warnings = {'infra_violations': [], 'other': []}
-    best_overall_combo = None
-    
-    # Pour chaque taille de pas
-    search_center = None
-    search_radius = 30  # Rayon initial de recherche autour du meilleur
-    
-    total_work_estimate = sum(((60 // step) ** len(missions_avec_retour)) for step in step_sizes)
-    work_done = 0
-    
-    for step_idx, step_size in enumerate(step_sizes):
-        # Définir l'espace de recherche
-        if search_center is None:
-            # Première phase : recherche complète
-            search_space = [list(range(0, 60, step_size))] * len(missions_avec_retour)
-        else:
-            # Phases suivantes : recherche autour du meilleur
-            search_space = []
-            for center_val in search_center:
-                min_val = max(0, center_val - search_radius)
-                max_val = min(59, center_val + search_radius)
-                values = list(range(min_val, max_val + 1, step_size))
-                if not values:
-                    values = [center_val]
-                search_space.append(values)
-        
-        all_combinations = list(itertools.product(*search_space))
-        
-        best_score_phase = float('inf')
-        best_combo_phase = None
-        best_chronologie_phase = {}
-        best_warnings_phase = {'infra_violations': [], 'other': []}
-        
-        for combo_idx, cadencements_combo in enumerate(all_combinations):
-            retour_requests = []
-            for mission_idx, (m_idx, m) in enumerate([(i, m) for i, m in enumerate(missions) if m.get('frequence', 0) > 0]):
-                target_arr_min = cadencements_combo[mission_idx]
-                t_trajet_ret = m.get('temps_trajet_retour', m.get('temps_trajet', 60))
-                dep_min = (target_arr_min - t_trajet_ret) % 60
-                intervalle = timedelta(hours=1.0/m['frequence'])
-                
-                curr = engine.dt_debut.replace(minute=0, second=0, microsecond=0) + \
-                       timedelta(minutes=dep_min) - timedelta(hours=1)
-                while curr < engine.dt_debut: 
-                    curr += intervalle
-                while curr < engine.dt_fin:
-                    retour_requests.append({'ideal_dep': curr, 'mission': m, 'type': 'retour', 'm_idx': m_idx})
-                    curr += intervalle
-            
-            score, chrono, fails, stats, delay, nb_rames = evaluer_configuration(
-                engine, aller_requests + retour_requests,
-                allow_cross_mission_sharing=allow_sharing,
-                crossing_strategies=crossing_strategies
-            )
-            
-            if score < best_score_phase:
-                best_score_phase = score
-                best_combo_phase = cadencements_combo
-                best_chronologie_phase = chrono
-                best_warnings_phase = {'infra_violations': [], 'other': []}
-                for fail in fails:
-                    msg = f"{fail['mission']} à {fail['time'].strftime('%H:%M')}: {fail['reason']}"
-                    if fail.get('is_infra_violation', False): 
-                        best_warnings_phase['infra_violations'].append(msg)
-                    else: 
-                        best_warnings_phase['other'].append(msg)
-            
-            work_done += 1
-            if progress_callback and work_done % max(1, total_work_estimate // 20) == 0:
-                progress_callback(work_done, total_work_estimate, best_overall_score, 
-                                len(best_overall_chronologie), 0)
-        
-        # Mettre à jour le meilleur global si nécessaire
-        if best_score_phase < best_overall_score:
-            best_overall_score = best_score_phase
-            best_overall_chronologie = best_chronologie_phase
-            best_overall_warnings = best_warnings_phase
-            best_overall_combo = best_combo_phase
-        
-        # Préparer la prochaine phase
-        if best_combo_phase is not None and step_idx < len(step_sizes) - 1:
-            search_center = best_combo_phase
-            # Réduire le rayon à chaque étape
-            search_radius = step_sizes[step_idx + 1] * 3
-    
-    # Callback final
     if progress_callback:
-        progress_callback(total_work_estimate, total_work_estimate, 
-                        best_overall_score, len(best_overall_chronologie), 0)
+        progress_callback(len(all_combinations), len(all_combinations), 0, best_rames, 0)
     
-    final_stats = _calculer_stats_homogeneite(best_overall_chronologie)
-    return best_overall_chronologie, best_overall_warnings, final_stats
+    stats_homogeneite = _calculer_stats_homogeneite(best_chronologie)
+    return best_chronologie, best_warnings, stats_homogeneite
+
+# Note: _optimisation_smart_progressive est défini dans optimisation_logic.py si nécessaire
 
 # =============================================================================
-# 5. FONCTIONS UTILITAIRES ET EXPORT
+# 5. CONSTRUCTION DES HORAIRES DE MISSION
 # =============================================================================
 
-@lru_cache(maxsize=256)
-def construire_horaire_mission_cached(mission_key, trajet_spec, df_gares_json):
-    """Version cachée de construire_horaire_mission."""
-    if df_gares_json is None: 
-        return None
-    try:
-        df_gares_local = pd.read_json(BytesIO(df_gares_json.encode('utf-8')))
-        mission_cfg = json.loads(mission_key)
-        return construire_horaire_mission(mission_cfg, trajet_spec, df_gares_local)
-    except:
-        return None
+@lru_cache(maxsize=128)
+def construire_horaire_mission(mission_tuple, direction, df_gares_tuple):
+    """Version cachée de la construction d'horaire (pour performances)."""
+    mission = json.loads(mission_tuple)
+    df_gares = pd.DataFrame(json.loads(df_gares_tuple))
+    return _construire_horaire_mission_impl(mission, direction, df_gares)
 
-def construire_horaire_mission(m, direction, df_gares):
-    """Construit l'horaire complet d'une mission."""
-    if df_gares is None or df_gares.empty: 
+def construire_horaire_mission_cached(mission, direction, df_gares):
+    """Wrapper pour cacher les appels répétés."""
+    mission_json = json.dumps(mission, sort_keys=True)
+    df_json = df_gares.to_json(orient='records')
+    return construire_horaire_mission((mission_json, direction, df_json))
+
+def _construire_horaire_mission_impl(mission, direction, df_gares):
+    """Implémentation réelle de la construction d'horaire."""
+    if direction not in ['aller', 'retour']:
         return []
     
-    pts = []
-    if direction == 'aller':
-        pts.append({"gare": m.get("origine"), "time_offset_min": 0, "duree_arret_min": 0})
-        pts.extend(m.get("passing_points", []))
-        pts.append({"gare": m.get("terminus"), "time_offset_min": m.get("temps_trajet", 60), "duree_arret_min": 0})
-    else:
-        dur = m.get("temps_trajet_retour", m.get("temps_trajet", 60))
-        if m.get("trajet_asymetrique"):
-            base_pp = m.get("passing_points_retour", [])
+    o = mission.get('origine')
+    t = mission.get('terminus')
+    
+    if not o or not t:
+        return []
+    
+    t_trajet = mission.get('temps_trajet', 60)
+    pass_pts = mission.get('passing_points', [])
+    
+    if direction == 'retour':
+        o, t = t, o
+        trajet_asym = mission.get('trajet_asymetrique', False)
+        if trajet_asym:
+            t_trajet = mission.get('temps_trajet_retour', t_trajet)
+            pass_pts = mission.get('passing_points_retour', [])
         else:
-            base_pp = [{"gare": p["gare"], "time_offset_min": dur - p["time_offset_min"], 
-                       "duree_arret_min": p.get("duree_arret_min", 0)} 
-                      for p in m.get("passing_points", [])]
-        pts.append({"gare": m.get("terminus"), "time_offset_min": 0, "duree_arret_min": 0})
-        pts.extend(base_pp)
-        pts.append({"gare": m.get("origine"), "time_offset_min": dur, "duree_arret_min": 0})
+            pass_pts = [{"gare": p["gare"], 
+                        "time_offset_min": t_trajet - p["time_offset_min"],
+                        "arret_commercial": p.get("arret_commercial", False),
+                        "duree_arret_min": p.get("duree_arret_min", 0)} 
+                       for p in reversed(pass_pts)]
+    
+    pts = [{"gare": o, "time_offset_min": 0, "duree_arret_min": 0}]
+    
+    for p in pass_pts:
+        duree_arret = p.get("duree_arret_min", 0) if p.get("arret_commercial", False) else 0
+        pts.append({
+            "gare": p["gare"],
+            "time_offset_min": p["time_offset_min"],
+            "duree_arret_min": duree_arret
+        })
+    
+    for m in mission.get('missions_intermediaires', []):
+        dur = m.get('temps_trajet', 0)
+        if dur > 0:
+            pts.append({"gare": m.get("terminus"), "time_offset_min": dur, "duree_arret_min": 0})
+            pts.append({"gare": m.get("origine"), "time_offset_min": dur, "duree_arret_min": 0})
+
+    pts.append({"gare": t, "time_offset_min": t_trajet, "duree_arret_min": 0})
 
     pts.sort(key=lambda x: x['time_offset_min'])
     
@@ -1191,6 +1177,11 @@ def construire_horaire_mission(m, direction, df_gares):
             t = s['time_offset_min'] + ((e['time_offset_min'] - s['time_offset_min']) * ratio)
             res.append({"gare": row['gare'], "time_offset_min": round(t, 1), "duree_arret_min": d_arret})
     return res
+
+# Wrapper pour compatibilité
+def construire_horaire_mission(mission, direction, df_gares):
+    """Construction d'horaire de mission (sans cache)."""
+    return _construire_horaire_mission_impl(mission, direction, df_gares)
 
 def preparer_roulement_manuel(roulement):
     """Prépare les roulements manuels pour la simulation."""
