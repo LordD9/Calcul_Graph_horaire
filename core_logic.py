@@ -705,17 +705,22 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
                 
                 for id_t, t in trains.items():
                     if t.get("loc") == origine and t.get("dispo_a", datetime.max) <= heure:
+                        # Si le partage de rames est désactivé, on ne peut utiliser
+                        # que les rames appartenant à la même mission
+                        if not allow_sharing and t.get("mission_id") != mission_id:
+                            continue
                         if t["dispo_a"] < earliest_dispo:
                             earliest_dispo = t["dispo_a"]
                             train_assigne_id = id_t
                 
-                # Si pas de train, en créer un
+                # Si pas de train, en créer un (tagué avec la mission courante)
                 if train_assigne_id is None:
                     train_assigne_id = id_train_counter
                     trains[train_assigne_id] = {
                         "id": train_assigne_id, 
                         "loc": origine, 
-                        "dispo_a": heure
+                        "dispo_a": heure,
+                        "mission_id": mission_id  # Tag mission pour contrôle du partage
                     }
                     chronologie_reelle[train_assigne_id] = []
                     id_train_counter += 1
