@@ -539,548 +539,458 @@ def _calculer_duree_mission_max(missions, df_gares):
             duree_max = max(duree_max, duree)
     return duree_max
 
-def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin, 
-                                   allow_sharing=True, optimization_config=None, 
-                                   progress_callback=None, search_strategy='smart', 
-                                   crossing_strategies=None):
+def executer_simulation_evenementielle(
+    missions, df_gares, heure_debut, heure_fin,
+    allow_sharing=True,
+    turnaround_buffers=None,
+    crossing_strategies=None,
+    adjusted_reference_minutes=None,
+):
     """
-    Fonction principale de génération de la grille horaire (Orchestrateur).
+    Moteur événementiel unifié pour la simulation ferroviaire.
 
-    Cette fonction pilote la création de l'ensemble des trajets pour toutes les missions demandées.
-    Elle peut fonctionner en plusieurs modes :
-    1.  **Délégation** : Si `optimization_config` est fourni, elle délègue à `optimisation_logic`.
-    2.  **Simulation directe** : Sinon, elle exécute une simulation séquentielle (avec ou sans stratégies simples).
+    Seuls les ALLERS sont programmés, les RETOURS sont générés dynamiquement
+    quand une rame devient disponible.
 
     Args:
         missions (list): Liste des configurations de missions.
         df_gares (pd.DataFrame): Données d'infrastructure.
         heure_debut (time): Début de service.
         heure_fin (time): Fin de service.
-        allow_sharing (bool): Si True, permet le chaînage de missions différentes (inter-opérabilité).
-        optimization_config (OptimizationConfig, optional): Configuration pour l'algo génétique/avancé.
-        progress_callback (callable, optional): Fonction de rappel pour la barre de progression UI.
-        search_strategy (str): Stratégie de recherche ('simple', 'smart', 'exhaustif', etc.).
-        crossing_strategies (dict, optional): Stratégies spécifiques de croisement pré-calculées.
+        allow_sharing (bool): Partage inter-missions autorisé.
+        turnaround_buffers (dict): {mission_id: int} minutes supplémentaires ajoutées
+            au temps de retournement minimum (utile pour améliorer les croisements).
+        crossing_strategies (dict): {mission_id: CrossingStrategy} stratégies de croisement
+            aux points VE (arrêts prolongés pour laisser passer).
+        adjusted_reference_minutes (dict): {m_idx: str} minutes de référence surchargées
+            (ex: {"0": "15", "1": "30"}). Si None, utilise mission['reference_minutes'].
 
     Returns:
-        tuple: (dict chronologie, dict warnings, dict stats)
-            - chronologie : {train_id: [liste_trajets]}
-            - warnings : {infra_violations: [], other: []}
-            - stats : Statistiques de performance (homogénéité, etc.)
+        tuple: (chronologie, warnings, stats_homogeneite)
     """
+    import heapq
+
+    if turnaround_buffers is None:
+        turnaround_buffers = {}
+    if crossing_strategies is None:
+        crossing_strategies = {}
+    if adjusted_reference_minutes is None:
+        adjusted_reference_minutes = {}
+
+    engine = SimulationEngine(df_gares, heure_debut, heure_fin)
+
+    infra_violation_warnings = []
+    other_warnings = []
+    chronologie_reelle = {}
+    id_train_counter = 1
+    event_counter = 0
+
+    trains = {}
+    evenements = []
+
+    for m_idx, mission in enumerate(missions):
+        if mission.get('frequence', 0) <= 0:
+            continue
+
+        mission_id = f"M{m_idx+1}"
+        frequence = mission['frequence']
+        intervalle = timedelta(hours=1.0 / frequence)
+
+        ref_str = adjusted_reference_minutes.get(str(m_idx), mission.get("reference_minutes", "0"))
+        try:
+            minutes_ref = sorted(list(set([
+                int(m.strip()) for m in ref_str.split(',')
+                if m.strip().isdigit()
+            ])))
+            if not minutes_ref:
+                minutes_ref = [0]
+        except Exception:
+            minutes_ref = [0]
+
+        heure_debut_mission = engine.dt_debut
+
+        if mission.get('inject_from_terminus_2', False):
+            horaire_aller = construire_horaire_mission(mission, "aller", df_gares)
+            if horaire_aller:
+                temps_trajet_aller = horaire_aller[-1].get("time_offset_min", 0)
+                t_ret_b = mission.get("temps_retournement_B", 10)
+                buf = turnaround_buffers.get(mission_id, 0)
+                temps_avant_service = temps_trajet_aller + t_ret_b + buf + 60
+                heure_debut_mission = engine.dt_debut - timedelta(minutes=temps_avant_service)
+
+        for minute_ref in minutes_ref:
+            offset_hours = minute_ref // 60
+            offset_minutes = minute_ref % 60
+
+            curseur_temps = heure_debut_mission.replace(
+                minute=offset_minutes, second=0, microsecond=0
+            ) + timedelta(hours=offset_hours)
+
+            while curseur_temps < heure_debut_mission:
+                curseur_temps += intervalle
+
+            while curseur_temps < engine.dt_fin:
+                event_counter += 1
+                is_fictif = curseur_temps < engine.dt_debut
+                heapq.heappush(evenements, (
+                    curseur_temps, event_counter, "demande_depart_aller",
+                    {"mission": mission, "mission_id": mission_id, "m_idx": m_idx,
+                     "is_aller_fictif": is_fictif}
+                ))
+                curseur_temps += intervalle
+
+    while evenements:
+        heure, _, type_event, details = heapq.heappop(evenements)
+
+        if heure >= engine.dt_fin:
+            continue
+
+        if type_event == "demande_depart_aller":
+            mission_cfg = details["mission"]
+            mission_id = details["mission_id"]
+            origine = mission_cfg["origine"]
+            is_aller_fictif = details.get("is_aller_fictif", False)
+            type_materiel = mission_cfg.get("type_materiel", "diesel")
+
+            train_assigne_id = None
+            earliest_dispo = datetime.max
+
+            for id_t, t in trains.items():
+                if t.get("loc") == origine and t.get("dispo_a", datetime.max) <= heure:
+                    if not allow_sharing and t.get("mission_id") != mission_id:
+                        continue
+                    if t.get("type_materiel") != type_materiel:
+                        continue
+                    if t["dispo_a"] < earliest_dispo:
+                        earliest_dispo = t["dispo_a"]
+                        train_assigne_id = id_t
+
+            if train_assigne_id is None:
+                train_assigne_id = id_train_counter
+                trains[train_assigne_id] = {
+                    "id": train_assigne_id,
+                    "loc": origine,
+                    "dispo_a": heure,
+                    "mission_id": mission_id,
+                    "type_materiel": type_materiel,
+                }
+                chronologie_reelle[train_assigne_id] = []
+                id_train_counter += 1
+            else:
+                trains[train_assigne_id]["dispo_a"] = max(heure, earliest_dispo)
+
+            heure_programmation = max(heure, trains[train_assigne_id]["dispo_a"])
+            event_counter += 1
+            heapq.heappush(evenements, (heure_programmation, event_counter, "tentative_mouvement", {
+                "id_train": train_assigne_id,
+                "mission": mission_cfg,
+                "mission_id": mission_id,
+                "trajet_spec": "aller",
+                "index_etape": 0,
+                "retry_count": 0,
+                "is_trajet_fictif": is_aller_fictif,
+            }))
+
+        elif type_event == "tentative_mouvement":
+            id_train = details["id_train"]
+            mission_cfg = details["mission"]
+            mission_id = details["mission_id"]
+            trajet_spec = details["trajet_spec"]
+            index_etape = details["index_etape"]
+            is_trajet_fictif = details.get("is_trajet_fictif", False)
+
+            cs = crossing_strategies.get(mission_id) if crossing_strategies else None
+
+            horaire = construire_horaire_mission(mission_cfg, trajet_spec, df_gares)
+
+            if not horaire or index_etape >= len(horaire) - 1:
+                continue
+
+            bloc_gares = [horaire[index_etape]]
+            next_crossing_idx = index_etape + 1
+
+            while next_crossing_idx < len(horaire):
+                gare_name = horaire[next_crossing_idx]["gare"]
+                infra = _get_infra_at_gare(df_gares, gare_name)
+                bloc_gares.append(horaire[next_crossing_idx])
+
+                if _is_crossing_point(infra) or next_crossing_idx == len(horaire) - 1:
+                    break
+                next_crossing_idx += 1
+
+            pt_depart_bloc = bloc_gares[0]
+            pt_arrivee_bloc = bloc_gares[-1]
+
+            duree_bloc_min = max(0,
+                pt_arrivee_bloc.get("time_offset_min", 0) -
+                pt_depart_bloc.get("time_offset_min", 0)
+            )
+
+            duree_arret_final = pt_arrivee_bloc.get("duree_arret_min", 0)
+
+            if cs and pt_arrivee_bloc["gare"] in cs.stop_durations:
+                duree_arret_final = max(duree_arret_final, cs.stop_durations[pt_arrivee_bloc["gare"]])
+
+            gare_dep_bloc = pt_depart_bloc.get("gare")
+            gare_arr_bloc = pt_arrivee_bloc.get("gare")
+
+            dispo_train = trains.get(id_train, {}).get("dispo_a", heure)
+            heure_depart_reelle = max(heure, dispo_train)
+
+            if heure_depart_reelle >= engine.dt_fin:
+                continue
+
+            conflit = False
+            fin_conflit = None
+
+            if duree_bloc_min > 0 and gare_dep_bloc != gare_arr_bloc:
+                idx_dep = engine.gares_map.get(gare_dep_bloc)
+                idx_arr = engine.gares_map.get(gare_arr_bloc)
+
+                if idx_dep is not None and idx_arr is not None:
+                    idx_min = min(idx_dep, idx_arr)
+                    idx_max = max(idx_dep, idx_arr)
+
+                    t_enter = heure_depart_reelle
+                    t_exit = heure_depart_reelle + timedelta(minutes=duree_bloc_min + duree_arret_final)
+
+                    is_free, next_t = engine.check_segment_availability(idx_min, idx_max, t_enter, t_exit)
+
+                    if not is_free:
+                        conflit = True
+                        fin_conflit = next_t
+
+            if not conflit:
+                heure_arrivee_finale = heure_depart_reelle + timedelta(minutes=duree_bloc_min)
+
+                if heure_arrivee_finale > engine.dt_fin:
+                    continue
+
+                mission_label = f"{mission_cfg['origine']} → {mission_cfg['terminus']}"
+                if trajet_spec == "retour":
+                    mission_label = f"{mission_cfg['terminus']} → {mission_cfg['origine']}"
+
+                if not is_trajet_fictif:
+                    first_seg = True
+                    for i in range(len(bloc_gares) - 1):
+                        pt_curr = bloc_gares[i]
+                        pt_next = bloc_gares[i + 1]
+
+                        delta_total = pt_next.get("time_offset_min", 0) - pt_curr.get("time_offset_min", 0)
+                        prev_arret = pt_curr.get("duree_arret_min", 0)
+                        duree_segment = max(0, delta_total - prev_arret)
+
+                        if duree_segment > 0 or (pt_curr["gare"] != pt_next["gare"]):
+                            offset_dep = pt_curr.get("time_offset_min", 0) - pt_depart_bloc.get("time_offset_min", 0)
+                            offset_arr = pt_next.get("time_offset_min", 0) - pt_depart_bloc.get("time_offset_min", 0)
+
+                            h_dep_segment = heure_depart_reelle + timedelta(minutes=offset_dep)
+                            h_arr_segment = heure_depart_reelle + timedelta(minutes=offset_arr)
+
+                            seg_entry = {
+                                "start": h_dep_segment,
+                                "end": h_arr_segment,
+                                "origine": pt_curr["gare"],
+                                "terminus": pt_next["gare"],
+                                "mission": mission_label,
+                                "is_mission_start": (first_seg and index_etape == 0),
+                            }
+                            chronologie_reelle.setdefault(id_train, []).append(seg_entry)
+                            first_seg = False
+
+                    if duree_arret_final > 0:
+                        arr_gare = gare_arr_bloc
+                        arr_time = heure_arrivee_finale
+                        dep_time = heure_arrivee_finale + timedelta(minutes=duree_arret_final)
+                        arret_entry = {
+                            "start": arr_time,
+                            "end": dep_time,
+                            "origine": arr_gare,
+                            "terminus": arr_gare,
+                            "mission": mission_label,
+                            "is_mission_start": False,
+                        }
+                        chronologie_reelle.setdefault(id_train, []).append(arret_entry)
+
+                idx_dep = engine.gares_map[gare_dep_bloc]
+                idx_arr = engine.gares_map[gare_arr_bloc]
+
+                path_bloc = [
+                    {'gare': gare_dep_bloc, 'index': idx_dep, 'arr': heure_depart_reelle, 'dep': heure_depart_reelle},
+                    {'gare': gare_arr_bloc, 'index': idx_arr, 'arr': heure_arrivee_finale,
+                     'dep': heure_arrivee_finale + timedelta(minutes=duree_arret_final)},
+                ]
+                engine.committed_schedules.append({'train_id': id_train, 'path': path_bloc})
+
+                trains[id_train]["loc"] = gare_arr_bloc
+                trains[id_train]["dispo_a"] = heure_arrivee_finale + timedelta(minutes=duree_arret_final)
+
+                if next_crossing_idx < len(horaire) - 1:
+                    event_counter += 1
+                    heapq.heappush(evenements, (
+                        trains[id_train]["dispo_a"], event_counter, "tentative_mouvement",
+                        {
+                            "id_train": id_train, "mission": mission_cfg, "mission_id": mission_id,
+                            "trajet_spec": trajet_spec, "index_etape": next_crossing_idx,
+                            "retry_count": 0, "is_trajet_fictif": is_trajet_fictif,
+                        }
+                    ))
+                else:
+                    event_counter += 1
+                    heapq.heappush(evenements, (
+                        trains[id_train]["dispo_a"], event_counter, "fin_mission",
+                        {
+                            "id_train": id_train, "mission": mission_cfg, "mission_id": mission_id,
+                            "trajet_spec": trajet_spec, "gare_finale": gare_arr_bloc,
+                            "is_trajet_fictif": is_trajet_fictif,
+                        }
+                    ))
+            else:
+                retry_count = details.get("retry_count", 0)
+                if retry_count < 500:
+                    new_details = details.copy()
+                    new_details["retry_count"] = retry_count + 1
+                    event_counter += 1
+                    heapq.heappush(evenements, (
+                        fin_conflit, event_counter, "tentative_mouvement", new_details
+                    ))
+                else:
+                    gares_sans_ve = []
+                    for gare_info in bloc_gares[1:-1]:
+                        gare_inter = gare_info["gare"]
+                        infra_inter = _get_infra_at_gare(df_gares, gare_inter)
+                        if not _is_crossing_point(infra_inter):
+                            gares_sans_ve.append(f"{gare_inter} ({infra_inter})")
+
+                    reason_detail = f"Impossible de trouver un créneau libre après 500 tentatives pour le bloc {gare_dep_bloc} → {gare_arr_bloc}"
+                    if gares_sans_ve:
+                        reason_detail += f". Gares sans voie d'évitement dans le bloc : {', '.join(gares_sans_ve)}"
+
+                    infra_violation_warnings.append({
+                        "time": heure_depart_reelle,
+                        "gare": f"{gare_dep_bloc} → {gare_arr_bloc}",
+                        "mission": mission_id,
+                        "reason": reason_detail,
+                        "is_infra_violation": True,
+                    })
+
+        elif type_event == "fin_mission":
+            id_train = details["id_train"]
+            mission_cfg = details["mission"]
+            mission_id = details["mission_id"]
+            gare_finale = details["gare_finale"]
+            is_trajet_fictif = details.get("is_trajet_fictif", False)
+
+            if id_train not in trains:
+                continue
+
+            trains[id_train]["loc"] = gare_finale
+            heure_arrivee_mission = heure
+
+            buf = turnaround_buffers.get(mission_id, 0)
+
+            if details["trajet_spec"] == "aller":
+                t_ret_min = mission_cfg.get("temps_retournement_B", 10)
+                heure_dispo_retour = heure_arrivee_mission + timedelta(minutes=t_ret_min + buf)
+                trains[id_train]["dispo_a"] = heure_dispo_retour
+
+                horaire_retour = construire_horaire_mission(mission_cfg, "retour", df_gares)
+                if horaire_retour and len(horaire_retour) > 1:
+                    temps_retour = horaire_retour[-1].get("time_offset_min", 0)
+                    if heure_dispo_retour + timedelta(minutes=temps_retour) <= engine.dt_fin:
+                        is_retour_fictif = heure_dispo_retour < engine.dt_debut
+                        event_counter += 1
+                        heapq.heappush(evenements, (heure_dispo_retour, event_counter, "tentative_mouvement", {
+                            "id_train": id_train, "mission": mission_cfg, "mission_id": mission_id,
+                            "trajet_spec": "retour", "index_etape": 0, "retry_count": 0,
+                            "is_trajet_fictif": is_retour_fictif,
+                        }))
+            else:
+                t_ret_min = mission_cfg.get("temps_retournement_A", 10)
+                trains[id_train]["dispo_a"] = heure_arrivee_mission + timedelta(minutes=t_ret_min + buf)
+
+    trains_a_supprimer = [tid for tid, trajets in chronologie_reelle.items() if not trajets]
+    for tid in trains_a_supprimer:
+        del chronologie_reelle[tid]
+
+    warnings = {"infra_violations": infra_violation_warnings, "other": other_warnings}
+    stats_homogeneite = _calculer_stats_homogeneite(chronologie_reelle)
+
+    return chronologie_reelle, warnings, stats_homogeneite
+
+
+def _score_chronologie_bruit(chronologie, warnings):
+    """Score bas niveau sans appel Streamlit — utilisé par l'optimisation interne."""
+    nb_rames = len(chronologie) if chronologie else 0
+    nb_violations = len(warnings.get("infra_violations", []))
+    nb_fails = len(warnings.get("other", []))
+
+    stats = _calculer_stats_homogeneite(chronologie)
+    avg_gini = 0
+    count = 0
+    for v in stats.values():
+        if isinstance(v, (int, float)):
+            avg_gini += v
+            count += 1
+    avg_gini = avg_gini / count if count > 0 else 1.0
+
+    return nb_rames * 2000 + nb_violations * 50000 + nb_fails * 3000 - avg_gini * 3000
+
+
+def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
+                                   allow_sharing=True, optimization_config=None,
+                                   progress_callback=None, search_strategy='simple',
+                                   crossing_strategies=None):
+    """
+    Orchestrateur principal — délègue toujours au moteur événementiel.
     
-    # Délégation vers optimisation_logic si config présente
+    Modes de recherche :
+    - simple : exécution directe sans exploration
+    - smart_progressive / fast / smart : délégation vers optimisation_logic
+    - exhaustif / genetic : délégation vers optimisation_logic
+
+    Args:
+        missions, df_gares, heure_debut, heure_fin : paramètres infrastructure/service.
+        allow_sharing (bool): Partage inter-missions.
+        optimization_config (OptimizationConfig, optional): Si présent, délègue.
+        progress_callback (callable, optional): Barre de progression UI.
+        search_strategy (str): 'simple', 'smart_progressive', 'fast', 'smart', 'exhaustif', 'genetic'.
+        crossing_strategies (dict): Stratégies de croisement pré-calculées.
+
+    Returns:
+        tuple: (chronologie, warnings, stats_homogeneite)
+    """
+
     if optimization_config is not None:
         from optimisation_logic import optimiser_graphique_horaire
         chronologie, warnings, stats = optimiser_graphique_horaire(
             missions, df_gares, heure_debut, heure_fin,
-            optimization_config, allow_sharing=allow_sharing, 
+            optimization_config, allow_sharing=allow_sharing,
             progress_callback=progress_callback
         )
         stats_homogeneite = _calculer_stats_homogeneite(chronologie)
         return chronologie, warnings, stats_homogeneite
-    
-    engine = SimulationEngine(df_gares, heure_debut, heure_fin)
-    
-    # Génération des Allers
-    aller_requests = []
-    for m_idx, m in enumerate(missions):
-        freq = m.get('frequence', 1)
-        if freq <= 0: 
-            continue
-        
-        intervalle = timedelta(hours=1.0/freq)
-        refs = [int(x.strip()) for x in str(m.get('reference_minutes', '0')).split(',') 
-                if x.strip().isdigit()] or [0]
-        
-        for r in refs:
-            curr = engine.dt_debut.replace(minute=0, second=0, microsecond=0) + \
-                   timedelta(minutes=r) - timedelta(hours=1)
-            while curr < engine.dt_debut: 
-                curr += intervalle
-            while curr < engine.dt_fin:
-                aller_requests.append({'ideal_dep': curr, 'mission': m, 'type': 'aller', 'm_idx': m_idx})
-                curr += intervalle
-    
-    # Génération des Retours avec optimisation
-    missions_avec_retour = [m for m in missions if m.get('frequence', 0) > 0]
-    
-    if search_strategy == 'simple':
-        # MODE SIMPLE : Logique événementielle de l'ancienne version
-        # Seuls les ALLERS sont programmés initialement, les RETOURS sont créés dynamiquement
-        from collections import defaultdict
-        import heapq
-        
-        infra_violation_warnings = []
-        other_warnings = []
-        chronologie_reelle = {}
-        id_train_counter = 1
-        event_counter = 0
-        
-        trains = {}  # {id: {"loc": gare, "dispo_a": datetime}}
-        occupation_cantons = defaultdict(list)
-        evenements = []  # heapq
-        
-        # NOUVEAU : Calculer la durée max des missions aller pour savoir combien de temps avant de commencer
-        duree_mission_max_min = _calculer_duree_mission_max(missions, df_gares)
-        
-        # Générer les demandes de départ ALLER (y compris les allers fictifs avant le début du service)
-        for m_idx, mission in enumerate(missions):
-            if mission.get('frequence', 0) <= 0:
-                continue
-            
-            mission_id = f"M{m_idx+1}"
-            frequence = mission['frequence']
-            intervalle = timedelta(hours=1.0 / frequence)
-            
-            # Minutes de référence
-            minutes_ref_str = mission.get("reference_minutes", "0")
-            try:
-                minutes_ref = sorted(list(set([
-                    int(m.strip()) for m in minutes_ref_str.split(',')
-                    if m.strip().isdigit()
-                ])))
-                if not minutes_ref:
-                    minutes_ref = [0]
-            except:
-                minutes_ref = [0]
-            
-            # NOUVEAU : Déterminer l'heure de début pour cette mission
-            # Si injection depuis terminus 2 autorisée, commencer plus tôt pour générer des allers fictifs
-            heure_debut_mission = engine.dt_debut
-            
-            if mission.get('inject_from_terminus_2', False):
-                # Calculer combien de temps avant le début du service on doit commencer
-                # pour avoir des trains disponibles au terminus 2 au début du service
-                horaire_aller = construire_horaire_mission(mission, "aller", df_gares)
-                if horaire_aller:
-                    temps_trajet_aller = horaire_aller[-1].get("time_offset_min", 0)
-                    temps_retournement_B = mission.get("temps_retournement_B", 10)
-                    
-                    # On commence (temps_aller + temps_retournement + 1h) avant le début du service
-                    # Le +1h assure qu'on a au moins un cycle complet avant le début
-                    temps_avant_service = temps_trajet_aller + temps_retournement_B + 60
-                    heure_debut_mission = engine.dt_debut - timedelta(minutes=temps_avant_service)
-            
-            # Générer les événements de demande ALLER (y compris les allers fictifs si besoin)
-            for minute_ref in minutes_ref:
-                offset_hours = minute_ref // 60
-                offset_minutes = minute_ref % 60
-                
-                curseur_temps = heure_debut_mission.replace(
-                    minute=offset_minutes, second=0, microsecond=0
-                ) + timedelta(hours=offset_hours)
-                
-                # Ajuster au premier départ dans ou après heure_debut_mission
-                while curseur_temps < heure_debut_mission:
-                    curseur_temps += intervalle
-                
-                # Générer les départs jusqu'à la fin de service
-                while curseur_temps < engine.dt_fin:
-                    event_counter += 1
-                    is_fictif = curseur_temps < engine.dt_debut  # Marqueur pour les allers avant le début du service
-                    heapq.heappush(evenements, (
-                        curseur_temps, event_counter, "demande_depart_aller",
-                        {"mission": mission, "mission_id": mission_id, "is_aller_fictif": is_fictif}
-                    ))
-                    curseur_temps += intervalle
-        
-        # Boucle événementielle principale
-        while evenements:
-            heure, _, type_event, details = heapq.heappop(evenements)
-            
-            if heure >= engine.dt_fin:
-                continue
-            
-            # Gestion demande de départ ALLER
-            if type_event == "demande_depart_aller":
-                mission_cfg = details["mission"]
-                mission_id = details["mission_id"]
-                origine = mission_cfg["origine"]
-                is_aller_fictif = details.get("is_aller_fictif", False)
-                
-                # Trouver train disponible à l'origine
-                train_assigne_id = None
-                earliest_dispo = datetime.max
-                
-                for id_t, t in trains.items():
-                    if t.get("loc") == origine and t.get("dispo_a", datetime.max) <= heure:
-                        # Si le partage de rames est désactivé, on ne peut utiliser
-                        # que les rames appartenant à la même mission
-                        if not allow_sharing and t.get("mission_id") != mission_id:
-                            continue
-                        if t["dispo_a"] < earliest_dispo:
-                            earliest_dispo = t["dispo_a"]
-                            train_assigne_id = id_t
-                
-                # Si pas de train, en créer un (tagué avec la mission courante)
-                if train_assigne_id is None:
-                    train_assigne_id = id_train_counter
-                    trains[train_assigne_id] = {
-                        "id": train_assigne_id, 
-                        "loc": origine, 
-                        "dispo_a": heure,
-                        "mission_id": mission_id  # Tag mission pour contrôle du partage
-                    }
-                    chronologie_reelle[train_assigne_id] = []
-                    id_train_counter += 1
-                else:
-                    trains[train_assigne_id]["dispo_a"] = max(heure, earliest_dispo)
-                
-                # Programmer la tentative de mouvement
-                heure_programmation = max(heure, trains[train_assigne_id]["dispo_a"])
-                event_counter += 1
-                heapq.heappush(evenements, (heure_programmation, event_counter, "tentative_mouvement", {
-                    "id_train": train_assigne_id,
-                    "mission": mission_cfg,
-                    "mission_id": mission_id,
-                    "trajet_spec": "aller",
-                    "index_etape": 0,
-                    "retry_count": 0,
-                    "is_trajet_fictif": is_aller_fictif  # Propagation du flag
-                }))
-            
-            # Gestion tentative de mouvement (LOGIQUE BLOC PHYSIQUE)
-            elif type_event == "tentative_mouvement":
-                id_train = details["id_train"]
-                mission_cfg = details["mission"]
-                mission_id = details["mission_id"]
-                trajet_spec = details["trajet_spec"]
-                index_etape = details["index_etape"]
-                is_trajet_fictif = details.get("is_trajet_fictif", False)
-                
-                # Construire l'horaire complet de la mission
-                horaire = construire_horaire_mission(mission_cfg, trajet_spec, df_gares)
-                
-                if not horaire or index_etape >= len(horaire) - 1:
-                    continue
-                
-                # NOUVEAU : Identifier le bloc complet (jusqu'au prochain point de croisement)
-                bloc_gares = [horaire[index_etape]]
-                next_crossing_idx = index_etape + 1
-                
-                # Chercher le prochain point de croisement valide
-                while next_crossing_idx < len(horaire):
-                    gare_name = horaire[next_crossing_idx]["gare"]
-                    infra = _get_infra_at_gare(df_gares, gare_name)
-                    bloc_gares.append(horaire[next_crossing_idx])
-                    
-                    # Arrêter au prochain point de croisement ou à la fin
-                    if _is_crossing_point(infra) or next_crossing_idx == len(horaire) - 1:
-                        break
-                    next_crossing_idx += 1
-                
-                # Calculer le temps total du bloc
-                pt_depart_bloc = bloc_gares[0]
-                pt_arrivee_bloc = bloc_gares[-1]
-                
-                duree_bloc_min = max(0, 
-                    pt_arrivee_bloc.get("time_offset_min", 0) - 
-                    pt_depart_bloc.get("time_offset_min", 0)
-                )
-                
-                # Ajouter le temps d'arrêt à destination si c'est un point de croisement
-                duree_arret_final = pt_arrivee_bloc.get("duree_arret_min", 0)
-                
-                gare_dep_bloc = pt_depart_bloc.get("gare")
-                gare_arr_bloc = pt_arrivee_bloc.get("gare")
-                
-                # Déterminer l'heure de départ effective
-                dispo_train = trains.get(id_train, {}).get("dispo_a", heure)
-                heure_depart_reelle = max(heure, dispo_train)
-                
-                if heure_depart_reelle >= engine.dt_fin:
-                    continue
-                
-                # VÉRIFICATION CRUCIALE : Occupation du BLOC COMPLET
-                conflit = False
-                fin_conflit = None
-                
-                if duree_bloc_min > 0 and gare_dep_bloc != gare_arr_bloc:
-                    idx_dep = engine.gares_map.get(gare_dep_bloc)
-                    idx_arr = engine.gares_map.get(gare_arr_bloc)
-                    
-                    if idx_dep is not None and idx_arr is not None:
-                        idx_min = min(idx_dep, idx_arr)
-                        idx_max = max(idx_dep, idx_arr)
-                        
-                        # Temps d'entrée et sortie du bloc
-                        t_enter = heure_depart_reelle
-                        # IMPORTANT : Inclure le temps d'arrêt à destination dans l'occupation
-                        t_exit = heure_depart_reelle + timedelta(minutes=duree_bloc_min + duree_arret_final)
-                        
-                        # Vérifier disponibilité du bloc complet
-                        is_free, next_t = engine.check_segment_availability(idx_min, idx_max, t_enter, t_exit)
-                        
-                        if not is_free:
-                            conflit = True
-                            fin_conflit = next_t
-                            # Note: L'avertissement sera généré seulement si échec de résolution (après 500 tentatives)
-                
-                if not conflit:
-                    # Mouvement du bloc complet réussi
-                    heure_arrivee_finale = heure_depart_reelle + timedelta(minutes=duree_bloc_min)
-                    
-                    if heure_arrivee_finale > engine.dt_fin:
-                        continue
-                    
-                    # NOUVEAU : Ne tracer que si le trajet n'est pas fictif
-                    # Un trajet est fictif si c'est un aller avant le début du service
-                    if not is_trajet_fictif:
-                        # Enregistrer TOUS les segments du bloc dans chronologie
-                        for i in range(len(bloc_gares) - 1):
-                            pt_curr = bloc_gares[i]
-                            pt_next = bloc_gares[i + 1]
-                            
-                            delta_total = pt_next.get("time_offset_min", 0) - pt_curr.get("time_offset_min", 0)
-                            prev_arret = pt_curr.get("duree_arret_min", 0)
-                            duree_segment = max(0, delta_total - prev_arret) 
-                            
-                            if duree_segment > 0:
-                                offset_dep = pt_curr.get("time_offset_min", 0) - pt_depart_bloc.get("time_offset_min", 0)
-                                offset_arr = pt_next.get("time_offset_min", 0) - pt_depart_bloc.get("time_offset_min", 0)
-                                
-                                h_dep_segment = heure_depart_reelle + timedelta(minutes=offset_dep)
-                                h_arr_segment = heure_depart_reelle + timedelta(minutes=offset_arr)
-                                
-                                chronologie_reelle.setdefault(id_train, []).append({
-                                    "start": h_dep_segment,
-                                    "end": h_arr_segment,
-                                    "origine": pt_curr["gare"],
-                                    "terminus": pt_next["gare"]
-                                })
-                    
-                    # Enregistrer l'occupation du BLOC COMPLET dans engine
-                    idx_dep = engine.gares_map[gare_dep_bloc]
-                    idx_arr = engine.gares_map[gare_arr_bloc]
-                    
-                    path_bloc = [{
-                        'gare': gare_dep_bloc, 
-                        'index': idx_dep,
-                        'arr': heure_depart_reelle, 
-                        'dep': heure_depart_reelle
-                    }, {
-                        'gare': gare_arr_bloc, 
-                        'index': idx_arr,
-                        'arr': heure_arrivee_finale, 
-                        'dep': heure_arrivee_finale + timedelta(minutes=duree_arret_final)
-                    }]
-                    engine.committed_schedules.append({'train_id': id_train, 'path': path_bloc})
-                    
-                    # Mettre à jour l'état du train
-                    trains[id_train]["loc"] = gare_arr_bloc
-                    # IMPORTANT : Le train est dispo APRÈS le temps d'arrêt
-                    trains[id_train]["dispo_a"] = heure_arrivee_finale + timedelta(minutes=duree_arret_final)
-                    
-                    # Programmer la suite de la mission si nécessaire
-                    if next_crossing_idx < len(horaire) - 1:
-                        event_counter += 1
-                        heapq.heappush(evenements, (
-                            trains[id_train]["dispo_a"], 
-                            event_counter, 
-                            "tentative_mouvement", 
-                            {
-                                "id_train": id_train,
-                                "mission": mission_cfg,
-                                "mission_id": mission_id,
-                                "trajet_spec": trajet_spec,
-                                "index_etape": next_crossing_idx,
-                                "retry_count": 0,
-                                "is_trajet_fictif": is_trajet_fictif
-                            }
-                        ))
-                    else:
-                        # Fin de la mission
-                        event_counter += 1
-                        heapq.heappush(evenements, (
-                            trains[id_train]["dispo_a"], 
-                            event_counter, 
-                            "fin_mission", 
-                            {
-                                "id_train": id_train,
-                                "mission": mission_cfg,
-                                "mission_id": mission_id,
-                                "trajet_spec": trajet_spec,
-                                "gare_finale": gare_arr_bloc,
-                                "is_trajet_fictif": is_trajet_fictif
-                            }
-                        ))
-                else:
-                    # Conflit détecté -> Reprogrammer
-                    retry_count = details.get("retry_count", 0)
-                    if retry_count < 500:  # Limite de retry
-                        new_details = details.copy()
-                        new_details["retry_count"] = retry_count + 1
-                        event_counter += 1
-                        heapq.heappush(evenements, (
-                            fin_conflit, 
-                            event_counter, 
-                            "tentative_mouvement", 
-                            new_details
-                        ))
-                    else:
-                        # Échec après trop de tentatives - VRAIE VIOLATION
-                        # Identifier les gares problématiques dans le bloc
-                        gares_sans_ve = []
-                        for gare_info in bloc_gares[1:-1]:  # Gares intermédiaires
-                            gare_inter = gare_info["gare"]
-                            infra_inter = _get_infra_at_gare(df_gares, gare_inter)
-                            if not _is_crossing_point(infra_inter):
-                                gares_sans_ve.append(f"{gare_inter} ({infra_inter})")
-                        
-                        reason_detail = f"Impossible de trouver un créneau libre après 500 tentatives pour le bloc {gare_dep_bloc} → {gare_arr_bloc}"
-                        if gares_sans_ve:
-                            reason_detail += f". Gares sans voie d'évitement dans le bloc : {', '.join(gares_sans_ve)}"
-                        
-                        infra_violation_warnings.append({
-                            "time": heure_depart_reelle,
-                            "gare": f"{gare_dep_bloc} → {gare_arr_bloc}",
-                            "mission": mission_id,
-                            "reason": reason_detail,
-                            "is_infra_violation": True
-                        })
-            
-            # Gestion fin de mission
-            elif type_event == "fin_mission":
-                id_train = details["id_train"]
-                mission_cfg = details["mission"]
-                mission_id = details["mission_id"]
-                gare_finale = details["gare_finale"]
-                is_trajet_fictif = details.get("is_trajet_fictif", False)
-                
-                if id_train in trains:
-                    trains[id_train]["loc"] = gare_finale
-                    heure_arrivee_mission = heure
-                else:
-                    continue
-                
-                if details["trajet_spec"] == "aller":
-                    # Fin aller -> Programmer retour
-                    temps_retournement = mission_cfg.get("temps_retournement_B", 10)
-                    heure_dispo_pour_retour = heure_arrivee_mission + timedelta(minutes=temps_retournement)
-                    trains[id_train]["dispo_a"] = heure_dispo_pour_retour
-                    
-                    # Calculer durée retour pour vérifier si faisable
-                    horaire_retour = construire_horaire_mission(mission_cfg, "retour", df_gares)
-                    if horaire_retour and len(horaire_retour) > 1:
-                        temps_trajet_retour = horaire_retour[-1].get("time_offset_min", 0)
-                        heure_fin_retour_estimee = heure_dispo_pour_retour + timedelta(minutes=temps_trajet_retour)
-                        
-                        if heure_fin_retour_estimee <= engine.dt_fin:
-                            # NOUVEAU : Le retour n'est plus fictif si on est après le début du service
-                            is_retour_fictif = heure_dispo_pour_retour < engine.dt_debut
-                            
-                            event_counter += 1
-                            heapq.heappush(evenements, (heure_dispo_pour_retour, event_counter, "tentative_mouvement", {
-                                "id_train": id_train,
-                                "mission": mission_cfg,
-                                "mission_id": mission_id,
-                                "trajet_spec": "retour",
-                                "index_etape": 0,
-                                "retry_count": 0,
-                                "is_trajet_fictif": is_retour_fictif
-                            }))
-                else:
-                    # Fin retour -> Train dispo pour nouvel aller
-                    temps_retournement = mission_cfg.get("temps_retournement_A", 10)
-                    heure_dispo_finale = heure_arrivee_mission + timedelta(minutes=temps_retournement)
-                    trains[id_train]["dispo_a"] = heure_dispo_finale
-        
-        # Nettoyage - supprimer les trains sans trajets
-        trains_a_supprimer = [tid for tid, trajets in chronologie_reelle.items() if not trajets]
-        for tid in trains_a_supprimer:
-            del chronologie_reelle[tid]
-        
-        warnings = {
-            "infra_violations": infra_violation_warnings,
-            "other": other_warnings
-        }
-        stats_homogeneite = _calculer_stats_homogeneite(chronologie_reelle)
-        
-        if progress_callback:
-            progress_callback(1, 1, 0, len(chronologie_reelle), 0)
-        
-        return chronologie_reelle, warnings, stats_homogeneite
-    
-    if search_strategy == 'smart_progressive':
-        # Stratégie SMART PROGRESSIVE : recherche par affinement progressif
-        # Cette fonction doit être définie dans optimisation_logic.py
-        try:
-            from optimisation_logic import _optimisation_smart_progressive
-            return _optimisation_smart_progressive(
-                engine, missions, missions_avec_retour, aller_requests, 
-                allow_sharing, crossing_strategies, progress_callback
-            )
-        except ImportError:
-            # Si la fonction n'existe pas, utiliser la stratégie smart normale
-            search_strategy = 'smart'
-    
-    # Stratégies classiques
-    if search_strategy == 'smart':
-        cadencements_a_tester = list(range(0, 60, 5))  # Test tous les 5 minutes
-    elif search_strategy == 'fast':
-        cadencements_a_tester = list(range(0, 60, 10))  # Test tous les 10 minutes
-    else:  # exhaustive
-        cadencements_a_tester = list(range(60))
-    
-    all_combinations = list(itertools.product(cadencements_a_tester, repeat=len(missions_avec_retour)))
-    
-    # Limiter le nombre de combinaisons pour éviter une explosion
-    if len(all_combinations) > 10000 and search_strategy != 'exhaustive':
-        all_combinations = list(itertools.product(list(range(0, 60, 10)), repeat=len(missions_avec_retour)))
-    
-    best_score = float('inf')
-    best_chronologie = {}
-    best_warnings = {'infra_violations': [], 'other': []}
-    best_rames = 0
-    best_combo = None
-    checkpoint = max(1, len(all_combinations) // 20)
-    
-    for combo_idx, cadencements_combo in enumerate(all_combinations):
-        retour_requests = []
-        for mission_idx, (m_idx, m) in enumerate([(i, m) for i, m in enumerate(missions) if m.get('frequence', 0) > 0]):
-            target_arr_min = cadencements_combo[mission_idx]
-            t_trajet_ret = m.get('temps_trajet_retour', m.get('temps_trajet', 60))
-            dep_min = (target_arr_min - t_trajet_ret) % 60
-            intervalle = timedelta(hours=1.0/m['frequence'])
-            
-            curr = engine.dt_debut.replace(minute=0, second=0, microsecond=0) + \
-                   timedelta(minutes=dep_min) - timedelta(hours=1)
-            while curr < engine.dt_debut: 
-                curr += intervalle
-            while curr < engine.dt_fin:
-                retour_requests.append({'ideal_dep': curr, 'mission': m, 'type': 'retour', 'm_idx': m_idx})
-                curr += intervalle
-        
-        score, chrono, fails, stats, delay, nb_rames = evaluer_configuration(
-            engine, aller_requests + retour_requests,
-            allow_cross_mission_sharing=allow_sharing,
-            crossing_strategies=crossing_strategies
-        )
-        
-        if score < best_score:
-            best_score = score
-            best_chronologie = chrono
-            best_rames = nb_rames
-            best_combo = cadencements_combo
-            best_warnings = {'infra_violations': [], 'other': []}
-            for fail in fails:
-                msg = f"{fail['mission']} à {fail['time'].strftime('%H:%M')}: {fail['reason']}"
-                if fail.get('is_infra_violation', False):
-                    best_warnings['infra_violations'].append(msg)
-                else:
-                    best_warnings['other'].append(msg)
-        
-        if (combo_idx + 1) % checkpoint == 0 and progress_callback:
-            progress_callback(combo_idx + 1, len(all_combinations), 0, best_rames, 0)
-    
-    if progress_callback:
-        progress_callback(len(all_combinations), len(all_combinations), 0, best_rames, 0)
-    
-    stats_homogeneite = _calculer_stats_homogeneite(best_chronologie)
-    return best_chronologie, best_warnings, stats_homogeneite
 
-# Note: _optimisation_smart_progressive est défini dans optimisation_logic.py si nécessaire
+    if search_strategy == 'simple':
+        chronologie, warnings, stats_homogeneite = executer_simulation_evenementielle(
+            missions, df_gares, heure_debut, heure_fin,
+            allow_sharing=allow_sharing,
+            turnaround_buffers={},
+            crossing_strategies=crossing_strategies,
+        )
+        if progress_callback:
+            progress_callback(1, 1, 0, len(chronologie), 0)
+        return chronologie, warnings, stats_homogeneite
+
+    from optimisation_logic import optimiser_graphique_horaire, OptimizationConfig
+    config = OptimizationConfig(mode=search_strategy)
+    chronologie, warnings, _ = optimiser_graphique_horaire(
+        missions, df_gares, heure_debut, heure_fin,
+        config, allow_sharing=allow_sharing,
+        progress_callback=progress_callback
+    )
+    stats_homogeneite = _calculer_stats_homogeneite(chronologie)
+    return chronologie, warnings, stats_homogeneite
 
 # =============================================================================
 # 5. CONSTRUCTION DES HORAIRES DE MISSION

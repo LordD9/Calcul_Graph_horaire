@@ -2,3 +2,5 @@ archive/
 __pycache__/
 .devcontainer/
 GEMINI.md
+AGENTS.md
+CLAUDE.md

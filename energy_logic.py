@@ -46,6 +46,10 @@ def get_default_energy_params():
         "capacite_batterie_kwh": 800, # Basé sur l'analyse train actuel
         "facteur_charge_C": 4.0, # Facteur de charge max (XC)
         "recuperation_pct": 65, # Basé sur l'analyse
+        "soc_min_pct": 20,       # SoC minimum d'exploitation (%)
+        "soc_max_pct": 95,       # SoC maximum de charge (%)
+        "capacite_eol_pct": 80,  # Capacité restante en fin de vie (% du nominal)
+        "simuler_fin_de_vie": False,  # Simuler avec capacité fin de vie
 
         # Coeff de Davis (Force en Newtons par tonne)
         "davis_A_N_t": 16.0,  # Résistance mécanique (N/t)
@@ -207,10 +211,17 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
 
     # Gestion Batterie
     is_batterie = type_materiel == "batterie"
-    capacite_max_kwh = params.get("capacite_batterie_kwh", 600)
+    capacite_nominale_kwh = params.get("capacite_batterie_kwh", 600)
+    simuler_eol = params.get("simuler_fin_de_vie", False)
+    capacite_eol_pct = params.get("capacite_eol_pct", 80)
+    capacite_max_kwh = capacite_nominale_kwh * (capacite_eol_pct / 100.0) if simuler_eol else capacite_nominale_kwh
+    soc_min_pct = params.get("soc_min_pct", 20) / 100.0
+    soc_max_pct = params.get("soc_max_pct", 95) / 100.0
+    niveau_min_kwh = capacite_max_kwh * soc_min_pct
+    niveau_max_kwh = capacite_max_kwh * soc_max_pct
     facteur_charge_C = params.get("facteur_charge_C", 4.0)
     puissance_max_batterie_kw = capacite_max_kwh * facteur_charge_C
-    niveau_batterie_kwh = capacite_max_kwh # Départ à 100%
+    niveau_batterie_kwh = niveau_max_kwh  # Départ au SoC max
 
     log_batterie = []
 
@@ -254,7 +265,7 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
             energie_rechargee_potentielle = limite_puissance * duree_h
 
             # Limite de capacité (kWh)
-            espace_dispo = capacite_max_kwh - niveau_actuel
+            espace_dispo = niveau_max_kwh - niveau_actuel
 
             if energie_rechargee_potentielle >= espace_dispo:
                 energie_rechargee_reelle = espace_dispo
@@ -276,8 +287,8 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
             nouveau_niveau -= conso_aux
             log_msg = f"{contexte} sans infra (-{conso_aux:.1f} kWh Aux)"
 
-        # Bornage final
-        nouveau_niveau = max(0, min(nouveau_niveau, capacite_max_kwh))
+        # Bornage final dans la plage d'utilisation
+        nouveau_niveau = max(niveau_min_kwh, min(nouveau_niveau, niveau_max_kwh))
 
         # Ajouter au log
         pct = (nouveau_niveau / capacite_max_kwh) * 100
@@ -288,7 +299,8 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
 
     # Log initial
     ajouter_log_batt = lambda h, k, m: log_batterie.append((h, k, f"{(k/capacite_max_kwh)*100:.1f}%", m))
-    ajouter_log_batt(trajets_train[0]["start"], niveau_batterie_kwh, "Départ Mission")
+    eol_label = f" [Fin de vie {capacite_eol_pct}%]" if simuler_eol else ""
+    ajouter_log_batt(trajets_train[0]["start"], niveau_batterie_kwh, f"Départ Mission{eol_label}")
 
     v_precedente_kph = 0
 
@@ -408,7 +420,7 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
                     p_target = min(p_dispo_charge, puissance_max_batterie_kw)
                     e_charge_potential = p_target * duree_physique_h
 
-                    space = capacite_max_kwh - niveau_batterie_kwh
+                    space = niveau_max_kwh - niveau_batterie_kwh
                     # On ajoute aussi la récup à la batterie
                     e_added = min(e_charge_potential + recup_possible_kwh, space + conso_totale_segment)
                     # Note : on simplifie ici. La récup est prioritaire. La charge complète le reste.
@@ -421,7 +433,7 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
                     niveau_batterie_kwh += gain_net
 
                     limite_txt = "Infra" if p_dispo_charge < puissance_max_batterie_kw else "Capacité Charge"
-                    if math.isclose(niveau_batterie_kwh, capacite_max_kwh): limite_txt = "Batterie Pleine"
+                    if math.isclose(niveau_batterie_kwh, niveau_max_kwh): limite_txt = "Batterie Pleine"
 
                     log_msg = f"Sous caténaire (+{gain_net:.1f} kWh). Limite: {limite_txt}"
                 else:
@@ -430,11 +442,11 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
                     niveau_batterie_kwh += recup_possible_kwh
                     log_msg = f"Sur batterie (-{conso_totale_segment:.1f} kWh, Recup +{recup_possible_kwh:.1f})"
 
-                niveau_batterie_kwh = max(0, min(niveau_batterie_kwh, capacite_max_kwh))
+                niveau_batterie_kwh = max(niveau_min_kwh, min(niveau_batterie_kwh, niveau_max_kwh))
                 ajouter_log_batt(trajet["end"], niveau_batterie_kwh, log_msg)
 
-                if niveau_batterie_kwh <= 0.1:
-                    erreurs.append(f"Batterie vide à {gare_arrivee_nom}!")
+                if niveau_batterie_kwh <= niveau_min_kwh + 0.1:
+                    erreurs.append(f"Batterie au seuil minimum à {gare_arrivee_nom}!")
 
             v_precedente_kph = v_finale_kph_segment
 

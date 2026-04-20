@@ -336,7 +336,7 @@ if st.session_state.get('gares') is not None:
     if mode_calcul == "Standard":
         mode_generation = st.radio("Mode de génération des trains", ["Manuel", "Rotation optimisée"],index=1)
     else:
-        st.info("Le mode 'Calcul Energie' utilise la génération par 'Rotation optimisée' pour simuler les trajets.")
+        st.info("Le mode 'Calcul Energie' utilise le moteur événementiel pour simuler les trajets et la consommation énergétique.")
 
     # --- SECTION 3: Définition des missions ---
 
@@ -639,10 +639,10 @@ if st.session_state.get('gares') is not None:
 
                     if st.button(f"Ajouter étape au train {id_train}", key=f"add_e_{id_train}"):
                         mission_associee = trouver_mission_pour_od(gare_dep, gare_arr, st.session_state.missions)
-                        df_gares_json = st.session_state.gares.to_json()
                         mission_key = json.dumps(mission_associee, sort_keys=True) if mission_associee else None
 
                         if mission_associee:
+                            df_gares_json = st.session_state.gares.to_json(orient='records')
                             horaire_complet = construire_horaire_mission(mission_key, "aller", df_gares_json)
                         else:
                             horaire_complet = []
@@ -732,7 +732,7 @@ if st.session_state.get('gares') is not None:
                     # Affichage conditionnel des paramètres batterie dans la 2e colonne
                     if type_mat == "batterie":
                         params["capacite_batterie_kwh"] = c2.number_input(
-                            f"Capacité batt. (kWh)", 100, 10000,
+                            f"Capacité nominale (kWh)", 100, 10000,
                             value=params.get("capacite_batterie_kwh", 600),
                             key=f"cap_batt_{type_mat}"
                         )
@@ -741,6 +741,41 @@ if st.session_state.get('gares') is not None:
                             value=float(params.get("facteur_charge_C", 4.0)),
                             step=0.1, key=f"f_charge_c_{type_mat}",
                             help="Puissance de charge max = XC * Capacité kWh"
+                        )
+
+                        st.markdown(f"**Plage d'utilisation & Vieillissement [{type_mat}]**")
+                        cb1, cb2 = st.columns(2)
+                        params["simuler_fin_de_vie"] = cb1.checkbox(
+                            "Simuler batterie fin de vie",
+                            value=params.get("simuler_fin_de_vie", False),
+                            key=f"eol_check_{type_mat}",
+                            help="Réduit la capacité effective selon le pourcentage de fin de vie"
+                        )
+                        if params["simuler_fin_de_vie"]:
+                            params["capacite_eol_pct"] = cb2.slider(
+                                "Capacité fin de vie (%)",
+                                min_value=50, max_value=99,
+                                value=params.get("capacite_eol_pct", 80),
+                                key=f"eol_pct_{type_mat}",
+                                help="Pourcentage de la capacité nominale conservée en fin de vie"
+                            )
+                            cap_eol = params["capacite_batterie_kwh"] * params["capacite_eol_pct"] / 100
+                            cb2.caption(f"Capacité effective : {cap_eol:.0f} kWh")
+                        else:
+                            params["capacite_eol_pct"] = params.get("capacite_eol_pct", 80)
+
+                        cs1, cs2 = st.columns(2)
+                        params["soc_min_pct"] = cs1.slider(
+                            "SoC minimum (%)", min_value=0, max_value=40,
+                            value=params.get("soc_min_pct", 20),
+                            key=f"soc_min_{type_mat}",
+                            help="Niveau de décharge minimum autorisé"
+                        )
+                        params["soc_max_pct"] = cs2.slider(
+                            "SoC maximum (%)", min_value=60, max_value=100,
+                            value=params.get("soc_max_pct", 95),
+                            key=f"soc_max_{type_mat}",
+                            help="Niveau de charge maximum (limiter prolonge la durée de vie)"
                         )
 
 
@@ -833,7 +868,7 @@ if st.session_state.get('gares') is not None:
 # SECTION : PARAMÈTRES D'OPTIMISATION AVANCÉE
 # =============================================================================
 
-if st.session_state.gares is not None and st.session_state.missions:
+if st.session_state.gares is not None and st.session_state.missions and not (mode_calcul == "Standard" and mode_generation == "Manuel"):
     st.markdown("---")
     st.header("⚙️ Configuration de l'Optimisation (OBLIGATOIRE)")
 
@@ -958,8 +993,8 @@ if st.session_state.gares is not None and st.session_state.missions:
 
                 max_delay = st.number_input(
                     "Délai maximum (minutes)",
-                    min_value=1, max_value=15, value=5, step=1,
-                    help="Durée maximale de prolongement d'un arrêt"
+                    min_value=1, max_value=30, value=5, step=1,
+                    help="Durée maximale de prolongement d'un arrêt à une gare de croisement (VE)"
                 )
 
                 delay_penalty = st.slider(
@@ -1100,16 +1135,22 @@ if st.session_state.gares is not None and st.session_state.missions:
             st.info(f"Mode d'optimisation : **{optimization_mode.upper()}**")
 
             # Configuration de l'optimisation
+            crossing_params = st.session_state.get('crossing_params') or {}
+            ui_max_delay = int(crossing_params.get('max_delay', 5)) if enable_crossing_opt else 15
+            ui_penalty = float(crossing_params.get('penalty', 2.0)) if enable_crossing_opt else 2.0
+
             config = OptimizationConfig(
                 mode=optimization_mode,
                 crossing_optimization=CrossingOptimization(
-                    enable_crossing_opt,
-                    max_delay_minutes=15
+                    enabled=enable_crossing_opt,
+                    max_delay_minutes=ui_max_delay,
+                    penalty_per_minute=ui_penalty,
                 ),
                 population_size=100 if optimization_mode == "genetic" else 50,
                 generations=150 if optimization_mode == "genetic" else 100,
                 use_parallel=True,  # Activer la parallélisation
-                num_workers=None  # Auto-detect
+                num_workers=None,  # Auto-detect
+                turnaround_max_buffer=max(30, ui_max_delay + 10),
             )
 
             # Estimation initiale
@@ -1594,8 +1635,13 @@ if st.session_state.gares is not None and st.session_state.missions:
 
                         st.dataframe(df_log, width="stretch")
 
-                        # Graphique SoC (NOUVEAU)
-                        fig_bat = creer_graphique_batterie(resultat_train["batterie_log"], id_train)
+                        # Graphique SoC
+                        bat_params = st.session_state.energy_params.get("batterie", {})
+                        fig_bat = creer_graphique_batterie(
+                            resultat_train["batterie_log"], id_train,
+                            soc_min_pct=bat_params.get("soc_min_pct", 20),
+                            soc_max_pct=bat_params.get("soc_max_pct", 95),
+                        )
                         if fig_bat:
                             st.pyplot(fig_bat)
 
@@ -1618,6 +1664,66 @@ if st.session_state.gares is not None and st.session_state.missions:
 
 else:
     st.warning("Veuillez d'abord définir et valider les gares à la section 1.")
+
+# Bloc séparé pour le mode Manuel : bouton de calcul + affichage des résultats
+if (st.session_state.get('gares') is not None and st.session_state.missions
+        and mode_calcul == "Standard" and mode_generation == "Manuel"):
+
+    st.header("6. Calcul et Affichage")
+    dt_debut_s = datetime.combine(datetime.min, heure_debut_service)
+    dt_fin_s = datetime.combine(datetime.min, heure_fin_service)
+    duree_heures_s = (dt_fin_s - dt_debut_s).total_seconds() / 3600
+    if duree_heures_s <= 0: duree_heures_s += 24
+    fenetre_heures = st.number_input("Durée de la fenêtre (h)", 1.0, duree_heures_s, min(5.0, duree_heures_s), key="fenetre_manuel")
+    decalage_heures = st.slider("Début de la fenêtre (h)", 0.0, max(0.0, duree_heures_s - fenetre_heures), 0.0, 0.5, key="decalage_manuel")
+
+    if "run_calculation_manuel" not in st.session_state:
+        st.session_state.run_calculation_manuel = False
+
+    if st.button("🚀 Générer le graphique horaire", type="primary", key="btn_generate_manuel"):
+        st.session_state.run_calculation_manuel = True
+
+    if st.session_state.run_calculation_manuel:
+        st.session_state.run_calculation_manuel = False
+
+        with st.spinner("Génération du graphique en cours..."):
+            try:
+                chronologie = preparer_roulement_manuel(st.session_state.roulement_manuel)
+                warnings = {}
+                from core_logic import _calculer_stats_homogeneite
+                stats_homogeneite = _calculer_stats_homogeneite(chronologie)
+
+                st.session_state.chronologie_calculee = chronologie
+                st.session_state.warnings_calcul = warnings
+                st.session_state.stats_homogeneite = stats_homogeneite
+                st.success("✅ Graphique généré avec succès !")
+
+            except Exception as e:
+                st.error(f"Une erreur est survenue lors de la génération du graphique : {e}")
+                st.session_state.chronologie_calculee = None
+                st.session_state.warnings_calcul = {}
+                st.session_state.stats_homogeneite = {}
+                st.stop()
+
+    if st.session_state.chronologie_calculee:
+        chronologie = st.session_state.chronologie_calculee
+        params_affichage = {'duree_fenetre': fenetre_heures, 'decalage_heure': decalage_heures}
+        dataframe_gares = st.session_state.gares
+        figure = creer_graphique_horaire(
+            chronologie,
+            dataframe_gares,
+            heure_debut_service,
+            params_affichage,
+            mode_calcul=mode_calcul,
+            missions_par_train={},
+            all_energy_params=st.session_state.energy_params
+        )
+        st.subheader("Graphique horaire")
+        st.pyplot(figure)
+
+        excel_buffer, pdf_buffer = generer_exports(chronologie, figure)
+        st.download_button("Télécharger roulements (Excel)", excel_buffer, "roulements.xlsx", key="dl_excel_manuel")
+        st.download_button("Télécharger graphique (PDF)", pdf_buffer, "graphique.pdf", key="dl_pdf_manuel")
 
 
 # =============================================================================

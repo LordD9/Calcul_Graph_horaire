@@ -39,19 +39,17 @@ import json
 
 @dataclass
 class CrossingOptimization:
-    """Configuration pour l'optimisation des croisements."""
     enabled: bool = False
     max_delay_minutes: int = 15
     penalty_per_minute: float = 2.0
 
 @dataclass
 class CrossingStrategy:
-    """Stratégie de croisement pour une mission donnée."""
     mission_id: str
     stop_durations: Dict[str, int]
     priority: float
     max_acceptable_delay: int
-    
+
     def to_dict(self):
         return {
             'mission_id': self.mission_id,
@@ -59,7 +57,7 @@ class CrossingStrategy:
             'priority': self.priority,
             'max_acceptable_delay': self.max_acceptable_delay
         }
-    
+
     @classmethod
     def from_dict(cls, data):
         return cls(
@@ -68,7 +66,47 @@ class CrossingStrategy:
             priority=data['priority'],
             max_acceptable_delay=data['max_acceptable_delay']
         )
-        
+
+@dataclass
+class SimulationParams:
+    cadencements: Dict[str, int]
+    turnaround_buffers: Dict[str, int]
+    crossing_stop_durations: Dict[str, Dict[str, int]]
+
+    def get_turnaround_buffers(self, missions):
+        result = {}
+        for i, m in enumerate(missions):
+            mid = f"M{i+1}"
+            buffer = self.turnaround_buffers.get(mid, self.turnaround_buffers.get(str(i), 0))
+            if buffer != 0:
+                result[mid] = buffer
+        return result
+
+    def get_crossing_strategies(self, missions, df_gares):
+        from core_logic import _get_infra_at_gare
+        result = {}
+        for i, m in enumerate(missions):
+            mid = f"M{i+1}"
+            key = mid if mid in self.crossing_stop_durations else str(i)
+            stop_durations = self.crossing_stop_durations.get(key, {})
+            if stop_durations:
+                result[mid] = CrossingStrategy(
+                    mission_id=mid,
+                    stop_durations=stop_durations,
+                    priority=0.5,
+                    max_acceptable_delay=15,
+                )
+        return result
+
+    def get_adjusted_reference_minutes(self, missions):
+        result = {}
+        for i, m in enumerate(missions):
+            mid = f"M{i+1}"
+            offset = self.cadencements.get(mid, self.cadencements.get(str(i), None))
+            if offset is not None:
+                result[str(i)] = str(offset)
+        return result
+
 @dataclass
 class OptimizationConfig:
     """Configuration générale de l'optimisation."""
@@ -277,56 +315,40 @@ class SolutionScorer:
 # =============================================================================
 
 def _evaluate_genome_worker(args):
-    """Worker optimisé avec timeout et suppression des outputs."""
+    """Worker optimisé — utilise evaluer_params_simulation au lieu de generer_tous_trajets_optimises."""
     import sys
     import io
     
-    # Redirection complète des outputs
     old_stdout, old_stderr = sys.stdout, sys.stderr
     sys.stdout = sys.stderr = io.StringIO()
     
     try:
         genome, missions, df_gares, heure_debut, heure_fin, allow_sharing, config_dict = args
         config = OptimizationConfig(**config_dict)
-        
-        # Check cache d'abord
-        cache_key = _solution_cache.get_key(missions, genome)
-        cached = _solution_cache.get(cache_key)
-        if cached and config.use_cache:
-            return cached
-        
-        from core_logic import generer_tous_trajets_optimises
-        
-        adjusted_missions = deepcopy(missions)
-        crossing_strategies_dict = {}
-        
-        for mission_id, offset in genome['timing'].items():
-            for mission in adjusted_missions:
-                if f"{mission['origine']}→{mission['terminus']}" == mission_id:
-                    mission['reference_minutes'] = str(offset)
-                    if mission_id in genome.get('crossing', {}):
-                        crossing_strategies_dict[f"Mission_{adjusted_missions.index(mission)}"] = \
-                            CrossingStrategy.from_dict(genome['crossing'][mission_id])
-                    break
-        
-        chronologie, warnings, _ = generer_tous_trajets_optimises(
-            adjusted_missions, df_gares, heure_debut, heure_fin,
-            allow_sharing=allow_sharing,
-            search_strategy='fast',  # Mode rapide
-            progress_callback=None,
-            crossing_strategies=crossing_strategies_dict
+
+        cadencements = genome.get('timing', {})
+        turnaround_buffers = genome.get('turnaround_buffers', {})
+        # genome['crossing'] est déjà au format {mission_id: {gare_ve: durée}}
+        crossing_stop_durations = genome.get('crossing', {})
+
+        params = SimulationParams(
+            cadencements=cadencements,
+            turnaround_buffers=turnaround_buffers,
+            crossing_stop_durations=crossing_stop_durations,
         )
-        
-        scorer = SolutionScorer(config)
-        score = scorer.score_solution(chronologie, warnings)
+
+        score, chronologie, warnings, stats = evaluer_params_simulation(
+            params, missions, df_gares, heure_debut, heure_fin, allow_sharing
+        )
+
         result = (genome, chronologie, warnings, score)
-        
-        # Mise en cache
+
         if config.use_cache:
+            cache_key = _solution_cache.get_key(missions, genome)
             _solution_cache.put(cache_key, result)
-        
+
         return result
-        
+
     except Exception as e:
         return (args[0], {}, {"infra_violations": [], "other": [str(e)]}, float('inf'))
     finally:
@@ -393,17 +415,32 @@ class GeneticOptimizer:
         return crossing_points
     
     def _build_search_space(self) -> Dict:
-        """Construit l'espace de recherche (plages de minutes possibles pour chaque mission)."""
+        """Construit l'espace de recherche (plages de minutes possibles pour chaque mission).
+
+        Les clés utilisent le format "M{i+1}" (ex: "M1", "M2") pour être compatibles
+        avec SimulationParams.get_adjusted_reference_minutes et get_turnaround_buffers.
+        """
         space = {}
-        for mission in self.missions:
-            mission_id = f"{mission['origine']}→{mission['terminus']}"
+        for i, mission in enumerate(self.missions):
+            if mission.get('frequence', 0) <= 0:
+                continue
+            mid = f"M{i+1}"
             try:
-                minutes_ref = [int(m.strip()) for m in mission.get("reference_minutes", "0").split(',') 
+                minutes_ref = [int(m.strip()) for m in mission.get("reference_minutes", "0").split(',')
                               if m.strip().isdigit()] or [0]
-            except: 
+            except:
                 minutes_ref = [0]
-            space[mission_id] = {'default': minutes_ref[0], 'range': (0, 59)}
+            space[mid] = {'default': minutes_ref[0], 'range': (0, 59)}
         return space
+    
+    def _identify_ve_gares(self):
+        """Retourne la liste de toutes les gares VE (voies d'évitement)."""
+        from core_logic import _get_infra_at_gare
+        ve_list = []
+        for _, row in self.df_gares.iterrows():
+            if _get_infra_at_gare(self.df_gares, row['gare']) == 'VE':
+                ve_list.append(row['gare'])
+        return ve_list
     
     def optimize(self, progress_callback: Optional[Callable] = None) -> Tuple[Dict, Dict, Dict]:
         """
@@ -480,56 +517,64 @@ class GeneticOptimizer:
         }
     
     def _initialize_population(self) -> List[Dict]:
-        """Initialise la population avec diversité et stratégies de croisement intelligentes."""
+        """Initialise la population avec cadencement, turnaround et croisement.
+
+        Le premier génome représente la baseline utilisateur (équivalent mode simple),
+        garantissant que l'algo génétique n'est jamais pire que la config d'entrée.
+        """
         population = []
-        
-        for i in range(self.config.population_size):
-            genome = {'timing': {}, 'crossing': {}}
-            
-            # Timing: mélange de valeurs par défaut et aléatoires
+
+        # Plage de buffers adaptée à l'optim des croisements.
+        crossing_enabled = self.config.crossing_optimization and self.config.crossing_optimization.enabled
+        if crossing_enabled:
+            max_buf = max(15, getattr(self.config, 'turnaround_max_buffer', 30))
+            buf_choices = [0, 0, 0, 3, 5, 8, 10, 15, max_buf // 2, max_buf]
+            max_delay = max(5, self.config.crossing_optimization.max_delay_minutes)
+            cross_wide = [0, 2, 3, 5] + list(range(7, max_delay + 1, 2))
+        else:
+            buf_choices = [0, 0, 0, 3, 5, 8, 10]
+            cross_wide = [0, 2, 3, 5]
+
+        # Génome 0 = baseline utilisateur : timing/turnaround/crossing vides
+        # → core_logic utilisera les reference_minutes originales de chaque mission.
+        baseline_genome = {'timing': {}, 'turnaround_buffers': {}, 'crossing': {}}
+        for mission_id in self.search_space.keys():
+            baseline_genome['turnaround_buffers'][mission_id] = 0
+        population.append(baseline_genome)
+
+        for i in range(1, self.config.population_size):
+            genome = {'timing': {}, 'turnaround_buffers': {}, 'crossing': {}}
+
             for mission_id, info in self.search_space.items():
                 if i < self.config.population_size // 4:
-                    # 25% utilisent valeurs par défaut
                     genome['timing'][mission_id] = info['default']
                 elif i < self.config.population_size // 2:
-                    # 25% utilisent des valeurs par pas de 5
                     genome['timing'][mission_id] = random.randrange(0, 60, 5)
                 else:
-                    # 50% complètement aléatoires
                     genome['timing'][mission_id] = random.randint(0, 59)
-                
-                # Stratégies de croisement optimisées
-                ve_list = self.crossing_points.get(mission_id, [])
-                if ve_list and random.random() < 0.6:  # 60% de chance d'avoir une stratégie
-                    # Trois types de stratégies initiales pour diversité
-                    strategy_type = i % 3
-                    
-                    if strategy_type == 0:
-                        # Stratégie "croisement rapide" - favorise arrêts courts
-                        stop_durations = {ve: random.choices([0, 0, 2], weights=[0.6, 0.3, 0.1])[0] for ve in ve_list}
-                        priority = random.uniform(0.5, 0.8)
-                        max_delay = random.choice([10, 15])
-                    elif strategy_type == 1:
-                        # Stratégie "flexible" - permet arrêts moyens
-                        stop_durations = {ve: random.choices([0, 2, 3, 5], weights=[0.4, 0.3, 0.2, 0.1])[0] for ve in ve_list}
-                        priority = random.uniform(0.4, 0.6)
-                        max_delay = random.choice([10, 15, 20])
-                    else:
-                        # Stratégie "sans croisement planifié" - tout à 0
-                        stop_durations = {ve: 0 for ve in ve_list}
-                        priority = random.uniform(0.3, 0.5)
-                        max_delay = 10
-                    
-                    genome['crossing'][mission_id] = CrossingStrategy(
-                        mission_id=mission_id,
-                        stop_durations=stop_durations,
-                        priority=priority,
-                        max_acceptable_delay=max_delay
-                    ).to_dict()
 
-            
+                if i < self.config.population_size // 4:
+                    genome['turnaround_buffers'][mission_id] = 0
+                else:
+                    genome['turnaround_buffers'][mission_id] = random.choice(buf_choices)
+
+            ve_list = self._identify_ve_gares()
+            if ve_list and random.random() < 0.6:
+                for j, mission in enumerate(self.missions):
+                    if mission.get('frequence', 0) <= 0:
+                        continue
+                    mid = f"M{j+1}"
+                    if random.random() < 0.7:
+                        strategy_type = (i + j) % 3
+                        if strategy_type == 0:
+                            stop_durations = {ve: random.choices([0, 0, 2], weights=[0.6, 0.3, 0.1])[0] for ve in ve_list}
+                        elif strategy_type == 1:
+                            stop_durations = {ve: random.choice(cross_wide) for ve in ve_list}
+                        else:
+                            stop_durations = {ve: 0 for ve in ve_list}
+                        genome['crossing'][mid] = stop_durations
+
             population.append(genome)
-        
         return population
     
     def _evaluate_population_parallel(self, population: List[Dict]) -> List[Tuple]:
@@ -606,93 +651,86 @@ class GeneticOptimizer:
         return deepcopy(winner[0])
     
     def _crossover(self, p1: Dict, p2: Dict) -> Dict:
-        """Croisement à deux points."""
-        child = {'timing': {}, 'crossing': {}}
-        
-        # Croisement timing
+        """Croisement à deux points — inclut turnaround_buffers."""
+        child = {'timing': {}, 'turnaround_buffers': {}, 'crossing': {}}
+
+        # Timing
         mission_ids = list(p1['timing'].keys())
         if len(mission_ids) > 2:
             point1 = random.randint(0, len(mission_ids) - 1)
             point2 = random.randint(point1, len(mission_ids) - 1)
-            
             for i, mid in enumerate(mission_ids):
-                if point1 <= i <= point2:
-                    child['timing'][mid] = p2['timing'][mid]
-                else:
-                    child['timing'][mid] = p1['timing'][mid]
+                child['timing'][mid] = p2['timing'][mid] if point1 <= i <= point2 else p1['timing'][mid]
         else:
             for mid in mission_ids:
                 child['timing'][mid] = random.choice([p1['timing'][mid], p2['timing'][mid]])
-        
-        # Croisement stratégies de croisement
-        all_mission_ids = set(p1.get('crossing', {}).keys()) | set(p2.get('crossing', {}).keys())
-        for mid in all_mission_ids:
-            if mid in p1.get('crossing', {}) and mid in p2.get('crossing', {}):
-                child['crossing'][mid] = random.choice([p1['crossing'][mid], p2['crossing'][mid]])
-            elif mid in p1.get('crossing', {}):
-                child['crossing'][mid] = p1['crossing'][mid]
-            elif mid in p2.get('crossing', {}):
-                child['crossing'][mid] = p2['crossing'][mid]
-        
+
+        # Turnaround buffers
+        for mid in mission_ids:
+            buf1 = p1.get('turnaround_buffers', {}).get(mid, 0)
+            buf2 = p2.get('turnaround_buffers', {}).get(mid, 0)
+            child['turnaround_buffers'][mid] = random.choice([buf1, buf2])
+
+        # Crossing strategies
+        all_crossing_keys = set(p1.get('crossing', {}).keys()) | set(p2.get('crossing', {}).keys())
+        for key in all_crossing_keys:
+            if key in p1.get('crossing', {}) and key in p2.get('crossing', {}):
+                child['crossing'][key] = random.choice([p1['crossing'][key], p2['crossing'][key]])
+            elif key in p1.get('crossing', {}):
+                child['crossing'][key] = p1['crossing'][key]
+            elif key in p2.get('crossing', {}):
+                child['crossing'][key] = p2['crossing'][key]
+
         return child
     
     def _mutate(self, genome: Dict) -> Dict:
-        """Mutation avec intensité variable et optimisation des croisements."""
+        """Mutation avec intensité variable — inclut turnaround_buffers."""
         mutated = deepcopy(genome)
-        
+
         # Mutation timing (30% des gènes)
         for mid in mutated['timing']:
             if random.random() < 0.3:
-                # 70% mutation locale (±5min), 30% mutation globale
                 if random.random() < 0.7:
                     current = mutated['timing'][mid]
                     mutated['timing'][mid] = max(0, min(59, current + random.randint(-5, 5)))
                 else:
                     mutated['timing'][mid] = random.randint(0, 59)
-        
-        # Mutation crossing - optimisée pour favoriser croisements efficaces
-        if random.random() < 0.3:  # Augmenté de 0.2 à 0.3 pour plus d'exploration
+
+        # Mutation turnaround buffers (40% de chance)
+        crossing_enabled = self.config.crossing_optimization and self.config.crossing_optimization.enabled
+        if crossing_enabled:
+            max_buf = max(15, getattr(self.config, 'turnaround_max_buffer', 30))
+            buf_choices = [0, 0, 3, 5, 8, 10, 15, max_buf // 2, max_buf]
+            max_delay = max(5, self.config.crossing_optimization.max_delay_minutes)
+            cross_choices = [0, 0, 2, 3, 5] + list(range(7, max_delay + 1, 2))
+        else:
+            buf_choices = [0, 0, 3, 5, 8, 10]
+            cross_choices = [0, 0, 2, 3, 5]
+
+        if 'turnaround_buffers' not in mutated:
+            mutated['turnaround_buffers'] = {}
+        for mid in list(mutated.get('timing', {}).keys()):
+            if random.random() < 0.4:
+                current_buf = mutated['turnaround_buffers'].get(mid, 0)
+                if random.random() < 0.5:
+                    delta_choices = [-3, -1, 0, 2, 5]
+                    if crossing_enabled:
+                        delta_choices.extend([8, 10])
+                    mutated['turnaround_buffers'][mid] = max(0, current_buf + random.choice(delta_choices))
+                else:
+                    mutated['turnaround_buffers'][mid] = random.choice(buf_choices)
+
+        # Mutation crossing (30% de chance)
+        # genome['crossing'] = {mission_id: {gare_ve: durée}}
+        ve_list = self._identify_ve_gares()
+        if random.random() < 0.3 and ve_list:
             for mid in list(mutated.get('crossing', {}).keys()):
-                if random.random() < 0.4:  # Augmenté de 0.3 à 0.4
-                    # Stratégie de mutation intelligente des durées d'arrêt
-                    for ve in mutated['crossing'][mid]['stop_durations']:
+                if random.random() < 0.4:
+                    sd = mutated['crossing'][mid]
+                    for gare in list(sd.keys()):
                         if random.random() < 0.5:
-                            # Favoriser les arrêts courts (0, 2, 3) pour minimiser les retards
-                            # tout en permettant des croisements efficaces
-                            mutated['crossing'][mid]['stop_durations'][ve] = random.choices(
-                                [0, 0, 2, 3, 5, 8],  # Favorise 0 (2 fois plus probable)
-                                weights=[0.35, 0.35, 0.15, 0.10, 0.04, 0.01]
-                            )[0]
-                    
-                    # Mutation de la priorité et du délai acceptable
-                    if random.random() < 0.3:
-                        mutated['crossing'][mid]['priority'] = max(0.1, min(0.9, 
-                            mutated['crossing'][mid]['priority'] + random.uniform(-0.2, 0.2)))
-                    
-                    if random.random() < 0.3:
-                        mutated['crossing'][mid]['max_acceptable_delay'] = random.choice([5, 10, 15, 20])
-        
-        # Parfois, ajouter ou supprimer une stratégie de croisement
-        if random.random() < 0.15:  # 15% de chance
-            available_missions = list(self.crossing_points.keys())
-            if available_missions:
-                mission_id = random.choice(available_missions)
-                ve_list = self.crossing_points.get(mission_id, [])
-                
-                if mission_id in mutated.get('crossing', {}) and random.random() < 0.3:
-                    # Supprimer une stratégie existante
-                    del mutated['crossing'][mission_id]
-                elif ve_list and mission_id not in mutated.get('crossing', {}):
-                    # Ajouter une nouvelle stratégie avec paramètres optimisés
-                    if 'crossing' not in mutated:
-                        mutated['crossing'] = {}
-                    mutated['crossing'][mission_id] = CrossingStrategy(
-                        mission_id=mission_id,
-                        stop_durations={ve: random.choices([0, 0, 2, 3], weights=[0.5, 0.5, 0.3, 0.2])[0] for ve in ve_list},
-                        priority=random.uniform(0.4, 0.7),  # Priorités moyennes à hautes
-                        max_acceptable_delay=random.choice([10, 15])  # Délais raisonnables
-                    ).to_dict()
-        
+                            sd[gare] = random.choice(cross_choices)
+
         return mutated
 
 
@@ -700,107 +738,349 @@ class GeneticOptimizer:
 # MODE EXHAUSTIF (INCHANGÉ)
 # =============================================================================
 
-def optimize_exhaustive(missions, df_gares, heure_debut, heure_fin, config, 
-                       scorer, allow_sharing, progress_callback):
-    """Mode exhaustif pour petits problèmes - CORRIGÉ."""
-    from core_logic import generer_tous_trajets_optimises
-    from itertools import product
-    
-    # CORRECTION : Identifier TOUTES les missions avec retour, pas seulement certaines
-    mission_retours = []
-    for m in missions:
+def evaluer_params_simulation(params, missions, df_gares, heure_debut, heure_fin, allow_sharing=True):
+    from core_logic import executer_simulation_evenementielle, _calculer_stats_homogeneite, _score_chronologie_bruit
+    from datetime import time as dt_time
+
+    adjusted_ref = params.get_adjusted_reference_minutes(missions)
+    modified_missions = []
+    for i, m in enumerate(missions):
+        m_copy = dict(m)
+        if str(i) in adjusted_ref:
+            m_copy['reference_minutes'] = adjusted_ref[str(i)]
+        # Ne pas modifier les temps de retournement ici — turnaround_buffers est passé
+        # séparément à executer_simulation_evenementielle pour éviter le double-comptage.
+        modified_missions.append(m_copy)
+
+    turn_bufs = params.get_turnaround_buffers(missions)
+    cross_strats = params.get_crossing_strategies(missions, df_gares)
+
+    chronologie, warnings, stats = executer_simulation_evenementielle(
+        modified_missions, df_gares, heure_debut, heure_fin,
+        allow_sharing=allow_sharing,
+        turnaround_buffers=turn_bufs,
+        crossing_strategies=cross_strats,
+        adjusted_reference_minutes=adjusted_ref,
+    )
+
+    score = _score_chronologie_bruit(chronologie, warnings)
+    extra_delay = sum(params.turnaround_buffers.values()) * 5
+    score += extra_delay
+
+    return score, chronologie, warnings, stats
+
+
+def _baseline_simulation_params():
+    """Crée un SimulationParams vide qui reproduit exactement le mode simple.
+
+    Les cadencements restent vides pour que core_logic utilise les `reference_minutes`
+    originales de la mission (préserve les patterns multi-valeurs comme "0,30").
+    """
+    return SimulationParams(
+        cadencements={},
+        turnaround_buffers={},
+        crossing_stop_durations={},
+    )
+
+
+def _build_turnaround_range(config):
+    """Retourne la plage de buffers de retournement à explorer.
+
+    Quand l'optimisation des croisements est activée, on étend la plage pour permettre
+    au retournement prolongé de dissoudre les conflits (alternative aux arrêts VE).
+    """
+    base = [0, 3, 5, 8, 10]
+    if config and config.crossing_optimization and config.crossing_optimization.enabled:
+        max_buf = max(15, getattr(config, 'turnaround_max_buffer', 30))
+        extended = list(range(15, max_buf + 1, 5))
+        return base + [v for v in extended if v not in base]
+    return base
+
+
+def _build_crossing_range(config):
+    """Durées d'arrêt à tester sur les gares VE, bornées par max_delay_minutes."""
+    if config and config.crossing_optimization and config.crossing_optimization.enabled:
+        max_delay = max(5, config.crossing_optimization.max_delay_minutes)
+        values = [0, 2, 3, 5]
+        extras = list(range(7, max_delay + 1, 2))
+        return values + [v for v in extras if v not in values]
+    return [0, 2, 3, 5]
+
+
+def _optimisation_smart_progressive(missions, df_gares, heure_debut, heure_fin,
+                                    allow_sharing=True, config=None, progress_callback=None):
+    if config is None:
+        config = OptimizationConfig(mode='smart_progressive')
+
+    # IDs uniquement pour les missions actives, dans l'ordre d'index (pas de slice).
+    active_mission_ids = [f"M{i+1}" for i, m in enumerate(missions) if m.get('frequence', 0) > 0]
+
+    # Gares VE disponibles par mission (fix: missions passées pour peupler le dict).
+    ve_gares = _identifier_points_croisement(df_gares, missions)
+
+    # --- BASELINE = mode simple : évaluée en premier, sert de référence à battre ---
+    best_params = _baseline_simulation_params()
+    best_score, best_chronologie, best_warnings, _ = evaluer_params_simulation(
+        best_params, missions, df_gares, heure_debut, heure_fin, allow_sharing=allow_sharing
+    )
+
+    # Seuil minimal de gain pour remplacer la baseline : évite la dérive sur des
+    # améliorations marginales qui perturbent le graphique sans bénéfice réel.
+    tol = 1.0
+    def _accept(new_score, current_score, trial_has_violations, best_has_violations):
+        # Toujours accepter si on résout des violations d'infrastructure
+        if best_has_violations and not trial_has_violations:
+            return True
+        if trial_has_violations and not best_has_violations:
+            return False
+        return new_score < current_score - tol
+
+    best_has_violations = len(best_warnings.get("infra_violations", [])) > 0
+
+    turnaround_vals = _build_turnaround_range(config)
+    crossing_vals = _build_crossing_range(config)
+
+    phases = [
+        ('Cadencement', [('cadencement', mid, list(range(0, 60, 5))) for mid in active_mission_ids]),
+        ('Retournement', [('turnaround', mid, turnaround_vals) for mid in active_mission_ids]),
+    ]
+
+    # Phase croisement : essayer différentes durées d'arrêt aux gares VE.
+    crossing_steps = [
+        ('crossing', mid, ve, crossing_vals)
+        for mid in active_mission_ids
+        for ve in ve_gares.get(mid, [])
+    ]
+    if crossing_steps:
+        phases.append(('Croisement', crossing_steps))
+
+    phases.append(('Affinement', [('cadencement', mid, list(range(0, 60))) for mid in active_mission_ids]))
+
+    # step[-1] est toujours la liste de valeurs, quelle que soit la longueur du tuple.
+    total_steps = sum(sum(len(step[-1]) for step in phase_steps) for _, phase_steps in phases)
+
+    # Phase Résolution : préparée mais seulement activée si des violations persistent.
+    # On ne l'ajoute au total_steps qu'au moment de la déclencher (progress bar honnête).
+    resolution_steps = []
+    if config.crossing_optimization and config.crossing_optimization.enabled:
+        max_buf = max(15, getattr(config, 'turnaround_max_buffer', 30))
+        max_delay = max(5, config.crossing_optimization.max_delay_minutes)
+        resolution_steps = [
+            ('turnaround_force', mid, list(range(max(5, max_buf - 10), max_buf + 1, 3)))
+            for mid in active_mission_ids
+        ]
+        for mid in active_mission_ids:
+            for ve in ve_gares.get(mid, []):
+                resolution_steps.append(('crossing_force', mid, ve, list(range(max(2, max_delay - 5), max_delay + 1, 2))))
+
+    steps_done = 0
+
+    def _run_phase(phase_name, phase_steps):
+        nonlocal best_params, best_score, best_chronologie, best_warnings, best_has_violations, steps_done
+        for step in phase_steps:
+            step_type = step[0]
+            mid = step[1]
+            values = step[-1]
+
+            for val in values:
+                trial_params = SimulationParams(
+                    cadencements=dict(best_params.cadencements),
+                    turnaround_buffers=dict(best_params.turnaround_buffers),
+                    crossing_stop_durations={k: dict(v) for k, v in best_params.crossing_stop_durations.items()},
+                )
+
+                if step_type in ('cadencement',):
+                    trial_params.cadencements[mid] = val
+                elif step_type in ('turnaround', 'turnaround_force'):
+                    trial_params.turnaround_buffers[mid] = val
+                elif step_type in ('crossing', 'crossing_force'):
+                    ve_gare = step[2]
+                    if mid not in trial_params.crossing_stop_durations:
+                        trial_params.crossing_stop_durations[mid] = {}
+                    trial_params.crossing_stop_durations[mid][ve_gare] = val
+
+                score, chrono, warns, _ = evaluer_params_simulation(
+                    trial_params, missions, df_gares, heure_debut, heure_fin,
+                    allow_sharing=allow_sharing,
+                )
+                trial_has_violations = len(warns.get("infra_violations", [])) > 0
+
+                if _accept(score, best_score, trial_has_violations, best_has_violations):
+                    best_score = score
+                    best_chronologie = chrono
+                    best_warnings = warns
+                    best_params = trial_params
+                    best_has_violations = trial_has_violations
+
+                steps_done += 1
+                if progress_callback and total_steps > 0:
+                    progress_callback(steps_done, total_steps, best_score, len(best_chronologie), 0)
+
+    for phase_name, phase_steps in phases:
+        _run_phase(phase_name, phase_steps)
+
+    # Phase Résolution : ne tourne que si des violations persistent OU si aucune solution sans violation n'a été trouvée
+    if resolution_steps and best_has_violations:
+        _run_phase('Résolution', resolution_steps)
+
+    return best_chronologie, best_warnings, {
+        'mode': 'smart_progressive',
+        'best_score': best_score if best_score != float('inf') else None,
+        'steps_evaluated': steps_done,
+        'baseline_preserved': not best_params.cadencements and not best_params.turnaround_buffers and not best_params.crossing_stop_durations,
+    }
+
+
+def _identifier_points_croisement(df_gares, missions=None):
+    """Retourne {mission_id: [gares_VE]} pour toutes les missions actives.
+
+    Le bug d'origine (boucle sur un dict vide) a été corrigé : toutes les gares VE
+    de la ligne sont associées à chaque mission active.
+    """
+    from core_logic import _get_infra_at_gare
+    ve_stations = []
+    for _, row in df_gares.iterrows():
+        if _get_infra_at_gare(df_gares, row['gare']) == 'VE':
+            ve_stations.append(row['gare'])
+
+    if not ve_stations or missions is None:
+        return {}
+
+    result = {}
+    for i, m in enumerate(missions):
         if m.get('frequence', 0) > 0:
-            # Créer une liste de cadencements possibles pour chaque mission
-            # Utiliser un pas fin (chaque minute) pour l'exhaustif
-            mission_retours.append((
-                f"{m['origine']}→{m['terminus']}", 
-                list(range(0, 60, 1))  # CORRECTION : Tester chaque minute
-            ))
-    
-    if not mission_retours:
-        chrono, warns, _ = generer_tous_trajets_optimises(
-            missions, df_gares, heure_debut, heure_fin, allow_sharing=allow_sharing
-        )
+            result[f"M{i+1}"] = ve_stations
+    return result
+
+
+def optimize_exhaustive(missions, df_gares, heure_debut, heure_fin, config,
+                       scorer, allow_sharing, progress_callback):
+    """Mode exhaustif — exploration complète cadencement + turnaround + croisement."""
+    from itertools import product
+
+    active_missions = [(i, m) for i, m in enumerate(missions) if m.get('frequence', 0) > 0]
+    if not active_missions:
+        params = _baseline_simulation_params()
+        score, chrono, warns, stats = evaluer_params_simulation(params, missions, df_gares, heure_debut, heure_fin, allow_sharing)
         return chrono, warns, {'mode': 'exhaustif', 'combinations_tested': 1}
-    
-    # CORRECTION : Générer TOUTES les combinaisons possibles
-    all_combos = list(product(*[v for _, v in mission_retours]))
-    
-    # Limitation de sécurité : si trop de combinaisons, réduire le pas
-    if len(all_combos) > 100000:
-        # Réduire au pas de 5 minutes si trop de combinaisons
-        mission_retours = [(mid, list(range(0, 60, 5))) for mid, _ in mission_retours]
-        all_combos = list(product(*[v for _, v in mission_retours]))
-    
-    best_res, best_score = (None, None, None), float('inf')
-    
-    for idx, combo in enumerate(all_combos):
-        adj_missions = deepcopy(missions)
-        # CORRECTION : Appliquer les cadencements à TOUTES les missions
-        for i, ((mid, _), val) in enumerate(zip(mission_retours, combo)):
-            for m in adj_missions:
-                if f"{m['origine']}→{m['terminus']}" == mid:
-                    m['reference_minutes'] = str(val)
-        
-        # CORRECTION : Utiliser la stratégie 'simple' qui donne de bons résultats
-        chrono, warns, _ = generer_tous_trajets_optimises(
-            adj_missions, df_gares, heure_debut, heure_fin, 
-            allow_sharing=allow_sharing, search_strategy='simple'  # Utilise la logique simple optimisée
+
+    mission_ids = [f"M{i+1}" for i, _ in active_missions]
+
+    # Baseline : évaluée en premier pour fournir un point de départ valide
+    best_params = _baseline_simulation_params()
+    best_score, best_chronologie, best_warnings, _ = evaluer_params_simulation(
+        best_params, missions, df_gares, heure_debut, heure_fin, allow_sharing
+    )
+
+    cadence_range = list(range(0, 60, 5))
+    # Plage turnaround étendue si optim. croisement activée
+    if config.crossing_optimization and config.crossing_optimization.enabled:
+        max_buf = max(15, getattr(config, 'turnaround_max_buffer', 30))
+        turnaround_range = [0, 5, 10, max(15, max_buf // 2), max_buf]
+    else:
+        turnaround_range = [0, 5, 10]
+
+    if len(active_missions) > 3:
+        cadence_range = list(range(0, 60, 10))
+        turnaround_range = turnaround_range[:3]
+
+    combos = list(product(cadence_range, turnaround_range, repeat=len(active_missions)))
+    if len(combos) > 100000:
+        cadence_range = list(range(0, 60, 10))
+        combos = list(product(cadence_range, turnaround_range, repeat=len(active_missions)))
+
+    for idx, combo in enumerate(combos):
+        cadencements = {}
+        turnaround_buffers = {}
+        for j, (m_idx, m) in enumerate(active_missions):
+            mid = f"M{m_idx+1}"
+            cadencements[mid] = combo[2*j]
+            turnaround_buffers[mid] = combo[2*j+1]
+
+        params = SimulationParams(
+            cadencements=cadencements,
+            turnaround_buffers=turnaround_buffers,
+            crossing_stop_durations={},
         )
-        
-        if not scorer.is_valid_solution(warns):
-            if progress_callback:
-                progress_callback(idx+1, len(all_combos), best_score, 0, 0)
-            continue
-        
-        score = scorer.score_solution(chrono, warns)
+
+        score, chrono, warns, stats = evaluer_params_simulation(
+            params, missions, df_gares, heure_debut, heure_fin, allow_sharing
+        )
+
         if score < best_score:
             best_score = score
-            best_res = (chrono, warns)
-        
+            best_chronologie = chrono
+            best_warnings = warns
+            best_params = params
+
         if progress_callback:
-            progress_callback(idx+1, len(all_combos), best_score, len(chrono) if chrono else 0, 0)
-    
-    if best_res[0] is None:
-        return {}, {"infra_violations": [], "other": ["Echec exhaustif"]}, {'mode': 'exhaustif', 'combinations_tested': len(all_combos)}
-    return best_res[0], best_res[1], {'mode': 'exhaustif', 'best_score': best_score, 'combinations_tested': len(all_combos)}
+            progress_callback(idx+1, len(combos), best_score, len(chrono) if chrono else 0, 0)
+
+    if not best_chronologie or best_params is None:
+        return {}, {"infra_violations": [], "other": ["Echec exhaustif"]}, {'mode': 'exhaustif', 'combinations_tested': len(combos)}
+
+    # Balayage croisement : sur la meilleure configuration trouvée, tester des durées d'arrêt aux VE.
+    ve_gares = _identifier_points_croisement(df_gares, missions)
+    crossing_combos_tested = 0
+    crossing_durs = _build_crossing_range(config)[1:]  # on exclut 0 ici (déjà testé par défaut)
+    if ve_gares:
+        for mid in mission_ids:
+            for ve in ve_gares.get(mid, []):
+                for dur in crossing_durs:
+                    trial_crossing = {k: dict(v) for k, v in best_params.crossing_stop_durations.items()}
+                    if mid not in trial_crossing:
+                        trial_crossing[mid] = {}
+                    trial_crossing[mid][ve] = dur
+                    trial = SimulationParams(
+                        cadencements=dict(best_params.cadencements),
+                        turnaround_buffers=dict(best_params.turnaround_buffers),
+                        crossing_stop_durations=trial_crossing,
+                    )
+                    score, chrono, warns, stats = evaluer_params_simulation(
+                        trial, missions, df_gares, heure_debut, heure_fin, allow_sharing
+                    )
+                    crossing_combos_tested += 1
+                    if score < best_score:
+                        best_score = score
+                        best_chronologie = chrono
+                        best_warnings = warns
+                        best_params = trial
+
+    return best_chronologie, best_warnings, {
+        'mode': 'exhaustif',
+        'best_score': best_score,
+        'combinations_tested': len(combos) + crossing_combos_tested,
+    }
 
 
 # =============================================================================
 # FONCTION PRINCIPALE
 # =============================================================================
 
-def optimiser_graphique_horaire(missions, df_gares, heure_debut, heure_fin, 
+def optimiser_graphique_horaire(missions, df_gares, heure_debut, heure_fin,
                                config, allow_sharing=True, progress_callback=None):
-    """Point d'entrée principal de l'optimisation."""
-    scorer = SolutionScorer(config)
-    
-    # Redirection du mode "smart" vers "smart_progressive"
-    if config.mode == "smart":
-        config.mode = "smart_progressive"
+    """Point d'entrée principal de l'optimisation — tous les modes utilisent le moteur événementiel."""
     
     if config.mode == "genetic":
-        optimizer = GeneticOptimizer(missions, df_gares, heure_debut, heure_fin, 
-                                    config, scorer, allow_sharing)
+        optimizer = GeneticOptimizer(missions, df_gares, heure_debut, heure_fin,
+                                    config, SolutionScorer(config), allow_sharing)
         return optimizer.optimize(progress_callback)
     elif config.mode == "exhaustif":
-        return optimize_exhaustive(missions, df_gares, heure_debut, heure_fin, 
+        scorer = SolutionScorer(config)
+        return optimize_exhaustive(missions, df_gares, heure_debut, heure_fin,
                                   config, scorer, allow_sharing, progress_callback)
     elif config.mode == "simple":
-        # Mode simple : utilise la logique de base sans optimisation avancée
-        # L'utilisateur contrôle directement via les temps de retournement configurés
-        from core_logic import generer_tous_trajets_optimises
-        c, w, _ = generer_tous_trajets_optimises(
-            missions, df_gares, heure_debut, heure_fin, 
-            allow_sharing=allow_sharing, progress_callback=progress_callback,
-            search_strategy='simple'  # Mode simple sans recherche
+        params = SimulationParams(cadencements={}, turnaround_buffers={}, crossing_stop_durations={})
+        for i, m in enumerate(missions):
+            mid = f"M{i+1}"
+            refs = [int(x.strip()) for x in str(m.get('reference_minutes', '0')).split(',') if x.strip().isdigit()]
+            params.cadencements[mid] = refs[0] if refs else 0
+        score, chrono, warns, stats = evaluer_params_simulation(
+            params, missions, df_gares, heure_debut, heure_fin, allow_sharing
         )
-        return c, w, {'mode': 'simple', 'description': 'Simulation directe avec paramètres utilisateur'}
-    else:  # smart_progressive, fast, ou autres
-        from core_logic import generer_tous_trajets_optimises
-        c, w, _ = generer_tous_trajets_optimises(
-            missions, df_gares, heure_debut, heure_fin, 
-            allow_sharing=allow_sharing, progress_callback=progress_callback,
-            search_strategy=config.mode
+        return chrono, warns, {'mode': 'simple', 'description': 'Simulation directe avec paramètres utilisateur', 'best_score': score}
+    else:
+        return _optimisation_smart_progressive(
+            missions, df_gares, heure_debut, heure_fin,
+            allow_sharing=allow_sharing, config=config, progress_callback=progress_callback
         )
-        return c, w, {'mode': config.mode}

@@ -363,7 +363,7 @@ def creer_graphique_horaire(
     fig.subplots_adjust(right=0.85)
     return fig
 
-def creer_graphique_batterie(batterie_log, train_id):
+def creer_graphique_batterie(batterie_log, train_id, soc_min_pct=20, soc_max_pct=95):
     """
     Génère un graphique d'évolution du SoC (State of Charge) pour un train donné.
     Affiche le % de batterie en fonction du temps, avec seuils 20% et 80%.
@@ -396,9 +396,9 @@ def creer_graphique_batterie(batterie_log, train_id):
     ax.plot(times, socs, color='#2ca02c', linewidth=2, label='SoC (%)')
     ax.fill_between(times, socs, alpha=0.2, color='#2ca02c')
 
-    # Lignes de seuil
-    ax.axhline(y=80, color='#d62728', linestyle='--', linewidth=1, alpha=0.8, label='Seuil 80%')
-    ax.axhline(y=20, color='#d62728', linestyle='--', linewidth=1, alpha=0.8, label='Seuil 20%')
+    # Lignes de seuil (plage d'utilisation configurée)
+    ax.axhline(y=soc_max_pct, color='#1f77b4', linestyle='--', linewidth=1, alpha=0.8, label=f'SoC max {soc_max_pct}%')
+    ax.axhline(y=soc_min_pct, color='#d62728', linestyle='--', linewidth=1, alpha=0.8, label=f'SoC min {soc_min_pct}%')
 
     # Formatage
     ax.set_ylim(-5, 105)
