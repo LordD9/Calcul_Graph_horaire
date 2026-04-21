@@ -152,55 +152,85 @@ if "warnings_calcul" not in st.session_state: st.session_state.warnings_calcul =
 if "energy_errors" not in st.session_state: st.session_state.energy_errors = []
 
 
-def estimer_temps_calcul(missions, heure_debut, heure_fin):
-    """Calcule une estimation grossière du temps de calcul en se basant sur le nombre d'événements initiaux."""
-    total_initial_events = 0
-    dt_debut_service = datetime.combine(datetime.today(), heure_debut)
-    dt_fin_service = datetime.combine(datetime.today(), heure_fin)
-    if dt_fin_service <= dt_debut_service:
-        dt_fin_service += timedelta(days=1)
-
+def _compter_trains_initiaux(missions, heure_debut, heure_fin):
+    """Compte le nombre de trains aller initiaux sur la plage de service."""
+    total = 0
+    dt_debut = datetime.combine(datetime.today(), heure_debut)
+    dt_fin = datetime.combine(datetime.today(), heure_fin)
+    if dt_fin <= dt_debut:
+        dt_fin += timedelta(days=1)
     for mission in missions:
         if mission.get("frequence", 0) <= 0:
             continue
         try:
             minutes_ref = [int(m.strip()) for m in mission.get("reference_minutes", "0").split(',') if m.strip().isdigit()]
-            if not minutes_ref: minutes_ref = [0]
+            if not minutes_ref:
+                minutes_ref = [0]
         except Exception:
             minutes_ref = [0]
-
         intervalle = timedelta(hours=1 / mission["frequence"])
         for minute_ref in minutes_ref:
-            offset_hours = minute_ref // 60
-            offset_minutes = minute_ref % 60
+            curseur = dt_debut.replace(minute=minute_ref % 60, second=0, microsecond=0)
+            curseur += timedelta(hours=minute_ref // 60)
+            while curseur < dt_debut:
+                curseur += timedelta(hours=1)
+            while curseur < dt_fin:
+                total += 1
+                curseur += intervalle
+    return total
 
-            curseur_temps = dt_debut_service.replace(minute=offset_minutes, second=0, microsecond=0)
-            curseur_temps += timedelta(hours=offset_hours)
 
-            while curseur_temps < dt_debut_service:
-                curseur_temps += timedelta(hours=1)
+def _format_duree(secondes):
+    """Formate une durée en secondes en chaîne lisible."""
+    if secondes < 10:
+        return "< 10 secondes"
+    elif secondes < 60:
+        return f"~{int(secondes)} secondes"
+    elif secondes < 120:
+        return "~1 minute"
+    elif secondes < 3600:
+        minutes = int(secondes / 60)
+        return f"~{minutes} minutes"
+    else:
+        heures = secondes / 3600
+        return f"~{heures:.1f}h"
 
-            while curseur_temps < dt_fin_service:
-                total_initial_events += 1
-                curseur_temps += intervalle
 
-    if total_initial_events == 0:
+def estimer_temps_calcul(missions, heure_debut, heure_fin, mode="simple", optimization_params=None):
+    """Estime le temps de calcul en secondes selon la complexité du scénario et le mode d'optimisation.
+
+    Utilise la dernière durée réelle observée (session_state['last_calcul_info']) pour calibrer
+    l'estimation si elle correspond au même mode.
+    """
+    n = _compter_trains_initiaux(missions, heure_debut, heure_fin)
+    if n == 0:
         return "N/A"
 
-    # Heuristique basée sur une complexité non linéaire
-    complexity_score = total_initial_events ** 1.5
-    estimated_seconds = complexity_score / 100.0
-
-    if estimated_seconds < 2:
-        return "< 2 secondes"
-    elif estimated_seconds < 5:
-        return "~2-5 secondes"
-    elif estimated_seconds < 15:
-        return "~5-15 secondes"
-    elif estimated_seconds < 45:
-        return "~15-45 secondes"
+    # Calibrage adaptatif depuis le dernier calcul observé
+    last = st.session_state.get("last_calcul_info")
+    if last and last.get("mode") == mode and last.get("n_events", 0) > 0 and last.get("elapsed_s", 0) > 0:
+        # Mise à l'échelle par rapport au dernier run connu (complexité sous-quadratique)
+        base_s = last["elapsed_s"] * (n / last["n_events"]) ** 1.5
     else:
-        return "> 45 secondes"
+        # Heuristique par défaut : N^1.5 / 5  (calibrée sur l'expérience réelle)
+        base_s = (n ** 1.5) / 5.0
+
+    # Multiplicateur selon le mode d'optimisation
+    params = optimization_params or {}
+    if mode == "genetic":
+        import os
+        pop = params.get("population_size", 100)
+        gen = params.get("generations", 150)
+        workers = max(1, (os.cpu_count() or 4) - 1)
+        estimated_s = base_s * pop * gen / workers
+    elif mode == "smart_progressive":
+        estimated_s = base_s * 10
+    elif mode == "exhaustif":
+        estimated_s = base_s * 20
+    else:  # simple, fast
+        estimated_s = base_s
+
+    return _format_duree(estimated_s)
 
 # --- SECTION 1: Définition des gares ---
 st.header("1. Gares et Infrastructure")
@@ -1032,17 +1062,17 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
                 st.metric("Croisements", "❌ Désactivé")
 
         with col_recap3:
-            # Estimation du temps
-            if optimization_mode == "simple":
-                time_est = "< 2 secondes"
-            elif optimization_mode == "fast":
-                time_est = "< 2 secondes"
-            elif optimization_mode == "smart_progressive":
-                time_est = "10-30 secondes"
-            elif optimization_mode == "exhaustif":
-                time_est = "Variable (1-10 min)"
-            else:
-                time_est = f"{int(generations * 0.5)}-{int(generations * 1.5)} sec"
+            _opt_params_est = {}
+            if optimization_mode == "genetic":
+                _opt_params_est = {"population_size": population_size, "generations": generations}
+            time_est = estimer_temps_calcul(
+                st.session_state.missions,
+                heure_debut_service,
+                heure_fin_service,
+                mode=optimization_mode,
+                optimization_params=_opt_params_est,
+            )
+            st.metric("Temps estimé", time_est)
 
         # Sauvegarder dans session_state
         st.session_state.optimization_mode = optimization_mode
@@ -1110,7 +1140,18 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
 
     estimation = "N/A"
     if mode_generation == "Rotation optimisée" or mode_calcul == "Calcul Energie":
-        estimation = estimer_temps_calcul(st.session_state.missions, heure_debut_service, heure_fin_service)
+        _mode_est = st.session_state.get("optimization_mode", "simple")
+        _params_est = st.session_state.get("genetic_params", {}) if _mode_est == "genetic" else {}
+        estimation = estimer_temps_calcul(
+            st.session_state.missions,
+            heure_debut_service,
+            heure_fin_service,
+            mode=_mode_est,
+            optimization_params=_params_est,
+        )
+
+    if estimation != "N/A":
+        st.caption(f"⏱️ Temps de calcul estimé : **{estimation}**")
 
     # Map pour lier les trains à leurs missions (nécessaire pour le plotting physique)
     missions_par_train = {}
@@ -1234,6 +1275,13 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
 
                 elapsed_time = time.time() - start_time
 
+                # Calibration adaptative : mémorise le temps réel pour la prochaine estimation
+                st.session_state["last_calcul_info"] = {
+                    "mode": optimization_mode,
+                    "n_events": total_events_estimate,
+                    "elapsed_s": elapsed_time,
+                }
+
                 progress_bar.progress(100)  # Garanti d'être dans [0, 100] grâce à get_progress_percent
                 status_text.text(f"✅ Optimisation terminée !")
                 eta_text.text(f"⏱️ Temps total: {elapsed_time:.1f} secondes")
@@ -1319,6 +1367,7 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
 
             with st.spinner("Génération du graphique en cours..."):
                 try:
+                    _t0_standard = time.time()
                     if mode_generation == "Manuel":
                         chronologie = preparer_roulement_manuel(st.session_state.roulement_manuel)
                         warnings = {} # Pas de warnings en mode manuel pour l'instant
@@ -1336,11 +1385,21 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
                             search_strategy='smart'
                         )
 
+                    _elapsed_standard = time.time() - _t0_standard
+                    # Calibration adaptative
+                    if mode_generation != "Manuel":
+                        _n_std = _compter_trains_initiaux(st.session_state.missions, heure_debut_service, heure_fin_service)
+                        st.session_state["last_calcul_info"] = {
+                            "mode": "simple",
+                            "n_events": _n_std,
+                            "elapsed_s": _elapsed_standard,
+                        }
+
                     st.session_state.chronologie_calculee = chronologie
                     st.session_state.warnings_calcul = warnings
                     st.session_state.stats_homogeneite = stats_homogeneite
 
-                    st.success("✅ Graphique généré avec succès !")
+                    st.success(f"✅ Graphique généré avec succès ! ({_elapsed_standard:.1f}s)")
 
                 except Exception as e:
                     st.error(f"Une erreur est survenue lors de la génération du graphique : {e}")

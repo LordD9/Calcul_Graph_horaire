@@ -43,24 +43,24 @@ def get_default_energy_params():
     """
     return {
         "masse_tonne": 50,
-        "capacite_batterie_kwh": 800, # Basé sur l'analyse train actuel
-        "facteur_charge_C": 4.0, # Facteur de charge max (XC)
-        "recuperation_pct": 65, # Basé sur l'analyse
+        "capacite_batterie_kwh": 800,
+        "facteur_charge_C": 1.0,
+        "recuperation_pct": 75,
         "soc_min_pct": 20,       # SoC minimum d'exploitation (%)
         "soc_max_pct": 95,       # SoC maximum de charge (%)
-        "capacite_eol_pct": 80,  # Capacité restante en fin de vie (% du nominal)
+        "capacite_eol_pct": 70,  # Capacité restante en fin de vie (% du nominal)
         "simuler_fin_de_vie": False,  # Simuler avec capacité fin de vie
 
         # Coeff de Davis (Force en Newtons par tonne)
-        "davis_A_N_t": 16.0,  # Résistance mécanique (N/t)
-        "davis_B_N_t_kph": 0.115, # Résistance roulements (N/t/kph)
-        "davis_C_N_t_kph2": 0.0042, # Résistance aéro (N/t/kph^2)
+        "davis_A_N_t": 15.0,     # Résistance mécanique (N/t)
+        "davis_B_N_t_kph": 0.1,  # Résistance roulements (N/t/kph)
+        "davis_C_N_t_kph2": 0.0041, # Résistance aéro (N/t/kph^2)
 
         # Performance (caractéristiques du matériel)
-        "accel_ms2": 0.5,
-        "decel_ms2": 0.8,
+        "accel_ms2": 1.0,
+        "decel_ms2": 0.6,
 
-        "facteur_aux_kwh_h": 20.0,
+        "facteur_aux_kwh_h": 43.0,
 
         # Rendements (basés sur l'analyse)
         "rendement_thermique_pct": 38,
