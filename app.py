@@ -1238,7 +1238,16 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
                 """Callback pour mise à jour dynamique."""
                 tracker.update(1)
 
-                progress = tracker.get_progress_percent()
+                # Synchronise le total réel communiqué par l'optimiseur (peut être
+                # très différent de l'estimation initiale, notamment en smart_progressive).
+                if total > 0 and total != tracker.total_work:
+                    tracker.total_work = total
+                    tracker.work_done = current  # aligner work_done sur le vrai compteur
+
+                if total > 0:
+                    progress = min(100, int((current / total) * 100))
+                else:
+                    progress = tracker.get_progress_percent()
                 progress_bar.progress(progress)
 
                 # Message de statut

@@ -1023,7 +1023,12 @@ def optimize_exhaustive(missions, df_gares, heure_debut, heure_fin, config,
     ve_gares = _identifier_points_croisement(df_gares, missions)
     crossing_combos_tested = 0
     crossing_durs = _build_crossing_range(config)[1:]  # on exclut 0 ici (déjà testé par défaut)
-    if ve_gares:
+    if ve_gares and crossing_durs:
+        n_crossing = sum(
+            len(crossing_durs) * len(ve_gares.get(mid, []))
+            for mid in mission_ids
+        )
+        total_with_crossing = len(combos) + n_crossing
         for mid in mission_ids:
             for ve in ve_gares.get(mid, []):
                 for dur in crossing_durs:
@@ -1045,6 +1050,14 @@ def optimize_exhaustive(missions, df_gares, heure_debut, heure_fin, config,
                         best_chronologie = chrono
                         best_warnings = warns
                         best_params = trial
+                    if progress_callback:
+                        progress_callback(
+                            len(combos) + crossing_combos_tested,
+                            total_with_crossing,
+                            best_score,
+                            len(best_chronologie) if best_chronologie else 0,
+                            0,
+                        )
 
     return best_chronologie, best_warnings, {
         'mode': 'exhaustif',
