@@ -938,16 +938,37 @@ def executer_simulation_evenementielle(
                         prev_arret = pt_curr.get("duree_arret_min", 0)
                         duree_segment = max(0, delta_total - prev_arret)
 
+                        # Offsets depuis heure_depart_reelle (= départ du début de bloc)
+                        offset_arr_curr = (pt_curr.get("time_offset_min", 0)
+                                           - pt_depart_bloc.get("time_offset_min", 0))
+                        offset_arr_next = (pt_next.get("time_offset_min", 0)
+                                           - pt_depart_bloc.get("time_offset_min", 0))
+
+                        # Pour i=0, heure_depart_reelle est déjà le départ du bloc (stop inclus).
+                        # Pour i>0, l'arrêt commercial de pt_curr n'est pas encore décompté.
+                        arret_inter = prev_arret if i > 0 else 0
+                        offset_dep_curr = offset_arr_curr + arret_inter
+
+                        h_arr_curr = heure_depart_reelle + timedelta(minutes=offset_arr_curr)
+                        h_dep_curr = heure_depart_reelle + timedelta(minutes=offset_dep_curr)
+                        h_arr_next = heure_depart_reelle + timedelta(minutes=offset_arr_next)
+
+                        # Entrée d'arrêt pour les arrêts commerciaux intermédiaires (non-VE)
+                        if i > 0 and arret_inter > 0:
+                            arret_inter_entry = {
+                                "start": h_arr_curr,
+                                "end": h_dep_curr,
+                                "origine": pt_curr["gare"],
+                                "terminus": pt_curr["gare"],
+                                "mission": mission_label,
+                                "is_mission_start": False,
+                            }
+                            chronologie_reelle.setdefault(id_train, []).append(arret_inter_entry)
+
                         if duree_segment > 0 or (pt_curr["gare"] != pt_next["gare"]):
-                            offset_dep = pt_curr.get("time_offset_min", 0) - pt_depart_bloc.get("time_offset_min", 0)
-                            offset_arr = pt_next.get("time_offset_min", 0) - pt_depart_bloc.get("time_offset_min", 0)
-
-                            h_dep_segment = heure_depart_reelle + timedelta(minutes=offset_dep)
-                            h_arr_segment = heure_depart_reelle + timedelta(minutes=offset_arr)
-
                             seg_entry = {
-                                "start": h_dep_segment,
-                                "end": h_arr_segment,
+                                "start": h_dep_curr,
+                                "end": h_arr_next,
                                 "origine": pt_curr["gare"],
                                 "terminus": pt_next["gare"],
                                 "mission": mission_label,
