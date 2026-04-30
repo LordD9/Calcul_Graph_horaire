@@ -70,6 +70,115 @@ def _is_crossing_point(infra_code):
     """
     return infra_code in ['VE', 'D', 'Terminus']
 
+def enumerer_rencontres(mission, df_gares, heure_debut, heure_fin,
+                        reference_minute_str, frequence_par_heure,
+                        turnaround_buffer=0):
+    """
+    Retourne la liste déterministe des rencontres aller×retour idéalisées.
+    Chaque entrée: {'aller_idx', 'retour_idx', 'natural_ve', 'candidate_ve'}
+    """
+    from datetime import datetime, timedelta, time as dt_time
+
+    if frequence_par_heure <= 0:
+        return []
+
+    horaire_aller = construire_horaire_mission(mission, 'aller', df_gares)
+    horaire_retour = construire_horaire_mission(mission, 'retour', df_gares)
+    if not horaire_aller or len(horaire_aller) < 2 or not horaire_retour:
+        return []
+
+    duree_aller = horaire_aller[-1].get('time_offset_min', 0)
+    duree_retour = horaire_retour[-1].get('time_offset_min', 0)
+    if duree_aller <= 0:
+        return []
+
+    t_ret_min = mission.get('temps_retournement_B', 10) + turnaround_buffer
+    intervalle_min = 60.0 / frequence_par_heure
+
+    # Convertir heure_debut/fin en minutes depuis minuit
+    def to_min(t):
+        if isinstance(t, dt_time):
+            return t.hour * 60 + t.minute
+        return 0
+    debut_min = to_min(heure_debut)
+    fin_min = to_min(heure_fin)
+    if fin_min <= debut_min:
+        fin_min += 24 * 60
+
+    # Parser les minutes de référence
+    try:
+        minutes_ref = sorted(set(
+            int(m.strip()) for m in reference_minute_str.split(',')
+            if m.strip().isdigit()
+        ))
+        if not minutes_ref:
+            minutes_ref = [0]
+    except Exception:
+        minutes_ref = [0]
+
+    # Identifier les gares VE dans le horaire aller (intermédiaires)
+    ve_gares = []
+    for pt in horaire_aller[1:-1]:
+        if _is_crossing_point(_get_infra_at_gare(df_gares, pt['gare'])):
+            ve_gares.append({'gare': pt['gare'], 'time_offset_min': pt['time_offset_min']})
+
+    if not ve_gares:
+        return []
+
+    # Générer les départs aller en minutes depuis début de service
+    allers = []
+    for mref in minutes_ref:
+        t = mref - debut_min
+        while t < 0:
+            t += intervalle_min
+        while t < (fin_min - debut_min):
+            allers.append(t)
+            t += intervalle_min
+    allers.sort()
+
+    # Générer les départs retour
+    retours = []
+    for t_a in allers:
+        t_r = t_a + duree_aller + t_ret_min
+        if t_r < (fin_min - debut_min):
+            retours.append(t_r)
+    retours.sort()
+
+    # Calculer les rencontres paires (aller_k, retour_j)
+    rencontres = []
+    for aller_idx, t_a in enumerate(allers):
+        t_a_arrive = t_a + duree_aller
+        for retour_idx, t_r in enumerate(retours):
+            t_r_arrive = t_r + duree_retour
+            # Chevauchement temporel requis
+            if t_a >= t_r_arrive or t_r >= t_a_arrive:
+                continue
+            # Point de rencontre idéalisé (trajectoires linéaires)
+            # aller_offset(t) = t - t_a  ;  retour_offset(t) = t - t_r
+            # Rencontre: aller_offset + retour_offset = duree_aller  ≈
+            # (t - t_a) + (t - t_r) = duree_aller  →  t = (t_a + t_r + duree_aller) / 2
+            t_meet = (t_a + t_r + duree_aller) / 2.0
+            offset_from_origin = t_meet - t_a
+            if offset_from_origin <= 0 or offset_from_origin >= duree_aller:
+                continue
+            # VE la plus proche du point de rencontre
+            best_ve = min(ve_gares, key=lambda v: abs(v['time_offset_min'] - offset_from_origin))
+            best_idx = ve_gares.index(best_ve)
+            candidates = [ve_gares[best_idx]['gare']]
+            if best_idx > 0:
+                candidates.append(ve_gares[best_idx - 1]['gare'])
+            if best_idx < len(ve_gares) - 1:
+                candidates.append(ve_gares[best_idx + 1]['gare'])
+            rencontres.append({
+                'aller_idx': aller_idx,
+                'retour_idx': retour_idx,
+                'natural_ve': best_ve['gare'],
+                'candidate_ve': candidates,
+            })
+
+    return rencontres
+
+
 def calculer_indice_homogeneite(horaires):
     """
     Calcule l'homogénéité du cadencement via un coefficient de Gini inversé.
@@ -550,6 +659,7 @@ def executer_simulation_evenementielle(
     turnaround_buffers=None,
     crossing_strategies=None,
     adjusted_reference_minutes=None,
+    crossing_pair_assignments=None,
 ):
     """
     Moteur événementiel unifié pour la simulation ferroviaire.
@@ -703,6 +813,7 @@ def executer_simulation_evenementielle(
             trajet_spec = details["trajet_spec"]
             index_etape = details["index_etape"]
             is_trajet_fictif = details.get("is_trajet_fictif", False)
+            use_preferred_ve = details.get("use_preferred_ve", True)
 
             cs = crossing_strategies.get(mission_id) if crossing_strategies else None
 
@@ -739,6 +850,47 @@ def executer_simulation_evenementielle(
 
             gare_dep_bloc = pt_depart_bloc.get("gare")
             gare_arr_bloc = pt_arrivee_bloc.get("gare")
+
+            # ── Partie A : extension vers la VE préférée ─────────────────────
+            # Seulement sur le premier essai (use_preferred_ve=True) pour les
+            # trajets aller, quand crossing_pair_assignments est fourni.
+            if (use_preferred_ve and crossing_pair_assignments
+                    and trajet_spec == "aller"):
+                preferred_ves = crossing_pair_assignments.get(mission_id, [])
+                if preferred_ves and gare_arr_bloc not in preferred_ves:
+                    # Chercher la VE préférée la plus proche au-delà du bloc actuel,
+                    # en s'arrêtant dès qu'on rencontre une VE intermédiaire non préférée.
+                    look_idx = next_crossing_idx + 1
+                    extended = list(bloc_gares)
+                    found_preferred = False
+                    while look_idx < len(horaire):
+                        g = horaire[look_idx]
+                        g_name = g["gare"]
+                        g_infra = _get_infra_at_gare(df_gares, g_name)
+                        extended.append(g)
+                        if _is_crossing_point(g_infra):
+                            if g_name in preferred_ves:
+                                found_preferred = True
+                                look_idx += 1
+                            # VE atteinte (préférée ou non) : arrêt de l'extension
+                            break
+                        look_idx += 1
+                    if found_preferred:
+                        new_arrivee = extended[-1]
+                        new_duree = max(0,
+                            new_arrivee.get("time_offset_min", 0) -
+                            pt_depart_bloc.get("time_offset_min", 0)
+                        )
+                        bloc_gares = extended
+                        next_crossing_idx = look_idx - 1
+                        pt_arrivee_bloc = new_arrivee
+                        gare_arr_bloc = new_arrivee["gare"]
+                        duree_bloc_min = new_duree
+                        duree_arret_commercial = new_arrivee.get("duree_arret_min", 0)
+                        duree_arret_final = duree_arret_commercial
+                        if cs and gare_arr_bloc in cs.stop_durations:
+                            duree_arret_final = max(duree_arret_final,
+                                                    cs.stop_durations[gare_arr_bloc])
 
             dispo_train = trains.get(id_train, {}).get("dispo_a", heure)
             heure_depart_reelle = max(heure, dispo_train)
@@ -841,6 +993,7 @@ def executer_simulation_evenementielle(
                             "id_train": id_train, "mission": mission_cfg, "mission_id": mission_id,
                             "trajet_spec": trajet_spec, "index_etape": next_crossing_idx,
                             "retry_count": 0, "is_trajet_fictif": is_trajet_fictif,
+                            "use_preferred_ve": True,
                         }
                     ))
                 else:
@@ -854,33 +1007,44 @@ def executer_simulation_evenementielle(
                         }
                     ))
             else:
-                retry_count = details.get("retry_count", 0)
-                if retry_count < 500:
+                if use_preferred_ve:
+                    # Le bloc étendu vers la VE préférée a échoué : retenter
+                    # immédiatement avec le bloc naturel (prochain VE).
                     new_details = details.copy()
-                    new_details["retry_count"] = retry_count + 1
+                    new_details["use_preferred_ve"] = False
+                    new_details["retry_count"] = 0
                     event_counter += 1
                     heapq.heappush(evenements, (
-                        fin_conflit, event_counter, "tentative_mouvement", new_details
+                        heure_depart_reelle, event_counter, "tentative_mouvement", new_details
                     ))
                 else:
-                    gares_sans_ve = []
-                    for gare_info in bloc_gares[1:-1]:
-                        gare_inter = gare_info["gare"]
-                        infra_inter = _get_infra_at_gare(df_gares, gare_inter)
-                        if not _is_crossing_point(infra_inter):
-                            gares_sans_ve.append(f"{gare_inter} ({infra_inter})")
+                    retry_count = details.get("retry_count", 0)
+                    if retry_count < 500:
+                        new_details = details.copy()
+                        new_details["retry_count"] = retry_count + 1
+                        event_counter += 1
+                        heapq.heappush(evenements, (
+                            fin_conflit, event_counter, "tentative_mouvement", new_details
+                        ))
+                    else:
+                        gares_sans_ve = []
+                        for gare_info in bloc_gares[1:-1]:
+                            gare_inter = gare_info["gare"]
+                            infra_inter = _get_infra_at_gare(df_gares, gare_inter)
+                            if not _is_crossing_point(infra_inter):
+                                gares_sans_ve.append(f"{gare_inter} ({infra_inter})")
 
-                    reason_detail = f"Impossible de trouver un créneau libre après 500 tentatives pour le bloc {gare_dep_bloc} → {gare_arr_bloc}"
-                    if gares_sans_ve:
-                        reason_detail += f". Gares sans voie d'évitement dans le bloc : {', '.join(gares_sans_ve)}"
+                        reason_detail = f"Impossible de trouver un créneau libre après 500 tentatives pour le bloc {gare_dep_bloc} → {gare_arr_bloc}"
+                        if gares_sans_ve:
+                            reason_detail += f". Gares sans voie d'évitement dans le bloc : {', '.join(gares_sans_ve)}"
 
-                    infra_violation_warnings.append({
-                        "time": heure_depart_reelle,
-                        "gare": f"{gare_dep_bloc} → {gare_arr_bloc}",
-                        "mission": mission_id,
-                        "reason": reason_detail,
-                        "is_infra_violation": True,
-                    })
+                        infra_violation_warnings.append({
+                            "time": heure_depart_reelle,
+                            "gare": f"{gare_dep_bloc} → {gare_arr_bloc}",
+                            "mission": mission_id,
+                            "reason": reason_detail,
+                            "is_infra_violation": True,
+                        })
 
         elif type_event == "fin_mission":
             id_train = details["id_train"]
@@ -943,17 +1107,21 @@ def _score_chronologie_bruit(chronologie, warnings, max_arret_ligne_min=5):
     avg_gini = avg_gini / count if count > 0 else 1.0
 
     penalty_arrets_ligne = 0.0
+    violated_count = 0
     if chronologie:
         for steps in chronologie.values():
             for step in steps:
+                if step.get('crossing_assignment_violated'):
+                    violated_count += 1
                 ext = step.get('crossing_extension_min', 0)
                 if ext <= 0:
                     continue
                 if ext <= max_arret_ligne_min:
-                    penalty_arrets_ligne += ext * 15
+                    penalty_arrets_ligne += ext * 50.0
                 else:
-                    excess = ext - max_arret_ligne_min
-                    penalty_arrets_ligne += max_arret_ligne_min * 15 + (excess ** 2) * 100
+                    over = ext - max_arret_ligne_min
+                    penalty_arrets_ligne += max_arret_ligne_min * 50.0 + (over ** 2) * 800.0
+    penalty_arrets_ligne += violated_count * 1500
 
     return nb_rames * 2000 + nb_violations * 50000 + nb_fails * 3000 - avg_gini * 3000 + penalty_arrets_ligne
 

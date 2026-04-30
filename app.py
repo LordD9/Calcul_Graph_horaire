@@ -1012,10 +1012,17 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
         with col2:
             st.subheader("Optimisation des croisements")
 
+            is_genetic = optimization_mode == "genetic"
             enable_crossing_opt = st.checkbox(
                 "Activer l'optimisation des croisements",
-                value=False,
-                help="Prolonge stratégiquement les arrêts pour améliorer les croisements"
+                value=True if is_genetic else False,
+                disabled=is_genetic,
+                help=(
+                    "Verrouillé en mode génétique : l'algorithme optimise désormais "
+                    "les croisements par paire de trains."
+                    if is_genetic else
+                    "Prolonge stratégiquement les arrêts pour améliorer les croisements"
+                ),
             )
 
             if enable_crossing_opt:

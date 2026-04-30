@@ -72,6 +72,7 @@ class SimulationParams:
     cadencements: Dict[str, int]
     turnaround_buffers: Dict[str, int]
     crossing_stop_durations: Dict[str, Dict[str, int]]
+    crossing_pair_assignments: Dict[str, List[str]] = None  # mission_id → preferred VE list
 
     def get_turnaround_buffers(self, missions):
         result = {}
@@ -186,6 +187,34 @@ class SolutionCache:
         self.access_count[key] = 0
 
 _solution_cache = SolutionCache()
+
+
+class GenomeCache:
+    """Cache process-master persistant sur toutes les générations d'un run."""
+    def __init__(self, max_size=5000):
+        self.cache = {}
+        self.access = {}
+        self.max_size = max_size
+
+    def key(self, genome) -> str:
+        canonical = json.dumps(genome, sort_keys=True, default=str)
+        return hashlib.md5(canonical.encode()).hexdigest()
+
+    def get(self, genome):
+        k = self.key(genome)
+        v = self.cache.get(k)
+        if v is not None:
+            self.access[k] = self.access.get(k, 0) + 1
+        return v
+
+    def put(self, genome, score, warnings, chronologie):
+        if len(self.cache) >= self.max_size:
+            evict = min(self.access, key=self.access.get)
+            self.cache.pop(evict, None)
+            self.access.pop(evict, None)
+        k = self.key(genome)
+        self.cache[k] = (score, warnings, chronologie)
+        self.access[k] = 0
 
 
 # =============================================================================
@@ -330,13 +359,14 @@ def _evaluate_genome_worker(args):
 
         cadencements = genome.get('timing', {})
         turnaround_buffers = genome.get('turnaround_buffers', {})
-        # genome['crossing'] est déjà au format {mission_id: {gare_ve: durée}}
         crossing_stop_durations = genome.get('crossing', {})
+        crossing_pair_assignments = genome.get('crossing_pairs', {})
 
         params = SimulationParams(
             cadencements=cadencements,
             turnaround_buffers=turnaround_buffers,
             crossing_stop_durations=crossing_stop_durations,
+            crossing_pair_assignments=crossing_pair_assignments,
         )
 
         score, chronologie, warnings, stats = evaluer_params_simulation(
@@ -389,6 +419,7 @@ class GeneticOptimizer:
         self.crossing_points = self._identify_crossing_points()
         self.best_score_history = []
         self.current_mutation_rate = config.mutation_rate
+        self.genome_cache = GenomeCache()
     
     def _identify_crossing_points(self) -> Dict[str, List[str]]:
         """Identifie les gares permettant le croisement pour chaque mission."""
@@ -539,13 +570,13 @@ class GeneticOptimizer:
 
         # Génome 0 = baseline utilisateur : timing/turnaround/crossing vides
         # → core_logic utilisera les reference_minutes originales de chaque mission.
-        baseline_genome = {'timing': {}, 'turnaround_buffers': {}, 'crossing': {}}
+        baseline_genome = {'timing': {}, 'turnaround_buffers': {}, 'crossing': {}, 'crossing_pairs': {}}
         for mission_id in self.search_space.keys():
             baseline_genome['turnaround_buffers'][mission_id] = 0
         population.append(baseline_genome)
 
         for i in range(1, self.config.population_size):
-            genome = {'timing': {}, 'turnaround_buffers': {}, 'crossing': {}}
+            genome = {'timing': {}, 'turnaround_buffers': {}, 'crossing': {}, 'crossing_pairs': {}}
 
             for mission_id, info in self.search_space.items():
                 if i < self.config.population_size // 4:
@@ -576,8 +607,70 @@ class GeneticOptimizer:
                             stop_durations = {ve: 0 for ve in ve_list}
                         genome['crossing'][mid] = stop_durations
 
+            if crossing_enabled:
+                self._seed_crossing_pairs(genome)
+
             population.append(genome)
         return population
+
+    def _seed_crossing_pairs(self, genome):
+        """Peuple crossing_pairs à partir des rencontres aller×retour idéalisées."""
+        from core_logic import enumerer_rencontres
+
+        crossing_pairs = {}
+        for j, mission in enumerate(self.missions):
+            if mission.get('frequence', 0) <= 0:
+                continue
+            mid = f"M{j+1}"
+            timing_offset = genome.get('timing', {}).get(mid, 0)
+            turnaround_buf = genome.get('turnaround_buffers', {}).get(mid, 0)
+
+            ref_str = mission.get("reference_minutes", "0")
+            try:
+                original_minutes = [int(m.strip()) for m in ref_str.split(',') if m.strip().isdigit()]
+                adjusted_ref_str = ",".join(str((m + timing_offset) % 60) for m in original_minutes)
+            except Exception:
+                adjusted_ref_str = ref_str
+
+            try:
+                rencontres = enumerer_rencontres(
+                    mission, self.df_gares,
+                    self.heure_debut, self.heure_fin,
+                    adjusted_ref_str, mission['frequence'],
+                    turnaround_buffer=turnaround_buf,
+                )
+            except Exception:
+                rencontres = []
+
+            if not rencontres:
+                continue
+
+            # Aggréger les VE naturelles et candidates
+            ve_counts = {}
+            candidate_ves = set()
+            for r in rencontres:
+                ve = r['natural_ve']
+                ve_counts[ve] = ve_counts.get(ve, 0) + 1
+                for c in r['candidate_ve']:
+                    candidate_ves.add(c)
+
+            if not ve_counts:
+                continue
+
+            sorted_ves = sorted(ve_counts.keys(), key=lambda v: ve_counts[v], reverse=True)
+            preferred = []
+            if sorted_ves:
+                # 70 % vers VE la plus naturelle, 30 % vers une candidate alternative
+                if random.random() < 0.7:
+                    preferred.append(sorted_ves[0])
+                elif candidate_ves:
+                    preferred.append(random.choice(list(candidate_ves)))
+            if len(sorted_ves) > 1 and random.random() < 0.3:
+                preferred.append(sorted_ves[1])
+
+            crossing_pairs[mid] = list(set(preferred))
+
+        genome['crossing_pairs'] = crossing_pairs
     
     def _evaluate_population_parallel(self, population: List[Dict]) -> List[Tuple]:
         """Évaluation parallèle optimisée."""
@@ -594,31 +687,45 @@ class GeneticOptimizer:
             'timeout_per_eval': self.config.timeout_per_eval
         }
         
+        # Séparer les génomes déjà dans le cache des autres
+        cached_results = []
+        to_evaluate = []
+        for genome in population:
+            hit = self.genome_cache.get(genome)
+            if hit is not None:
+                score, warnings, chronologie = hit
+                cached_results.append((genome, chronologie, warnings, score))
+            else:
+                to_evaluate.append(genome)
+
         args_list = [
-            (genome, self.missions, self.df_gares, self.heure_debut, 
-             self.heure_fin, self.allow_sharing, config_dict) 
-            for genome in population
+            (genome, self.missions, self.df_gares, self.heure_debut,
+             self.heure_fin, self.allow_sharing, config_dict)
+            for genome in to_evaluate
         ]
-        
-        results = []
-        with ProcessPoolExecutor(max_workers=self.config.num_workers) as executor:
-            futures = {executor.submit(_evaluate_genome_worker, args): args for args in args_list}
-            
-            for future in as_completed(futures):
-                try:
-                    result = future.result(timeout=self.config.timeout_per_eval)
-                    results.append(result)
-                except TimeoutError:
-                    # Timeout: score infini
-                    results.append((futures[future][0], {}, 
-                                  {"infra_violations": [], "other": ["Timeout"]}, 
-                                  float('inf')))
-                except Exception as e:
-                    results.append((futures[future][0], {}, 
-                                  {"infra_violations": [], "other": [str(e)]}, 
-                                  float('inf')))
-        
-        return results
+
+        new_results = []
+        if args_list:
+            with ProcessPoolExecutor(max_workers=self.config.num_workers) as executor:
+                futures = {executor.submit(_evaluate_genome_worker, args): args for args in args_list}
+
+                for future in as_completed(futures):
+                    try:
+                        result = future.result(timeout=self.config.timeout_per_eval)
+                        new_results.append(result)
+                        genome_res, chron, warn, score = result
+                        if score < float('inf'):
+                            self.genome_cache.put(genome_res, score, warn, chron)
+                    except TimeoutError:
+                        new_results.append((futures[future][0], {},
+                                           {"infra_violations": [], "other": ["Timeout"]},
+                                           float('inf')))
+                    except Exception as e:
+                        new_results.append((futures[future][0], {},
+                                           {"infra_violations": [], "other": [str(e)]},
+                                           float('inf')))
+
+        return cached_results + new_results
     
     def _create_next_generation(self, valid_solutions: List[Tuple]) -> List[Dict]:
         """Crée la nouvelle génération avec opérateurs génétiques optimisés."""
@@ -653,8 +760,8 @@ class GeneticOptimizer:
         return deepcopy(winner[0])
     
     def _crossover(self, p1: Dict, p2: Dict) -> Dict:
-        """Croisement à deux points — inclut turnaround_buffers."""
-        child = {'timing': {}, 'turnaround_buffers': {}, 'crossing': {}}
+        """Croisement à deux points — inclut turnaround_buffers et crossing_pairs."""
+        child = {'timing': {}, 'turnaround_buffers': {}, 'crossing': {}, 'crossing_pairs': {}}
 
         # Timing
         mission_ids = list(p1['timing'].keys())
@@ -682,6 +789,13 @@ class GeneticOptimizer:
                 child['crossing'][key] = p1['crossing'][key]
             elif key in p2.get('crossing', {}):
                 child['crossing'][key] = p2['crossing'][key]
+
+        # Crossing pairs — héritage clé par clé
+        all_cp_keys = set(p1.get('crossing_pairs', {}).keys()) | set(p2.get('crossing_pairs', {}).keys())
+        for key in all_cp_keys:
+            v1 = p1.get('crossing_pairs', {}).get(key, [])
+            v2 = p2.get('crossing_pairs', {}).get(key, [])
+            child['crossing_pairs'][key] = random.choice([v1, v2])
 
         return child
     
@@ -723,7 +837,6 @@ class GeneticOptimizer:
                     mutated['turnaround_buffers'][mid] = random.choice(buf_choices)
 
         # Mutation crossing (30% de chance)
-        # genome['crossing'] = {mission_id: {gare_ve: durée}}
         ve_list = self._identify_ve_gares()
         if random.random() < 0.3 and ve_list:
             for mid in list(mutated.get('crossing', {}).keys()):
@@ -732,6 +845,23 @@ class GeneticOptimizer:
                     for gare in list(sd.keys()):
                         if random.random() < 0.5:
                             sd[gare] = random.choice(cross_choices)
+
+        # Mutation crossing_pairs (25 % de probabilité par mission)
+        if 'crossing_pairs' not in mutated:
+            mutated['crossing_pairs'] = {}
+        if ve_list:
+            for mid in list(mutated.get('timing', {}).keys()):
+                if random.random() < 0.25:
+                    current = list(mutated['crossing_pairs'].get(mid, []))
+                    if current and random.random() < 0.4:
+                        # Retirer une VE aléatoirement
+                        current = [v for v in current if random.random() > 0.5] or current
+                    else:
+                        # Ajouter une VE candidate
+                        new_ve = random.choice(ve_list)
+                        if new_ve not in current:
+                            current = current + [new_ve]
+                    mutated['crossing_pairs'][mid] = current[:3]  # cap à 3 VE préférées
 
         return mutated
 
@@ -756,6 +886,7 @@ def evaluer_params_simulation(params, missions, df_gares, heure_debut, heure_fin
 
     turn_bufs = params.get_turnaround_buffers(missions)
     cross_strats = params.get_crossing_strategies(missions, df_gares)
+    pair_assignments = params.crossing_pair_assignments or {}
 
     chronologie, warnings, stats = executer_simulation_evenementielle(
         modified_missions, df_gares, heure_debut, heure_fin,
@@ -763,6 +894,7 @@ def evaluer_params_simulation(params, missions, df_gares, heure_debut, heure_fin
         turnaround_buffers=turn_bufs,
         crossing_strategies=cross_strats,
         adjusted_reference_minutes=adjusted_ref,
+        crossing_pair_assignments=pair_assignments,
     )
 
     max_arret = (config.crossing_optimization.max_delay_minutes
