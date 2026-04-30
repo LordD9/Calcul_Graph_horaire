@@ -7,7 +7,8 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\('app.py'\\).read\\(\\)\\); print\\('app.py OK'\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\('core_logic.py', encoding='utf-8'\\).read\\(\\)\\); print\\('core_logic OK'\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\('optimisation_logic.py', encoding='utf-8'\\).read\\(\\)\\); print\\('optimisation_logic OK'\\)\")",
-      "Bash(python -c \"import ast; ast.parse\\(open\\('app.py', encoding='utf-8'\\).read\\(\\)\\); print\\('app.py OK'\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\('app.py', encoding='utf-8'\\).read\\(\\)\\); print\\('app.py OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('optimisation_logic.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")"
     ]
   }
 }

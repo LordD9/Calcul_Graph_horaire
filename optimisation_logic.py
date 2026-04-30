@@ -763,16 +763,24 @@ class GeneticOptimizer:
         """Croisement à deux points — inclut turnaround_buffers et crossing_pairs."""
         child = {'timing': {}, 'turnaround_buffers': {}, 'crossing': {}, 'crossing_pairs': {}}
 
-        # Timing
-        mission_ids = list(p1['timing'].keys())
+        # Timing — union des clés des deux parents pour éviter KeyError sur le génome baseline
+        all_timing_keys = set(p1.get('timing', {}).keys()) | set(p2.get('timing', {}).keys())
+        mission_ids = sorted(all_timing_keys)
+        space_default = self.search_space  # {mid: {'default': x}}
         if len(mission_ids) > 2:
             point1 = random.randint(0, len(mission_ids) - 1)
             point2 = random.randint(point1, len(mission_ids) - 1)
             for i, mid in enumerate(mission_ids):
-                child['timing'][mid] = p2['timing'][mid] if point1 <= i <= point2 else p1['timing'][mid]
+                fallback = space_default.get(mid, {}).get('default', 0)
+                v1 = p1.get('timing', {}).get(mid, fallback)
+                v2 = p2.get('timing', {}).get(mid, fallback)
+                child['timing'][mid] = v2 if point1 <= i <= point2 else v1
         else:
             for mid in mission_ids:
-                child['timing'][mid] = random.choice([p1['timing'][mid], p2['timing'][mid]])
+                fallback = space_default.get(mid, {}).get('default', 0)
+                v1 = p1.get('timing', {}).get(mid, fallback)
+                v2 = p2.get('timing', {}).get(mid, fallback)
+                child['timing'][mid] = random.choice([v1, v2])
 
         # Turnaround buffers
         for mid in mission_ids:
