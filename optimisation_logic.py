@@ -227,13 +227,15 @@ class SolutionScorer:
         
         # Score composite avec pondérations optimisées
         # AUGMENTATION du poids de régularité de 1000 à 5000 pour favoriser les graphiques réguliers
-        score = (num_rames * 2000 +                    # Minimiser le nombre de rames
-                other_warnings * 3000 +                 # Autres avertissements
-                cancelled_trips * 15000 +               # Pénalité élevée pour trajets annulés
-                total_delay * self.config.crossing_optimization.penalty_per_minute if self.config.crossing_optimization.enabled else 0 +  # Pénalité pour retards
-                regularity_penalty * 5000 +             # Régularité (AUGMENTÉ de 1000 à 5000)
-                infra_violations * 50000 -              # Violations critiques
-                crossing_quality * 500                  # Bonus pour bons croisements
+        delay_term = (total_delay * self.config.crossing_optimization.penalty_per_minute
+                      if self.config.crossing_optimization.enabled else 0)
+        score = (num_rames * 2000                      # Minimiser le nombre de rames
+                + other_warnings * 3000                 # Autres avertissements
+                + cancelled_trips * 15000               # Pénalité élevée pour trajets annulés
+                + delay_term                            # Pénalité pour retards
+                + regularity_penalty * 5000             # Régularité (AUGMENTÉ de 1000 à 5000)
+                + infra_violations * 50000              # Violations critiques
+                - crossing_quality * 500                # Bonus pour bons croisements
                 )
         
         return score
@@ -338,7 +340,7 @@ def _evaluate_genome_worker(args):
         )
 
         score, chronologie, warnings, stats = evaluer_params_simulation(
-            params, missions, df_gares, heure_debut, heure_fin, allow_sharing
+            params, missions, df_gares, heure_debut, heure_fin, allow_sharing, config=config
         )
 
         result = (genome, chronologie, warnings, score)
@@ -738,7 +740,7 @@ class GeneticOptimizer:
 # MODE EXHAUSTIF (INCHANGÉ)
 # =============================================================================
 
-def evaluer_params_simulation(params, missions, df_gares, heure_debut, heure_fin, allow_sharing=True):
+def evaluer_params_simulation(params, missions, df_gares, heure_debut, heure_fin, allow_sharing=True, config=None):
     from core_logic import executer_simulation_evenementielle, _calculer_stats_homogeneite, _score_chronologie_bruit
     from datetime import time as dt_time
 
@@ -763,8 +765,11 @@ def evaluer_params_simulation(params, missions, df_gares, heure_debut, heure_fin
         adjusted_reference_minutes=adjusted_ref,
     )
 
-    score = _score_chronologie_bruit(chronologie, warnings)
-    extra_delay = sum(params.turnaround_buffers.values()) * 5
+    max_arret = (config.crossing_optimization.max_delay_minutes
+                 if config and config.crossing_optimization and config.crossing_optimization.enabled
+                 else 5)
+    score = _score_chronologie_bruit(chronologie, warnings, max_arret_ligne_min=max_arret)
+    extra_delay = sum(params.turnaround_buffers.values()) * 2
     score += extra_delay
 
     return score, chronologie, warnings, stats
@@ -821,7 +826,7 @@ def _optimisation_smart_progressive(missions, df_gares, heure_debut, heure_fin,
     # --- BASELINE = mode simple : évaluée en premier, sert de référence à battre ---
     best_params = _baseline_simulation_params()
     best_score, best_chronologie, best_warnings, _ = evaluer_params_simulation(
-        best_params, missions, df_gares, heure_debut, heure_fin, allow_sharing=allow_sharing
+        best_params, missions, df_gares, heure_debut, heure_fin, allow_sharing=allow_sharing, config=config
     )
 
     # Seuil minimal de gain pour remplacer la baseline : évite la dérive sur des
@@ -901,7 +906,7 @@ def _optimisation_smart_progressive(missions, df_gares, heure_debut, heure_fin,
 
                 score, chrono, warns, _ = evaluer_params_simulation(
                     trial_params, missions, df_gares, heure_debut, heure_fin,
-                    allow_sharing=allow_sharing,
+                    allow_sharing=allow_sharing, config=config,
                 )
                 trial_has_violations = len(warns.get("infra_violations", [])) > 0
 
@@ -961,7 +966,7 @@ def optimize_exhaustive(missions, df_gares, heure_debut, heure_fin, config,
     active_missions = [(i, m) for i, m in enumerate(missions) if m.get('frequence', 0) > 0]
     if not active_missions:
         params = _baseline_simulation_params()
-        score, chrono, warns, stats = evaluer_params_simulation(params, missions, df_gares, heure_debut, heure_fin, allow_sharing)
+        score, chrono, warns, stats = evaluer_params_simulation(params, missions, df_gares, heure_debut, heure_fin, allow_sharing, config=config)
         return chrono, warns, {'mode': 'exhaustif', 'combinations_tested': 1}
 
     mission_ids = [f"M{i+1}" for i, _ in active_missions]
@@ -969,7 +974,7 @@ def optimize_exhaustive(missions, df_gares, heure_debut, heure_fin, config,
     # Baseline : évaluée en premier pour fournir un point de départ valide
     best_params = _baseline_simulation_params()
     best_score, best_chronologie, best_warnings, _ = evaluer_params_simulation(
-        best_params, missions, df_gares, heure_debut, heure_fin, allow_sharing
+        best_params, missions, df_gares, heure_debut, heure_fin, allow_sharing, config=config
     )
 
     cadence_range = list(range(0, 60, 5))
@@ -1004,7 +1009,7 @@ def optimize_exhaustive(missions, df_gares, heure_debut, heure_fin, config,
         )
 
         score, chrono, warns, stats = evaluer_params_simulation(
-            params, missions, df_gares, heure_debut, heure_fin, allow_sharing
+            params, missions, df_gares, heure_debut, heure_fin, allow_sharing, config=config
         )
 
         if score < best_score:
@@ -1042,7 +1047,7 @@ def optimize_exhaustive(missions, df_gares, heure_debut, heure_fin, config,
                         crossing_stop_durations=trial_crossing,
                     )
                     score, chrono, warns, stats = evaluer_params_simulation(
-                        trial, missions, df_gares, heure_debut, heure_fin, allow_sharing
+                        trial, missions, df_gares, heure_debut, heure_fin, allow_sharing, config=config
                     )
                     crossing_combos_tested += 1
                     if score < best_score:
@@ -1089,7 +1094,7 @@ def optimiser_graphique_horaire(missions, df_gares, heure_debut, heure_fin,
             refs = [int(x.strip()) for x in str(m.get('reference_minutes', '0')).split(',') if x.strip().isdigit()]
             params.cadencements[mid] = refs[0] if refs else 0
         score, chrono, warns, stats = evaluer_params_simulation(
-            params, missions, df_gares, heure_debut, heure_fin, allow_sharing
+            params, missions, df_gares, heure_debut, heure_fin, allow_sharing, config=config
         )
         return chrono, warns, {'mode': 'simple', 'description': 'Simulation directe avec paramètres utilisateur', 'best_score': score}
     else:

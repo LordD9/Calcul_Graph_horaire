@@ -510,7 +510,12 @@ def evaluer_configuration(engine, requests, allow_cross_mission_sharing=True, cr
     bonus_homogeneity = avg_homogeneity * 3000
 
     score = penalty_trains + penalty_failures + penalty_delay - bonus_homogeneity
-    score += total_crossing_extensions * 15
+    _max_arret_legacy = 5
+    if total_crossing_extensions <= _max_arret_legacy:
+        score += total_crossing_extensions * 15
+    else:
+        excess = total_crossing_extensions - _max_arret_legacy
+        score += _max_arret_legacy * 15 + (excess ** 2) * 100
 
     return score, dict(trajets_resultat), failures, homogeneite_par_mission, total_delay_min, engine.train_counter
 
@@ -726,7 +731,8 @@ def executer_simulation_evenementielle(
                 pt_depart_bloc.get("time_offset_min", 0)
             )
 
-            duree_arret_final = pt_arrivee_bloc.get("duree_arret_min", 0)
+            duree_arret_commercial = pt_arrivee_bloc.get("duree_arret_min", 0)
+            duree_arret_final = duree_arret_commercial
 
             if cs and pt_arrivee_bloc["gare"] in cs.stop_durations:
                 duree_arret_final = max(duree_arret_final, cs.stop_durations[pt_arrivee_bloc["gare"]])
@@ -802,6 +808,7 @@ def executer_simulation_evenementielle(
                         arr_gare = gare_arr_bloc
                         arr_time = heure_arrivee_finale
                         dep_time = heure_arrivee_finale + timedelta(minutes=duree_arret_final)
+                        crossing_ext = max(0, duree_arret_final - duree_arret_commercial)
                         arret_entry = {
                             "start": arr_time,
                             "end": dep_time,
@@ -809,6 +816,7 @@ def executer_simulation_evenementielle(
                             "terminus": arr_gare,
                             "mission": mission_label,
                             "is_mission_start": False,
+                            "crossing_extension_min": crossing_ext,
                         }
                         chronologie_reelle.setdefault(id_train, []).append(arret_entry)
 
@@ -919,7 +927,7 @@ def executer_simulation_evenementielle(
     return chronologie_reelle, warnings, stats_homogeneite
 
 
-def _score_chronologie_bruit(chronologie, warnings):
+def _score_chronologie_bruit(chronologie, warnings, max_arret_ligne_min=5):
     """Score bas niveau sans appel Streamlit — utilisé par l'optimisation interne."""
     nb_rames = len(chronologie) if chronologie else 0
     nb_violations = len(warnings.get("infra_violations", []))
@@ -934,7 +942,20 @@ def _score_chronologie_bruit(chronologie, warnings):
             count += 1
     avg_gini = avg_gini / count if count > 0 else 1.0
 
-    return nb_rames * 2000 + nb_violations * 50000 + nb_fails * 3000 - avg_gini * 3000
+    penalty_arrets_ligne = 0.0
+    if chronologie:
+        for steps in chronologie.values():
+            for step in steps:
+                ext = step.get('crossing_extension_min', 0)
+                if ext <= 0:
+                    continue
+                if ext <= max_arret_ligne_min:
+                    penalty_arrets_ligne += ext * 15
+                else:
+                    excess = ext - max_arret_ligne_min
+                    penalty_arrets_ligne += max_arret_ligne_min * 15 + (excess ** 2) * 100
+
+    return nb_rames * 2000 + nb_violations * 50000 + nb_fails * 3000 - avg_gini * 3000 + penalty_arrets_ligne
 
 
 def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,

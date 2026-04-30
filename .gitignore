@@ -1,6 +1,5 @@
 archive/
 __pycache__/
 .devcontainer/
-GEMINI.md
-AGENTS.md
+.claude/
 CLAUDE.md
