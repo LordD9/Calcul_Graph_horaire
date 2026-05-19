@@ -322,17 +322,14 @@ def creer_graphique_horaire(
     dt_fin_fenetre = dt_debut_fenetre + timedelta(hours=params_affichage['duree_fenetre'])
     ax_graph.set_xlim(dt_debut_fenetre, dt_fin_fenetre)
 
-    # Configuration de l'axe temporel
+    # Configuration de l'axe temporel — quadrillage fin à 15 min systématique
     duree_heures = params_affichage['duree_fenetre']
     if duree_heures <= 2:
         ax_graph.xaxis.set_major_locator(mdates.MinuteLocator(byminute=[0, 15, 30, 45]))
         ax_graph.xaxis.set_minor_locator(mdates.MinuteLocator(byminute=range(0, 60, 5)))
-    elif duree_heures <= 6:
-        ax_graph.xaxis.set_major_locator(mdates.HourLocator(interval=1))
-        ax_graph.xaxis.set_minor_locator(mdates.MinuteLocator(byminute=[0, 15, 30, 45]))
     else:
         ax_graph.xaxis.set_major_locator(mdates.HourLocator(interval=1))
-        ax_graph.xaxis.set_minor_locator(mdates.MinuteLocator(byminute=[0, 30]))
+        ax_graph.xaxis.set_minor_locator(mdates.MinuteLocator(byminute=[0, 15, 30, 45]))
 
     ax_graph.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
     plt.setp(ax_graph.get_xticklabels(), rotation=45, ha="right")
@@ -344,8 +341,27 @@ def creer_graphique_horaire(
         titre += " (Tracé physique)"
     ax_graph.set_title(titre)
 
-    # Grille
-    ax_graph.grid(True, which="both", axis="both", linestyle=":", alpha=0.6)
+    # Fond alterné par tranche d'heure (style graphe horaire SNCF)
+    band_start = dt_debut_fenetre.replace(minute=0, second=0, microsecond=0)
+    if band_start > dt_debut_fenetre:
+        band_start -= timedelta(hours=1)
+    i = 0
+    while band_start < dt_fin_fenetre:
+        band_end = band_start + timedelta(hours=1)
+        if i % 2 == 1:
+            ax_graph.axvspan(
+                max(band_start, dt_debut_fenetre),
+                min(band_end, dt_fin_fenetre),
+                facecolor='#c8d8ec', alpha=0.18, edgecolor='none', linewidth=0,
+            )
+        band_start = band_end
+        i += 1
+
+    # Grille : trait plein à l'heure, pointillé aux quarts d'heure
+    ax_graph.set_axisbelow(True)
+    ax_graph.grid(True, which='major', axis='x', linestyle='-', linewidth=0.8, color='#777777', alpha=0.85)
+    ax_graph.grid(True, which='minor', axis='x', linestyle=':', linewidth=0.5, color='#aaaaaa', alpha=0.65)
+    ax_graph.grid(True, which='both',  axis='y', linestyle=':', linewidth=0.4, color='#aaaaaa', alpha=0.55)
 
     # Légende
     handles, labels = ax_graph.get_legend_handles_labels()

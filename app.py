@@ -117,6 +117,69 @@ class ProgressTracker:
             seconds = int(elapsed % 60)
             return f"{minutes}m {seconds}s"
 
+
+def _calculer_temps_parcours_table(chronologie):
+    """Retourne {mission_label: [durées en minutes]} pour chaque trajet complet."""
+    trips = defaultdict(list)
+
+    for trajets in chronologie.values():
+        if not trajets:
+            continue
+        trajets_tries = sorted(trajets, key=lambda x: x['start'])
+
+        if any('mission' in t for t in trajets_tries):
+            # Mode optimisé : is_mission_start délimite chaque trajet complet
+            current_mission = None
+            trip_start = None
+            trip_end = None
+            for t in trajets_tries:
+                if t.get('is_mission_start', False):
+                    if current_mission is not None:
+                        dur = (trip_end - trip_start).total_seconds() / 60
+                        trips[current_mission].append(dur)
+                    current_mission = t['mission']
+                    trip_start = t['start']
+                trip_end = t['end']
+            if current_mission is not None:
+                dur = (trip_end - trip_start).total_seconds() / 60
+                trips[current_mission].append(dur)
+        else:
+            # Mode manuel : segments consécutifs (gap < 20 min) = même trajet
+            cs = trajets_tries[0]
+            ce = trajets_tries[0]
+            for seg in trajets_tries[1:]:
+                if (seg['origine'] == ce['terminus'] and
+                        (seg['start'] - ce['end']).total_seconds() / 60 < 20):
+                    ce = seg
+                else:
+                    key = f"{cs['origine']} → {ce['terminus']}"
+                    trips[key].append((ce['end'] - cs['start']).total_seconds() / 60)
+                    cs = seg
+                    ce = seg
+            key = f"{cs['origine']} → {ce['terminus']}"
+            trips[key].append((ce['end'] - cs['start']).total_seconds() / 60)
+
+    return trips
+
+
+def _afficher_tableau_temps_parcours(chronologie):
+    """Affiche le tableau Streamlit des temps de parcours min/moy/max par mission."""
+    trips = _calculer_temps_parcours_table(chronologie)
+    if not trips:
+        return
+    st.subheader("Temps de parcours par mission")
+    rows = []
+    for mission_label, durations in sorted(trips.items()):
+        rows.append({
+            "Mission": mission_label,
+            "Nb trajets": len(durations),
+            "Tps moyen (min)": f"{sum(durations) / len(durations):.1f}",
+            "Tps min (min)": f"{min(durations):.0f}",
+            "Tps max (min)": f"{max(durations):.0f}",
+        })
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+
 # --- Configuration de la page et initialisation de l'état de session ---
 st.set_page_config(layout="wide")
 
@@ -1652,6 +1715,8 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
             st.download_button("Télécharger roulements (Excel)", excel_buffer, "roulements.xlsx")
             st.download_button("Télécharger graphique (PDF)", pdf_buffer, "graphique.pdf")
 
+            _afficher_tableau_temps_parcours(chronologie)
+
         # --- Affichage des Résultats Énergétiques (si mode Energie) ---
         if mode_calcul == "Calcul Energie":
             st.header("7. Résultats de la simulation énergétique")
@@ -1799,6 +1864,8 @@ if (st.session_state.get('gares') is not None and st.session_state.missions
         excel_buffer, pdf_buffer = generer_exports(chronologie, figure)
         st.download_button("Télécharger roulements (Excel)", excel_buffer, "roulements.xlsx", key="dl_excel_manuel")
         st.download_button("Télécharger graphique (PDF)", pdf_buffer, "graphique.pdf", key="dl_pdf_manuel")
+
+        _afficher_tableau_temps_parcours(chronologie)
 
 
 # =============================================================================
