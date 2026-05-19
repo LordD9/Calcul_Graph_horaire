@@ -360,7 +360,7 @@ def creer_graphique_horaire(
     # Grille : trait plein à l'heure, pointillé aux quarts d'heure
     ax_graph.set_axisbelow(True)
     ax_graph.grid(True, which='major', axis='x', linestyle='-', linewidth=0.8, color='#777777', alpha=0.85)
-    ax_graph.grid(True, which='minor', axis='x', linestyle=':', linewidth=0.5, color='#aaaaaa', alpha=0.65)
+    ax_graph.grid(True, which='minor', axis='x', linestyle=':', linewidth=0.8, color='#888888', alpha=0.75)
     ax_graph.grid(True, which='both',  axis='y', linestyle=':', linewidth=0.4, color='#aaaaaa', alpha=0.55)
 
     # Légende

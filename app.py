@@ -119,8 +119,13 @@ class ProgressTracker:
 
 
 def _calculer_temps_parcours_table(chronologie):
-    """Retourne {mission_label: [durées en minutes]} pour chaque trajet complet."""
+    """
+    Retourne (trips, turnarounds) :
+      trips       : {mission_label: [durées trajet en min]}  (hors arrêt terminus)
+      turnarounds : {mission_label: [durées retournement au terminus en min]}
+    """
     trips = defaultdict(list)
+    turnarounds = defaultdict(list)
 
     for trajets in chronologie.values():
         if not trajets:
@@ -131,17 +136,26 @@ def _calculer_temps_parcours_table(chronologie):
             # Mode optimisé : is_mission_start délimite chaque trajet complet
             current_mission = None
             trip_start = None
-            trip_end = None
+            last_travel_end = None  # fin du dernier segment de circulation (origine≠terminus)
+
             for t in trajets_tries:
                 if t.get('is_mission_start', False):
-                    if current_mission is not None:
-                        dur = (trip_end - trip_start).total_seconds() / 60
+                    if current_mission is not None and last_travel_end is not None:
+                        dur = (last_travel_end - trip_start).total_seconds() / 60
                         trips[current_mission].append(dur)
+                        # Retournement = écart entre arrivée terminus et départ suivant
+                        ret = (t['start'] - last_travel_end).total_seconds() / 60
+                        if 0 <= ret <= 240:
+                            turnarounds[current_mission].append(ret)
                     current_mission = t['mission']
                     trip_start = t['start']
-                trip_end = t['end']
-            if current_mission is not None:
-                dur = (trip_end - trip_start).total_seconds() / 60
+                    last_travel_end = None
+                # Mise à jour uniquement sur les segments de circulation réels
+                if t.get('origine') != t.get('terminus'):
+                    last_travel_end = t['end']
+
+            if current_mission is not None and last_travel_end is not None:
+                dur = (last_travel_end - trip_start).total_seconds() / 60
                 trips[current_mission].append(dur)
         else:
             # Mode manuel : segments consécutifs (gap < 20 min) = même trajet
@@ -154,28 +168,47 @@ def _calculer_temps_parcours_table(chronologie):
                 else:
                     key = f"{cs['origine']} → {ce['terminus']}"
                     trips[key].append((ce['end'] - cs['start']).total_seconds() / 60)
+                    ret = (seg['start'] - ce['end']).total_seconds() / 60
+                    if 0 <= ret <= 240:
+                        turnarounds[key].append(ret)
                     cs = seg
                     ce = seg
             key = f"{cs['origine']} → {ce['terminus']}"
             trips[key].append((ce['end'] - cs['start']).total_seconds() / 60)
 
-    return trips
+    return trips, turnarounds
 
 
-def _afficher_tableau_temps_parcours(chronologie):
-    """Affiche le tableau Streamlit des temps de parcours min/moy/max par mission."""
-    trips = _calculer_temps_parcours_table(chronologie)
+def _afficher_tableau_temps_parcours(chronologie, temps_theoriques=None):
+    """Affiche le tableau Streamlit des temps de parcours par mission."""
+    trips, turnarounds = _calculer_temps_parcours_table(chronologie)
     if not trips:
         return
+    if temps_theoriques is None:
+        temps_theoriques = {}
+
+    def _fmt(val_min, ref_min):
+        """Formate une valeur avec delta entre parenthèses si référence disponible."""
+        if ref_min:
+            delta = val_min - ref_min
+            sign = "+" if delta >= 0 else ""
+            return f"{val_min:.1f} ({sign}{delta:.0f})"
+        return f"{val_min:.1f}"
+
     st.subheader("Temps de parcours par mission")
     rows = []
     for mission_label, durations in sorted(trips.items()):
+        ref = temps_theoriques.get(mission_label)
+        moy = sum(durations) / len(durations)
+        ret_list = turnarounds.get(mission_label, [])
+        ret_str = f"{sum(ret_list)/len(ret_list):.0f}" if ret_list else "—"
         rows.append({
             "Mission": mission_label,
             "Nb trajets": len(durations),
-            "Tps moyen (min)": f"{sum(durations) / len(durations):.1f}",
-            "Tps min (min)": f"{min(durations):.0f}",
-            "Tps max (min)": f"{max(durations):.0f}",
+            "Tps moyen (min)": _fmt(moy, ref),
+            "Tps min (min)": _fmt(min(durations), ref),
+            "Tps max (min)": _fmt(max(durations), ref),
+            "Retournement moy. terminus (min)": ret_str,
         })
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
@@ -1715,7 +1748,15 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
             st.download_button("Télécharger roulements (Excel)", excel_buffer, "roulements.xlsx")
             st.download_button("Télécharger graphique (PDF)", pdf_buffer, "graphique.pdf")
 
-            _afficher_tableau_temps_parcours(chronologie)
+            temps_theoriques = {}
+            for m in st.session_state.missions:
+                orig, term = m.get('origine', ''), m.get('terminus', '')
+                t_aller = m.get('temps_trajet') or 0
+                t_retour = m.get('temps_trajet_retour') or t_aller if m.get('trajet_asymetrique') else t_aller
+                if orig and term:
+                    temps_theoriques[f"{orig} → {term}"] = t_aller
+                    temps_theoriques[f"{term} → {orig}"] = t_retour
+            _afficher_tableau_temps_parcours(chronologie, temps_theoriques)
 
         # --- Affichage des Résultats Énergétiques (si mode Energie) ---
         if mode_calcul == "Calcul Energie":
@@ -1865,7 +1906,15 @@ if (st.session_state.get('gares') is not None and st.session_state.missions
         st.download_button("Télécharger roulements (Excel)", excel_buffer, "roulements.xlsx", key="dl_excel_manuel")
         st.download_button("Télécharger graphique (PDF)", pdf_buffer, "graphique.pdf", key="dl_pdf_manuel")
 
-        _afficher_tableau_temps_parcours(chronologie)
+        temps_theoriques = {}
+        for m in st.session_state.missions:
+            orig, term = m.get('origine', ''), m.get('terminus', '')
+            t_aller = m.get('temps_trajet') or 0
+            t_retour = m.get('temps_trajet_retour') or t_aller if m.get('trajet_asymetrique') else t_aller
+            if orig and term:
+                temps_theoriques[f"{orig} → {term}"] = t_aller
+                temps_theoriques[f"{term} → {orig}"] = t_retour
+        _afficher_tableau_temps_parcours(chronologie, temps_theoriques)
 
 
 # =============================================================================
