@@ -837,9 +837,15 @@ def executer_simulation_evenementielle(
             pt_depart_bloc = bloc_gares[0]
             pt_arrivee_bloc = bloc_gares[-1]
 
+            # L'arrêt commercial au point de départ du bloc est déjà inclus dans
+            # heure_depart_reelle (train disponible APRÈS l'arrêt). Il faut donc le
+            # soustraire pour ne pas le compter deux fois dans la durée de circulation.
+            depart_stop = pt_depart_bloc.get("duree_arret_min", 0)
+
             duree_bloc_min = max(0,
                 pt_arrivee_bloc.get("time_offset_min", 0) -
-                pt_depart_bloc.get("time_offset_min", 0)
+                pt_depart_bloc.get("time_offset_min", 0) -
+                depart_stop
             )
 
             duree_arret_commercial = pt_arrivee_bloc.get("duree_arret_min", 0)
@@ -879,7 +885,8 @@ def executer_simulation_evenementielle(
                         new_arrivee = extended[-1]
                         new_duree = max(0,
                             new_arrivee.get("time_offset_min", 0) -
-                            pt_depart_bloc.get("time_offset_min", 0)
+                            pt_depart_bloc.get("time_offset_min", 0) -
+                            depart_stop
                         )
                         bloc_gares = extended
                         next_crossing_idx = look_idx - 1
@@ -938,11 +945,13 @@ def executer_simulation_evenementielle(
                         prev_arret = pt_curr.get("duree_arret_min", 0)
                         duree_segment = max(0, delta_total - prev_arret)
 
-                        # Offsets depuis heure_depart_reelle (= départ du début de bloc)
-                        offset_arr_curr = (pt_curr.get("time_offset_min", 0)
-                                           - pt_depart_bloc.get("time_offset_min", 0))
-                        offset_arr_next = (pt_next.get("time_offset_min", 0)
-                                           - pt_depart_bloc.get("time_offset_min", 0))
+                        # Offsets depuis heure_depart_reelle (= départ RÉEL du bloc, après
+                        # l'éventuel arrêt commercial de pt_depart_bloc déjà écoulé).
+                        # On soustrait depart_stop pour aligner les offsets sur ce départ réel.
+                        # Pour i=0 : offset = 0 car heure_depart_reelle EST déjà ce départ.
+                        base_offset = pt_depart_bloc.get("time_offset_min", 0) + depart_stop
+                        offset_arr_curr = max(0, pt_curr.get("time_offset_min", 0) - base_offset) if i > 0 else 0
+                        offset_arr_next = max(0, pt_next.get("time_offset_min", 0) - base_offset)
 
                         # Pour i=0, heure_depart_reelle est déjà le départ du bloc (stop inclus).
                         # Pour i>0, l'arrêt commercial de pt_curr n'est pas encore décompté.
