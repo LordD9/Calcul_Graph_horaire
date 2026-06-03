@@ -850,7 +850,7 @@ if st.session_state.get('gares') is not None:
                             key=f"masse_{type_mat}"
                         )
                         params["facteur_aux_kwh_h"] = c1.number_input(
-                            f"Conso. Auxiliaires (kWh / h)", 0.0, 500.0,
+                            f"Puissance Auxiliaires (kW)", 0.0, 500.0,
                             value=float(params.get("facteur_aux_kwh_h", 50.0)),
                             step=1.0, key=f"f_aux_{type_mat}"
                         )
@@ -1744,7 +1744,27 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
                 )
                 st.pyplot(figure)
 
-                excel_buffer, pdf_buffer = generer_exports(chronologie, figure)
+                # Pré-construction des figures batterie pour l'export PDF
+                figures_batterie_pdf = []
+                bat_figs_by_train = {}
+                if mode_calcul == "Calcul Energie":
+                    bat_params_pdf = st.session_state.energy_params.get("batterie", {})
+                    for _tid, (_res, _tmat) in resultats_energie_par_train.items():
+                        if _tmat == "batterie" and _res.get("batterie_log"):
+                            _fig_b = creer_graphique_batterie(
+                                _res["batterie_log"], _tid,
+                                soc_min_pct=bat_params_pdf.get("soc_min_pct", 20),
+                                soc_max_pct=bat_params_pdf.get("soc_max_pct", 95),
+                            )
+                            if _fig_b:
+                                figures_batterie_pdf.append(_fig_b)
+                                bat_figs_by_train[_tid] = _fig_b
+
+                excel_buffer, pdf_buffer = generer_exports(
+                    chronologie, figure,
+                    figures_batterie=figures_batterie_pdf,
+                    logo_path="logo.png"
+                )
                 st.download_button("Télécharger roulements (Excel)", excel_buffer, "roulements.xlsx")
                 st.download_button("Télécharger graphique (PDF)", pdf_buffer, "graphique.pdf")
 
@@ -1809,20 +1829,27 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
                             found_bat = True
                             with st.expander(f"Train {id_train} (Batterie)"):
                                 # Tableau
-                                df_log = pd.DataFrame(resultat_train["batterie_log"], columns=["Heure", "Niveau kWh", "SoC", "Événement"])
-                                # Formatage
-                                df_log["Heure"] = df_log["Heure"].apply(lambda x: x.strftime("%H:%M") if isinstance(x, datetime) else str(x))
+                                raw_log = resultat_train["batterie_log"]
+                                times = [x[0] for x in raw_log]
+                                heures_debut = [times[0]] + times[:-1]
+
+                                def _fmt_dur(td):
+                                    total_min = int(td.total_seconds() // 60)
+                                    h, m = divmod(total_min, 60)
+                                    return f"{h}h{m:02d}" if h else f"{m} min"
+
+                                durees = ["—"] + [_fmt_dur(times[i] - times[i-1]) for i in range(1, len(times))]
+
+                                df_log = pd.DataFrame(raw_log, columns=["_heure_fin", "Niveau kWh", "SoC", "Événement"])
+                                df_log.insert(0, "Heure début", [t.strftime("%H:%M") if isinstance(t, datetime) else str(t) for t in heures_debut])
+                                df_log.insert(1, "Durée", durees)
+                                df_log.drop(columns=["_heure_fin"], inplace=True)
                                 df_log["Niveau kWh"] = df_log["Niveau kWh"].apply(lambda x: f"{x:.1f}")
 
                                 st.dataframe(df_log, width="stretch")
 
-                                # Graphique SoC
-                                bat_params = st.session_state.energy_params.get("batterie", {})
-                                fig_bat = creer_graphique_batterie(
-                                    resultat_train["batterie_log"], id_train,
-                                    soc_min_pct=bat_params.get("soc_min_pct", 20),
-                                    soc_max_pct=bat_params.get("soc_max_pct", 95),
-                                )
+                                # Graphique SoC (réutilise la figure déjà construite pour le PDF)
+                                fig_bat = bat_figs_by_train.get(id_train)
                                 if fig_bat:
                                     st.pyplot(fig_bat)
 
@@ -1902,7 +1929,7 @@ if (st.session_state.get('gares') is not None and st.session_state.missions
             st.subheader("Graphique horaire")
             st.pyplot(figure)
 
-            excel_buffer, pdf_buffer = generer_exports(chronologie, figure)
+            excel_buffer, pdf_buffer = generer_exports(chronologie, figure, logo_path="logo.png")
             st.download_button("Télécharger roulements (Excel)", excel_buffer, "roulements.xlsx", key="dl_excel_manuel")
             st.download_button("Télécharger graphique (PDF)", pdf_buffer, "graphique.pdf", key="dl_pdf_manuel")
 

@@ -26,6 +26,8 @@ from collections import defaultdict
 import itertools
 from functools import lru_cache
 import json
+from matplotlib.backends.backend_pdf import PdfPages
+import matplotlib.image as mpimg
 
 # =============================================================================
 # 1. UTILITAIRES
@@ -1406,30 +1408,55 @@ def analyser_frequences_manuelles(roulement_manuel, missions, heure_debut_servic
             }
     return resultats
 
-def generer_exports(chronologie, figure):
-    """Génère les fichiers d'export Excel et PDF."""
+def _add_logo_to_figure(fig, logo_img):
+    """Insère le logo en coin inférieur gauche d'une figure matplotlib."""
+    logo_h, logo_w = logo_img.shape[:2]
+    fig_w_in = fig.get_figwidth()
+    fig_h_in = fig.get_figheight()
+    target_h_frac = 0.07
+    target_w_frac = target_h_frac * (logo_w / logo_h) * (fig_h_in / fig_w_in)
+    ax_logo = fig.add_axes([0.01, 0.01, target_w_frac, target_h_frac])
+    ax_logo.imshow(logo_img)
+    ax_logo.axis('off')
+
+
+def generer_exports(chronologie, figure, figures_batterie=None, logo_path=None):
+    """Génère les fichiers d'export Excel et PDF (multi-pages si graphes batterie)."""
     rows = []
     for tid in sorted(chronologie.keys()):
         for t in sorted(chronologie[tid], key=lambda x: x['start']):
             rows.append({
-                "Train": tid, 
+                "Train": tid,
                 "Début": t["start"].strftime('%Y-%m-%d %H:%M:%S'),
                 "Fin": t["end"].strftime('%Y-%m-%d %H:%M:%S'),
-                "Origine": t["origine"], 
+                "Origine": t["origine"],
                 "Terminus": t["terminus"]
             })
     df = pd.DataFrame(rows)
-    
+
     bx = BytesIO()
     with pd.ExcelWriter(bx, engine='xlsxwriter') as wr:
         df.to_excel(wr, index=False, sheet_name="Tableau de Marche")
     bx.seek(0)
-    
+
+    all_figures = [f for f in ([figure] + list(figures_batterie or [])) if f is not None]
+
+    logo_img = None
+    if logo_path:
+        try:
+            logo_img = mpimg.imread(logo_path)
+        except Exception:
+            logo_img = None
+
     bp = BytesIO()
-    if figure: 
-        figure.savefig(bp, format="pdf", bbox_inches='tight')
+    if all_figures:
+        with PdfPages(bp) as pdf:
+            for fig in all_figures:
+                if logo_img is not None:
+                    _add_logo_to_figure(fig, logo_img)
+                pdf.savefig(fig, bbox_inches='tight')
     bp.seek(0)
-    
+
     return bx, bp
 
 def reset_caches():
