@@ -118,14 +118,24 @@ class ProgressTracker:
             return f"{minutes}m {seconds}s"
 
 
-def _calculer_temps_parcours_table(chronologie):
+def _calculer_temps_parcours_table(chronologie, gares_info=None):
     """
     Retourne (trips, turnarounds) :
-      trips       : {mission_label: [durées trajet en min]}  (hors arrêt terminus)
-      turnarounds : {mission_label: [durées retournement au terminus en min]}
+      trips       : {label: [{'dur_total': min, 'dist_km': km, 'dur_mouvement': min}]}
+      turnarounds : {label: [durées retournement en min]}
+    gares_info : dict {nom_gare: {'distance': km}} pour le calcul des distances.
     """
     trips = defaultdict(list)
     turnarounds = defaultdict(list)
+
+    def _dist_segment(orig, term):
+        if not gares_info:
+            return 0.0
+        d_o = gares_info.get(orig, {}).get('distance', None)
+        d_t = gares_info.get(term, {}).get('distance', None)
+        if d_o is None or d_t is None:
+            return 0.0
+        return abs(d_t - d_o)
 
     for trajets in chronologie.values():
         if not trajets:
@@ -136,79 +146,119 @@ def _calculer_temps_parcours_table(chronologie):
             # Mode optimisé : is_mission_start délimite chaque trajet complet
             current_mission = None
             trip_start = None
-            last_travel_end = None  # fin du dernier segment de circulation (origine≠terminus)
+            last_travel_end = None
+            dist_acc = 0.0
+            dur_mouvement_acc = 0.0
 
             for t in trajets_tries:
                 if t.get('is_mission_start', False):
                     if current_mission is not None and last_travel_end is not None:
-                        dur = (last_travel_end - trip_start).total_seconds() / 60
-                        trips[current_mission].append(dur)
-                        # Retournement = écart entre arrivée terminus et départ suivant
+                        dur_total = (last_travel_end - trip_start).total_seconds() / 60
+                        trips[current_mission].append({
+                            'dur_total': dur_total,
+                            'dist_km': dist_acc,
+                            'dur_mouvement': dur_mouvement_acc,
+                        })
                         ret = (t['start'] - last_travel_end).total_seconds() / 60
                         if 0 <= ret <= 240:
                             turnarounds[current_mission].append(ret)
                     current_mission = t['mission']
                     trip_start = t['start']
                     last_travel_end = None
-                # Mise à jour uniquement sur les segments de circulation réels
+                    dist_acc = 0.0
+                    dur_mouvement_acc = 0.0
+
                 if t.get('origine') != t.get('terminus'):
                     last_travel_end = t['end']
+                    dist_acc += _dist_segment(t['origine'], t['terminus'])
+                    dur_mouvement_acc += (t['end'] - t['start']).total_seconds() / 60
 
             if current_mission is not None and last_travel_end is not None:
-                dur = (last_travel_end - trip_start).total_seconds() / 60
-                trips[current_mission].append(dur)
+                dur_total = (last_travel_end - trip_start).total_seconds() / 60
+                trips[current_mission].append({
+                    'dur_total': dur_total,
+                    'dist_km': dist_acc,
+                    'dur_mouvement': dur_mouvement_acc,
+                })
         else:
-            # Mode manuel : segments consécutifs (gap < 20 min) = même trajet
+            # Mode manuel
             cs = trajets_tries[0]
             ce = trajets_tries[0]
+            dist_acc = _dist_segment(cs['origine'], cs['terminus']) if cs['origine'] != cs['terminus'] else 0.0
+            dur_mouvement_acc = (cs['end'] - cs['start']).total_seconds() / 60 if cs['origine'] != cs['terminus'] else 0.0
+
             for seg in trajets_tries[1:]:
                 if (seg['origine'] == ce['terminus'] and
                         (seg['start'] - ce['end']).total_seconds() / 60 < 20):
                     ce = seg
+                    if seg['origine'] != seg['terminus']:
+                        dist_acc += _dist_segment(seg['origine'], seg['terminus'])
+                        dur_mouvement_acc += (seg['end'] - seg['start']).total_seconds() / 60
                 else:
                     key = f"{cs['origine']} → {ce['terminus']}"
-                    trips[key].append((ce['end'] - cs['start']).total_seconds() / 60)
+                    trips[key].append({
+                        'dur_total': (ce['end'] - cs['start']).total_seconds() / 60,
+                        'dist_km': dist_acc,
+                        'dur_mouvement': dur_mouvement_acc,
+                    })
                     ret = (seg['start'] - ce['end']).total_seconds() / 60
                     if 0 <= ret <= 240:
                         turnarounds[key].append(ret)
                     cs = seg
                     ce = seg
+                    dist_acc = _dist_segment(seg['origine'], seg['terminus']) if seg['origine'] != seg['terminus'] else 0.0
+                    dur_mouvement_acc = (seg['end'] - seg['start']).total_seconds() / 60 if seg['origine'] != seg['terminus'] else 0.0
+
             key = f"{cs['origine']} → {ce['terminus']}"
-            trips[key].append((ce['end'] - cs['start']).total_seconds() / 60)
+            trips[key].append({
+                'dur_total': (ce['end'] - cs['start']).total_seconds() / 60,
+                'dist_km': dist_acc,
+                'dur_mouvement': dur_mouvement_acc,
+            })
 
     return trips, turnarounds
 
 
-def _afficher_tableau_temps_parcours(chronologie, temps_theoriques=None):
+def _afficher_tableau_temps_parcours(chronologie, temps_theoriques=None, df_gares=None):
     """Affiche le tableau Streamlit des temps de parcours par mission."""
-    trips, turnarounds = _calculer_temps_parcours_table(chronologie)
+    gares_info = df_gares.set_index('gare').to_dict('index') if df_gares is not None else None
+    trips, turnarounds = _calculer_temps_parcours_table(chronologie, gares_info=gares_info)
     if not trips:
         return
     if temps_theoriques is None:
         temps_theoriques = {}
 
     def _fmt(val_min, ref_min):
-        """Formate une valeur avec delta entre parenthèses si référence disponible."""
         if ref_min:
             delta = val_min - ref_min
             sign = "+" if delta >= 0 else ""
             return f"{val_min:.1f} ({sign}{delta:.0f})"
         return f"{val_min:.1f}"
 
+    def _vitesse(dist_km, dur_min):
+        if dur_min and dur_min > 0 and dist_km and dist_km > 0:
+            return f"{dist_km / (dur_min / 60):.1f}"
+        return "—"
+
     st.subheader("Temps de parcours par mission")
     rows = []
-    for mission_label, durations in sorted(trips.items()):
+    for mission_label, data in sorted(trips.items()):
         ref = temps_theoriques.get(mission_label)
-        moy = sum(durations) / len(durations)
+        durs = [d['dur_total'] for d in data]
+        moy = sum(durs) / len(durs)
+        dist_moy = sum(d['dist_km'] for d in data) / len(data)
+        dur_mouv_moy = sum(d['dur_mouvement'] for d in data) / len(data)
         ret_list = turnarounds.get(mission_label, [])
         ret_str = f"{sum(ret_list)/len(ret_list):.0f}" if ret_list else "—"
         rows.append({
             "Mission": mission_label,
-            "Nb trajets": len(durations),
+            "Nb trajets": len(data),
             "Tps moyen (min)": _fmt(moy, ref),
-            "Tps min (min)": _fmt(min(durations), ref),
-            "Tps max (min)": _fmt(max(durations), ref),
-            "Retournement moy. terminus (min)": ret_str,
+            "Tps min (min)": _fmt(min(durs), ref),
+            "Tps max (min)": _fmt(max(durs), ref),
+            "V. commerciale (km/h)": _vitesse(dist_moy, moy),
+            "V. de marche (km/h)": _vitesse(dist_moy, dur_mouv_moy),
+            "Retournement moy. (min)": ret_str,
         })
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
@@ -1776,7 +1826,7 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
                     if orig and term:
                         temps_theoriques[f"{orig} → {term}"] = t_aller
                         temps_theoriques[f"{term} → {orig}"] = t_retour
-                _afficher_tableau_temps_parcours(chronologie, temps_theoriques)
+                _afficher_tableau_temps_parcours(chronologie, temps_theoriques, df_gares=dataframe_gares)
 
             # --- Affichage des Résultats Énergétiques (si mode Energie) ---
             if mode_calcul == "Calcul Energie":
@@ -1941,7 +1991,7 @@ if (st.session_state.get('gares') is not None and st.session_state.missions
                 if orig and term:
                     temps_theoriques[f"{orig} → {term}"] = t_aller
                     temps_theoriques[f"{term} → {orig}"] = t_retour
-            _afficher_tableau_temps_parcours(chronologie, temps_theoriques)
+            _afficher_tableau_temps_parcours(chronologie, temps_theoriques, df_gares=dataframe_gares)
 
 
 # =============================================================================

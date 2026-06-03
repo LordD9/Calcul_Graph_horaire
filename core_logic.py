@@ -1408,16 +1408,20 @@ def analyser_frequences_manuelles(roulement_manuel, missions, heure_debut_servic
             }
     return resultats
 
+_PDF_DPI = 300  # DPI d'export PDF (300 = qualité impression)
+
 def _add_logo_to_figure(fig, logo_img):
-    """Insère le logo en coin inférieur gauche d'une figure matplotlib."""
+    """Insère le logo en coin inférieur gauche via figimage (intégration directe dans le PDF)."""
+    import numpy as np
     logo_h, logo_w = logo_img.shape[:2]
-    fig_w_in = fig.get_figwidth()
-    fig_h_in = fig.get_figheight()
-    target_h_frac = 0.07
-    target_w_frac = target_h_frac * (logo_w / logo_h) * (fig_h_in / fig_w_in)
-    ax_logo = fig.add_axes([0.01, 0.01, target_w_frac, target_h_frac])
-    ax_logo.imshow(logo_img)
-    ax_logo.axis('off')
+    # Cible : logo ~12 % de la largeur de la figure au DPI d'export
+    target_w = max(1, int(fig.get_figwidth() * _PDF_DPI * 0.12))
+    target_h = max(1, int(target_w * logo_h / logo_w))
+    # Rééchantillonnage centre-pixel (sans dépendance externe)
+    ri = np.clip((np.arange(target_h) * logo_h / target_h + 0.5).astype(int), 0, logo_h - 1)
+    ci = np.clip((np.arange(target_w) * logo_w / target_w + 0.5).astype(int), 0, logo_w - 1)
+    logo_resampled = logo_img[np.ix_(ri, ci)]
+    fig.figimage(logo_resampled, xo=10, yo=10, zorder=10)
 
 
 def generer_exports(chronologie, figure, figures_batterie=None, logo_path=None):
@@ -1454,7 +1458,7 @@ def generer_exports(chronologie, figure, figures_batterie=None, logo_path=None):
             for fig in all_figures:
                 if logo_img is not None:
                     _add_logo_to_figure(fig, logo_img)
-                pdf.savefig(fig, bbox_inches='tight')
+                pdf.savefig(fig, bbox_inches='tight', dpi=_PDF_DPI)
     bp.seek(0)
 
     return bx, bp

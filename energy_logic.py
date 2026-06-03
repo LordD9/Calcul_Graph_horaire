@@ -435,13 +435,13 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
                     limite_txt = "Infra" if p_dispo_charge < puissance_max_batterie_kw else "Capacité Charge"
                     if math.isclose(niveau_batterie_kwh, niveau_max_kwh): limite_txt = "Batterie Pleine"
 
-                    log_msg = f"Traction sous caténaire ({electrification_dep}) | Conso. train: {conso_totale_segment:.1f} kWh | ΔBatt: +{gain_net:.1f} kWh [{limite_txt}]"
+                    log_msg = f"Traction sous caténaire ({electrification_dep}) | {distance_km:.1f} km | Conso. train: {conso_totale_segment:.1f} kWh | ΔBatt: +{gain_net:.1f} kWh [{limite_txt}]"
                 else:
                     # Décharge
                     niveau_batterie_kwh -= conso_totale_segment
                     niveau_batterie_kwh += recup_possible_kwh
                     delta_batt = conso_totale_segment - recup_possible_kwh
-                    log_msg = f"Traction sur batterie | Conso. train: {conso_totale_segment:.1f} kWh, Récup: +{recup_possible_kwh:.1f} kWh | ΔBatt: -{delta_batt:.1f} kWh"
+                    log_msg = f"Traction sur batterie | {distance_km:.1f} km | Conso. train: {conso_totale_segment:.1f} kWh, Récup: +{recup_possible_kwh:.1f} kWh | ΔBatt: -{delta_batt:.1f} kWh"
 
                 niveau_batterie_kwh = max(niveau_min_kwh, min(niveau_batterie_kwh, niveau_max_kwh))
                 ajouter_log_batt(trajet["end"], niveau_batterie_kwh, log_msg)
