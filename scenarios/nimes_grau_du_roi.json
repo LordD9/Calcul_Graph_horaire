@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "nom": "Nîmes – Le Grau-du-Roi",
+    "description": "Ligne TER mono-voie avec voies d'évitement, simulation batterie",
+    "auteur": "Cerema",
+    "date_creation": "2026-06-09",
+    "date_modification": "2026-06-09",
+    "tags": ["TER", "batterie", "voie_unique"]
+  },
+  "service": {
+    "heure_debut": "06:00",
+    "heure_fin": "22:00"
+  },
+  "infrastructure": {
+    "gares": [
+      {"gare": "Nîmes", "distance": 0.0, "infra": "VE", "electrification": "C1500", "rampe_section_a_venir": 5.0},
+      {"gare": "Vauvert", "distance": 20.0, "infra": "D", "electrification": "F", "rampe_section_a_venir": -3.0},
+      {"gare": "Le Grau-du-Roi", "distance": 50.0, "infra": "VE", "electrification": "R500", "rampe_section_a_venir": 0.0}
+    ]
+  },
+  "missions": [
+    {
+      "origine": "Nîmes",
+      "terminus": "Le Grau-du-Roi",
+      "frequence": 1.0,
+      "temps_trajet": 45,
+      "temps_trajet_retour": 45,
+      "trajet_asymetrique": false,
+      "temps_retournement_A": 10,
+      "temps_retournement_B": 10,
+      "reference_minutes": "15",
+      "type_materiel": "batterie",
+      "inject_from_terminus_2": false,
+      "passing_points": [
+        {"gare": "Vauvert", "time_offset_min": 20, "arret_commercial": true, "duree_arret_min": 2}
+      ],
+      "passing_points_retour": [
+        {"gare": "Vauvert", "time_offset_min": 25, "arret_commercial": true, "duree_arret_min": 2}
+      ],
+      "pp_raw_text": "Vauvert;20;2;25;2"
+    }
+  ],
+  "energy_params": {
+    "batterie": {
+      "masse_tonne": 50,
+      "capacite_batterie_kwh": 800,
+      "facteur_charge_C": 1.0,
+      "recuperation_pct": 75,
+      "soc_min_pct": 20,
+      "soc_max_pct": 95,
+      "capacite_eol_pct": 70,
+      "simuler_fin_de_vie": false,
+      "davis_A_N_t": 15.0,
+      "davis_B_N_t_kph": 0.1,
+      "davis_C_N_t_kph2": 0.0041,
+      "accel_ms2": 1.0,
+      "decel_ms2": 0.6,
+      "facteur_aux_kwh_h": 43.0,
+      "rendement_thermique_pct": 38,
+      "rendement_electrique_pct": 88,
+      "kwh_per_liter_diesel": 10.0
+    }
+  }
+}

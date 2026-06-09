@@ -50,6 +50,8 @@ from optimisation_logic import (
     CrossingOptimization,
     optimiser_graphique_horaire)
 
+import scenarios_manager
+
 
 def _parse_bulk_pp_for_endpoints(raw_text, terminus, origine, mode_calcul):
     """
@@ -333,6 +335,13 @@ if "chronologie_calculee" not in st.session_state: st.session_state.chronologie_
 if "warnings_calcul" not in st.session_state: st.session_state.warnings_calcul = {}
 if "energy_errors" not in st.session_state: st.session_state.energy_errors = []
 
+# Heures de service (centralisées dans session_state pour permettre le chargement
+# d'un scénario qui les redéfinit).
+if "heure_debut_service" not in st.session_state:
+    st.session_state.heure_debut_service = datetime.strptime("06:00", "%H:%M").time()
+if "heure_fin_service" not in st.session_state:
+    st.session_state.heure_fin_service = datetime.strptime("22:00", "%H:%M").time()
+
 
 def _compter_trains_initiaux(missions, heure_debut, heure_fin):
     """Compte le nombre de trains aller initiaux sur la plage de service."""
@@ -420,6 +429,70 @@ with st.expander("1. Gares et Infrastructure", expanded=True):
     # Sélection du mode de calcul qui conditionne l'affichage
     st.session_state.mode_calcul = st.radio("Mode de calcul", ["Standard", "Calcul Energie"], horizontal=True, key="mode_calcul_selector")
     mode_calcul = st.session_state.mode_calcul
+
+    # En mode Énergie, proposer de charger un scénario pré-enregistré
+    if mode_calcul == "Calcul Energie":
+        _scenario_loaded_flag = st.session_state.pop("_scenario_loaded_msg", None)
+        if _scenario_loaded_flag:
+            st.success(_scenario_loaded_flag)
+
+        with st.expander("📚 Charger un scénario", expanded=(st.session_state.gares is None)):
+            tab_biblio, tab_fichier = st.tabs(["Bibliothèque", "Importer un fichier"])
+
+            with tab_biblio:
+                scenarios = scenarios_manager.list_scenarios()
+                if not scenarios:
+                    st.caption("Aucun scénario dans `scenarios/`. Téléchargez votre configuration "
+                               "actuelle depuis le menu d'export du graphe horaire pour démarrer la bibliothèque.")
+                else:
+                    col_sel, col_btn = st.columns([4, 1])
+                    with col_sel:
+                        options = ["— Sélectionner —"] + [s["metadata"]["nom"] for s in scenarios]
+                        choix = st.selectbox("Scénario", options, key="scenario_selector")
+                    with col_btn:
+                        st.markdown("&nbsp;")  # alignement vertical
+                        load_clicked = st.button(
+                            "Charger",
+                            disabled=(choix == "— Sélectionner —"),
+                            key="scenario_load_btn",
+                        )
+
+                    if choix != "— Sélectionner —":
+                        sc_meta = next(s for s in scenarios if s["metadata"]["nom"] == choix)
+                        md = sc_meta["metadata"]
+                        tags_str = ", ".join(md.get("tags", []) or [])
+                        st.caption(
+                            f"**{md['nom']}** — {md.get('description', '')}  \n"
+                            f"Auteur : {md.get('auteur', '?')} · "
+                            f"Modifié : {md.get('date_modification', '?')}  \n"
+                            f"Tags : {tags_str or '—'}"
+                        )
+
+                    if load_clicked and choix != "— Sélectionner —":
+                        sc_meta = next(s for s in scenarios if s["metadata"]["nom"] == choix)
+                        try:
+                            scenario_data = scenarios_manager.load_scenario(sc_meta["path"])
+                            scenarios_manager.apply_scenario_to_session(scenario_data, st.session_state)
+                            st.session_state["_scenario_loaded_msg"] = f"Scénario « {choix} » chargé."
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Impossible de charger le scénario : {e}")
+
+            with tab_fichier:
+                uploaded = st.file_uploader(
+                    "Fichier scénario (.json)", type=["json"], key="scenario_upload"
+                )
+                if uploaded is not None:
+                    try:
+                        data = scenarios_manager.load_scenario(uploaded)
+                        nom = data.get("metadata", {}).get("nom") or uploaded.name
+                        st.caption(f"Prêt à importer : **{nom}**")
+                        if st.button("Appliquer ce fichier", key="scenario_apply_upload_btn"):
+                            scenarios_manager.apply_scenario_to_session(data, st.session_state)
+                            st.session_state["_scenario_loaded_msg"] = f"Scénario importé : {nom}"
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Fichier invalide : {e}")
 
     with st.form("formulaire_gares"):
 
@@ -540,8 +613,17 @@ if st.session_state.get('gares') is not None:
 
     # --- SECTION 2: Paramètres généraux du service ---
     with st.expander("2. Paramètres de service", expanded=True):
-        heure_debut_service = st.time_input("Début de service", value=datetime.strptime("06:00", "%H:%M").time())
-        heure_fin_service = st.time_input("Fin de service", value=datetime.strptime("22:00", "%H:%M").time())
+        # Les valeurs initiales sont dans session_state ; on utilise key= pour le binding.
+        heure_debut_service = st.time_input(
+            "Début de service",
+            key="heure_debut_service",
+        )
+        heure_fin_service = st.time_input(
+            "Fin de service",
+            key="heure_fin_service",
+            help="Heure limite pour le DÉPART des trains. Un train qui part juste "
+                 "avant cette heure est tracé jusqu'au bout, même si l'arrivée est après.",
+        )
 
         # Le mode de génération n'est affiché qu'en mode "Standard"
         mode_generation = "Rotation optimisée" # Par défaut pour le mode Énergie
@@ -1886,6 +1968,52 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
                 )
                 st.download_button("Télécharger roulements (Excel)", excel_buffer, "roulements.xlsx")
                 st.download_button("Télécharger graphique (PDF)", pdf_buffer, "graphique.pdf")
+
+                # Téléchargement du scénario (mode Énergie uniquement) — round-trip
+                # avec l'encart "Charger un scénario" en haut de page.
+                if mode_calcul == "Calcul Energie":
+                    with st.expander("💾 Télécharger ce scénario (.json)", expanded=False):
+                        col_n, col_t = st.columns(2)
+                        nom_dl = col_n.text_input(
+                            "Nom (optionnel)",
+                            key="scenario_dl_name",
+                            help="Apparaîtra dans la bibliothèque. Vide → nom horodaté.",
+                        )
+                        tags_dl = col_t.text_input(
+                            "Tags (séparés par virgules, optionnel)",
+                            key="scenario_dl_tags",
+                        )
+                        desc_dl = st.text_area(
+                            "Description (optionnel)",
+                            key="scenario_dl_desc",
+                            height=68,
+                        )
+
+                        try:
+                            scenario_dict = scenarios_manager.build_scenario_from_session(st.session_state)
+                            if nom_dl:
+                                scenario_dict["metadata"]["nom"] = nom_dl
+                            if tags_dl:
+                                scenario_dict["metadata"]["tags"] = [
+                                    t.strip() for t in tags_dl.split(",") if t.strip()
+                                ]
+                            if desc_dl:
+                                scenario_dict["metadata"]["description"] = desc_dl
+
+                            scenario_bytes = scenarios_manager.serialize_scenario(scenario_dict)
+                            default_name = scenarios_manager.default_download_filename(scenario_dict)
+
+                            st.download_button(
+                                "📥 Télécharger le scénario (.json)",
+                                data=scenario_bytes,
+                                file_name=default_name,
+                                mime="application/json",
+                                key="dl_scenario_json",
+                                help="Le fichier peut être rechargé via l'onglet « Importer un fichier » "
+                                     "ou déposé dans `scenarios/` pour alimenter la bibliothèque.",
+                            )
+                        except Exception as e:
+                            st.error(f"Impossible de préparer le scénario : {e}")
 
                 temps_theoriques = {}
                 for m in st.session_state.missions:

@@ -930,8 +930,8 @@ def executer_simulation_evenementielle(
             if not conflit:
                 heure_arrivee_finale = heure_depart_reelle + timedelta(minutes=duree_bloc_min)
 
-                if heure_arrivee_finale > engine.dt_fin:
-                    continue
+                # heure_fin = borne pour le DÉPART du train (cf. ligne 907). L'arrivée
+                # peut dépasser dt_fin : le train est tracé jusqu'au bout de son trajet.
 
                 mission_label = f"{mission_cfg['origine']} → {mission_cfg['terminus']}"
                 if trajet_spec == "retour":
@@ -1100,8 +1100,8 @@ def executer_simulation_evenementielle(
 
                 horaire_retour = construire_horaire_mission(mission_cfg, "retour", df_gares)
                 if horaire_retour and len(horaire_retour) > 1:
-                    temps_retour = horaire_retour[-1].get("time_offset_min", 0)
-                    if heure_dispo_retour + timedelta(minutes=temps_retour) <= engine.dt_fin:
+                    # heure_fin borne le DÉPART du retour, pas son arrivée.
+                    if heure_dispo_retour < engine.dt_fin:
                         is_retour_fictif = heure_dispo_retour < engine.dt_debut
                         event_counter += 1
                         heapq.heappush(evenements, (heure_dispo_retour, event_counter, "tentative_mouvement", {
