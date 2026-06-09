@@ -1,0 +1,177 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "nom": "auray_quiberon_freq_40mn_omnibus",
+    "description": "",
+    "auteur": "",
+    "date_creation": "2026-06-09",
+    "date_modification": "2026-06-09",
+    "tags": []
+  },
+  "service": {
+    "heure_debut": "06:00",
+    "heure_fin": "22:30"
+  },
+  "infrastructure": {
+    "gares": [
+      {
+        "gare": "Quiberon",
+        "distance": 0.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "St-Pierre Quiberon",
+        "distance": 4.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "Kerhostin",
+        "distance": 6.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "L'Isthme",
+        "distance": 7.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "Penthièvre",
+        "distance": 8.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "Les Sables-Blancs",
+        "distance": 10.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": 1.0
+      },
+      {
+        "gare": "Plouharnel-Carnac",
+        "distance": 14.0,
+        "infra": "VE",
+        "electrification": "F",
+        "rampe_section_a_venir": 1.0
+      },
+      {
+        "gare": "Belz-Ploemel",
+        "distance": 21.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": 1.0
+      },
+      {
+        "gare": "PK 585,758",
+        "distance": 26.0,
+        "infra": "F",
+        "electrification": "C25",
+        "rampe_section_a_venir": 1.0
+      },
+      {
+        "gare": "Auray",
+        "distance": 27.0,
+        "infra": "F",
+        "electrification": "C25",
+        "rampe_section_a_venir": 0.0
+      }
+    ]
+  },
+  "missions": [
+    {
+      "origine": "Quiberon",
+      "terminus": "Auray",
+      "frequence": 1.5,
+      "temps_trajet": 29,
+      "temps_retournement_A": 10,
+      "temps_retournement_B": 10,
+      "reference_minutes": "0",
+      "passing_points": [
+        {
+          "gare": "St-Pierre Quiberon",
+          "time_offset_min": 3,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Kerhostin",
+          "time_offset_min": 7,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "L'Isthme",
+          "time_offset_min": 9,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Penthièvre",
+          "time_offset_min": 11,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Les Sables-Blancs",
+          "time_offset_min": 13,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Plouharnel-Carnac",
+          "time_offset_min": 17,
+          "arret_commercial": true,
+          "duree_arret_min": 2
+        },
+        {
+          "gare": "Belz-Ploemel",
+          "time_offset_min": 23,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "PK 585,758",
+          "time_offset_min": 28,
+          "arret_commercial": false,
+          "duree_arret_min": 0
+        }
+      ],
+      "trajet_asymetrique": false,
+      "temps_trajet_retour": 29,
+      "passing_points_retour": [],
+      "pp_raw_text": "Quiberon;0;0\nSt-Pierre Quiberon;3;1\nKerhostin;7;1\nL'Isthme;9;1\nPenthièvre;11;1\nLes Sables-Blancs;13;1\nPlouharnel-Carnac;17;2\nBelz-Ploemel;23;1\nPK 585,758;28;0\nAuray;29;0",
+      "type_materiel": "batterie",
+      "inject_from_terminus_2": true
+    }
+  ],
+  "energy_params": {
+    "batterie": {
+      "masse_tonne": 50,
+      "capacite_batterie_kwh": 486,
+      "facteur_charge_C": 1.0,
+      "recuperation_pct": 75,
+      "soc_min_pct": 20,
+      "soc_max_pct": 95,
+      "capacite_eol_pct": 70,
+      "simuler_fin_de_vie": true,
+      "davis_A_N_t": 15.0,
+      "davis_B_N_t_kph": 0.1,
+      "davis_C_N_t_kph2": 0.0041,
+      "accel_ms2": 1.0,
+      "decel_ms2": 0.6,
+      "facteur_aux_kwh_h": 43.0,
+      "rendement_thermique_pct": 38,
+      "rendement_electrique_pct": 88,
+      "kwh_per_liter_diesel": 10.0
+    }
+  }
+}
