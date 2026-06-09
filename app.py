@@ -50,6 +50,42 @@ from optimisation_logic import (
     CrossingOptimization,
     optimiser_graphique_horaire)
 
+
+def _parse_bulk_pp_for_endpoints(raw_text, terminus, origine, mode_calcul):
+    """
+    Extrait depuis le texte de saisie en lot des points de passage :
+    - le temps trajet aller (ligne au nom du terminus, parts[1])
+    - le temps trajet retour (ligne au nom de l'origine, parts[3] en mode Énergie,
+      parts[2] en mode Standard)
+
+    Retourne (t_aller, t_retour) — chaque champ vaut None si non détecté.
+    """
+    if not raw_text:
+        return (None, None)
+    t_aller, t_retour = None, None
+    idx_retour = 3 if mode_calcul == "Calcul Energie" else 2
+    for line in raw_text.strip().split('\n'):
+        if not line.strip():
+            continue
+        parts = [p.strip() for p in line.split(';')]
+        if len(parts) < 2:
+            continue
+        gare = parts[0]
+        try:
+            t_a = int(parts[1])
+        except (ValueError, IndexError):
+            t_a = None
+        try:
+            t_r = int(parts[idx_retour]) if len(parts) > idx_retour else None
+        except (ValueError, IndexError):
+            t_r = None
+        if gare == terminus and t_a is not None:
+            t_aller = t_a
+        if gare == origine and t_r is not None:
+            t_retour = t_r
+    return (t_aller, t_retour)
+
+
 class ProgressTracker:
     """Tracker pour estimation dynamique du temps de calcul."""
 
@@ -545,9 +581,26 @@ if st.session_state.get('gares') is not None:
 
                 frequence = cols[1].number_input(f"Fréquence (train/h) M{i+1}", 0.1, 10.0, mission.get("frequence", 1.0), 0.1, key=f"freq{i}")
 
+                # Auto-update du temps trajet planifié si la saisie en lot contient
+                # le terminus (aller) ou l'origine (retour). On détecte un changement
+                # du texte brut pour éviter d'écraser une modif manuelle ultérieure.
+                _is_bulk = st.session_state.get(f"saisie_pp_{i}", "Interface Guidée") == "Saisie manuelle par lot"
+                if _is_bulk:
+                    _cur_bulk = st.session_state.get(f"pp_raw_{i}", "")
+                    _prev_bulk = st.session_state.get(f"_prev_pp_raw_{i}")
+                    if _cur_bulk != _prev_bulk:
+                        _t_term, _t_orig = _parse_bulk_pp_for_endpoints(
+                            _cur_bulk, terminus, origine, mode_calcul
+                        )
+                        if _t_term is not None and 1 <= _t_term <= 720:
+                            st.session_state[f"tt{i}"] = _t_term
+                        if _t_orig is not None and 1 <= _t_orig <= 720:
+                            st.session_state[f"tt_retour_{i}"] = _t_orig
+                        st.session_state[f"_prev_pp_raw_{i}"] = _cur_bulk
+
                 # Ce temps est utilisé par core_logic pour le planning
                 # energy_logic l'utilisera comme contrainte pour déduire la vitesse
-                temps_trajet = cols[1].number_input(f"Temps trajet PLANIFIÉ (min) M{i+1}", 1, 720, mission.get("temps_trajet", 45), key=f"tt{i}", help="Temps utilisé pour le planning. Le simulateur d'énergie en déduira la vitesse.")
+                temps_trajet = cols[1].number_input(f"Temps trajet PLANIFIÉ (min) M{i+1}", 1, 720, mission.get("temps_trajet", 45), key=f"tt{i}", help="Temps utilisé pour le planning. Le simulateur d'énergie en déduira la vitesse. En saisie en lot, ajouter une ligne au nom du terminus met cette valeur à jour automatiquement.")
 
                 retournement_A = cols[2].number_input(f"Retournement MINIMUM à {origine} (min)", 0, 120, mission.get("temps_retournement_A", 10), key=f"tr_a_{i}")
                 retournement_B = cols[2].number_input(f"Retournement MINIMUM à {terminus} (min)", 0, 120, mission.get("temps_retournement_B", 10), key=f"tr_b_{i}")
@@ -668,9 +721,19 @@ if st.session_state.get('gares') is not None:
 
                 else: # Saisie manuelle par lot
                     placeholder_text = "Vauvert;20\n...ou si case cochée...\nVauvert;20;30"
-                    help_text = f"Format: Gare;Temps depuis {origine} (min)[;Temps depuis {terminus} (min)]"
+                    help_text = (
+                        f"Format: Gare;Temps depuis {origine} (min)[;Temps depuis {terminus} (min)]\n"
+                        f"Astuce : une ligne au nom du terminus ({terminus}) met automatiquement à jour "
+                        f"le champ 'Temps trajet PLANIFIÉ'. Idem pour l'origine ({origine}) en retour."
+                    )
                     if mode_calcul == "Calcul Energie":
-                         help_text = f"Format: Gare;Temps_Aller;[Arrêt_Aller_min];[Temps_Retour];[Arrêt_Retour_min]\nEx: Vauvert;20;2;30;2 (2min d'arrêt à l'aller et au retour)\nEx: Vauvert;20;0;30;0 (pas d'arrêt)"
+                         help_text = (
+                            "Format: Gare;Temps_Aller;[Arrêt_Aller_min];[Temps_Retour];[Arrêt_Retour_min]\n"
+                            "Ex: Vauvert;20;2;30;2 (2min d'arrêt à l'aller et au retour)\n"
+                            "Ex: Vauvert;20;0;30;0 (pas d'arrêt)\n"
+                            f"Astuce : une ligne au nom du terminus ({terminus}) met automatiquement "
+                            f"à jour le champ 'Temps trajet PLANIFIÉ'. Idem pour l'origine ({origine}) en retour."
+                         )
                          placeholder_text = "Vauvert;20;2;30;2"
 
 
@@ -690,6 +753,12 @@ if st.session_state.get('gares') is not None:
                             gare = parts[0]
                             if gare not in gares_list:
                                 st.warning(f"Gare '{gare}' non reconnue. Elle doit être dans la liste principale.")
+                                continue
+
+                            # Les lignes correspondant aux terminus (aller/retour) ne sont
+                            # pas des points de passage : leur temps met à jour le champ
+                            # "Temps trajet PLANIFIÉ" via l'auto-update plus haut.
+                            if gare in (origine, terminus):
                                 continue
 
                             if mode_calcul == "Standard":
