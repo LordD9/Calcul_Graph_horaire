@@ -29,6 +29,42 @@ except ImportError:
     get_physical_profile = None
 
 
+def _sample_accel_parabola(t_total_sec, v_start_kph, accel_ms2, n_samples=20):
+    """Échantillonne la position le long de la phase d'accélération.
+
+    Position physique : d(t) = v_s*t + 0.5*a*t² (parabole). Pente instantanée
+    = v_s + a*t, croît de v_s à v_cruise. Tracer comme une droite produit une
+    pente constante = (v_s+v_cruise)/2, ce qui crée des ruptures de pente
+    visibles aux transitions de phase. Échantillonner la parabole les
+    supprime.
+    """
+    v_start_ms = max(0.0, v_start_kph / 3.6)
+    a = max(0.0, accel_ms2)
+    points = []
+    for k in range(n_samples + 1):
+        t = k * t_total_sec / n_samples
+        d = v_start_ms * t + 0.5 * a * t * t
+        points.append((t, d))
+    return points
+
+
+def _sample_decel_parabola(t_total_sec, v_cruise_kph, decel_ms2, n_samples=20):
+    """Échantillonne la position le long de la phase de décélération.
+
+    Position physique : d(t) = v_c*t - 0.5*d*t² (parabole). Pente instantanée
+    = v_c - d*t, décroît de v_c à v_end. Continuité de pente à l'entrée de la
+    décélération.
+    """
+    v_cruise_ms = max(0.0, v_cruise_kph / 3.6)
+    d_ms2 = max(0.0, decel_ms2)
+    points = []
+    for k in range(n_samples + 1):
+        t = k * t_total_sec / n_samples
+        d = v_cruise_ms * t - 0.5 * d_ms2 * t * t
+        points.append((t, d))
+    return points
+
+
 def creer_graphique_horaire(
     chronologie_trajets,
     df_gares,
@@ -284,22 +320,25 @@ def creer_graphique_horaire(
                             return f"Train {id_train}"
                         return None
 
-                    # Phase Accélération
+                    # Phase Accélération — rendu parabolique pour continuité
+                    # de pente avec la phase de croisière.
                     (d_a, t_a, v_a) = profile['accel']
                     if t_a > 0.1:
-                        end_time_a = current_time + timedelta(seconds=t_a)
-                        end_dist_a = current_dist_km + (d_a / 1000 * dist_sign)
+                        curve = _sample_accel_parabola(
+                            t_a, v_start_kph, params['accel_ms2']
+                        )
+                        times_a = [current_time + timedelta(seconds=t) for t, _ in curve]
+                        dists_a = [current_dist_km + (d / 1000) * dist_sign for _, d in curve]
                         ax_graph.plot(
-                            [current_time, end_time_a],
-                            [current_dist_km, end_dist_a],
+                            times_a, dists_a,
                             marker='None', color=couleur_train,
                             linewidth=1.5, alpha=0.8,
                             label=get_label()
                         )
-                        current_time = end_time_a
-                        current_dist_km = end_dist_a
+                        current_time = times_a[-1]
+                        current_dist_km = dists_a[-1]
 
-                    # Phase Croisière
+                    # Phase Croisière — droite (pente constante = v_cruise).
                     (d_c, t_c, v_c) = profile['cruise']
                     if t_c > 0.1:
                         end_time_c = current_time + timedelta(seconds=t_c)
@@ -313,12 +352,33 @@ def creer_graphique_horaire(
                         current_time = end_time_c
                         current_dist_km = end_dist_c
 
-                    # Phase Décélération
+                    # Phase Décélération — rendu parabolique pour continuité
+                    # de pente avec la phase de croisière. Sans cela, la pente
+                    # passerait brutalement de v_cruise à v_cruise/2 (rupture
+                    # visible au point de transition cruise→decel).
                     (d_d, t_d, v_d) = profile['decel']
-                    end_time_plot = trajet["end"]
-                    if end_time_plot > current_time:
+                    if t_d > 0.1:
+                        curve = _sample_decel_parabola(
+                            t_d, v_cruise_kph, params['decel_ms2']
+                        )
+                        times_d = [current_time + timedelta(seconds=t) for t, _ in curve]
+                        dists_d = [current_dist_km + (d / 1000) * dist_sign for _, d in curve]
+                        # Force le dernier point à coller exactement au
+                        # planning pour éviter toute dérive numérique.
+                        times_d[-1] = trajet["end"]
+                        dists_d[-1] = end_dist_km
                         ax_graph.plot(
-                            [current_time, end_time_plot],
+                            times_d, dists_d,
+                            marker='None', color=couleur_train,
+                            linewidth=1.5, alpha=0.8,
+                            label=get_label()
+                        )
+                    elif trajet["end"] > current_time:
+                        # Pas de phase de décélération mais il reste du temps
+                        # à couvrir (ex. arrondi ou planning légèrement >
+                        # temps physique total) : on ferme par une droite.
+                        ax_graph.plot(
+                            [current_time, trajet["end"]],
                             [current_dist_km, end_dist_km],
                             marker='None', color=couleur_train,
                             linewidth=1.5, alpha=0.8,
