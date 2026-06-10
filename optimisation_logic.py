@@ -73,14 +73,30 @@ class SimulationParams:
     turnaround_buffers: Dict[str, int]
     crossing_stop_durations: Dict[str, Dict[str, int]]
     crossing_pair_assignments: Dict[str, List[str]] = None  # mission_id → preferred VE list
+    retour_offsets: Dict[str, int] = None  # mission_id → minute de référence du départ retour
 
     def get_turnaround_buffers(self, missions):
+        # Le buffer exploré par les optimiseurs s'applique au terminus A (origine).
+        # Le timing du retour (terminus B) est géré par retour_offsets (cadencé),
+        # plus régulier qu'un buffer libre. D'où la forme directionnelle {"A","B"}.
         result = {}
         for i, m in enumerate(missions):
             mid = f"M{i+1}"
             buffer = self.turnaround_buffers.get(mid, self.turnaround_buffers.get(str(i), 0))
             if buffer != 0:
-                result[mid] = buffer
+                result[mid] = {"A": buffer, "B": 0}
+        return result
+
+    def get_retour_offsets(self, missions):
+        """{mission_id: int} pour les missions ayant un offset retour défini."""
+        if not self.retour_offsets:
+            return {}
+        result = {}
+        for i, m in enumerate(missions):
+            mid = f"M{i+1}"
+            off = self.retour_offsets.get(mid, self.retour_offsets.get(str(i)))
+            if off is not None:
+                result[mid] = off
         return result
 
     def get_crossing_strategies(self, missions, df_gares):
@@ -100,12 +116,20 @@ class SimulationParams:
         return result
 
     def get_adjusted_reference_minutes(self, missions):
+        """Décale CHAQUE minute du pattern d'origine par l'offset de cadencement.
+
+        ``cadencements[mid]`` est un OFFSET (0-59), pas une minute absolue : offset 0
+        reproduit le pattern d'origine, et les patterns multi-valeurs ("0,30") sont
+        préservés (→ "5,35" pour offset 5). Cohérent avec _seed_crossing_pairs.
+        """
         result = {}
         for i, m in enumerate(missions):
             mid = f"M{i+1}"
             offset = self.cadencements.get(mid, self.cadencements.get(str(i), None))
             if offset is not None:
-                result[str(i)] = str(offset)
+                original = [int(x) for x in str(m.get('reference_minutes', '0')).split(',')
+                            if x.strip().lstrip('-').isdigit()] or [0]
+                result[str(i)] = ",".join(str(v) for v in sorted({(o + offset) % 60 for o in original}))
         return result
 
 @dataclass
@@ -222,123 +246,19 @@ class GenomeCache:
 # =============================================================================
 
 class SolutionScorer:
-    """Système de scoring avec calculs optimisés."""
-    
+    """Validation des solutions de l'algo génétique.
+
+    Le scoring réel passe par ``_score_chronologie_bruit`` (core_logic), unique
+    fonction de coût du projet. Cette classe ne conserve que le test de validité
+    (absence de violation d'infrastructure) utilisé par l'optimiseur.
+    """
+
     def __init__(self, config: OptimizationConfig):
         self.config = config
-    
-    def score_solution(self, chronologie: Dict, warnings: Dict) -> float:
-        """Calcul de score optimisé avec focus sur la régularité et les croisements globaux."""
-        # 1. Violations Infra (pénalité critique)
-        infra_violations = len(warnings.get("infra_violations", []))
-        
-        # 2. Composantes du score
-        num_rames = len(chronologie)
-        other_warnings = len(warnings.get("other", []))
-        
-        # 3. Pénalité pour trajets annulés/retards
-        cancelled_trips = sum(1 for w in warnings.get("other", []) if "annulé" in w.lower() or "impossible" in w.lower())
-        
-        # 4. Calcul des retards (extensions de croisement)
-        total_delay = 0
-        for _, trajets in chronologie.items():
-            for trajet in trajets:
-                # Vérifier si le trajet a subi des extensions pour croisement
-                if 'crossing_extensions' in trajet:
-                    for ext in trajet['crossing_extensions']:
-                        total_delay += ext.get('duration', 0)
-        
-        # 5. Régularité (calcul vectorisé) - AUGMENTATION DU POIDS
-        regularity_penalty = self._calculate_regularity_fast(chronologie)
-        
-        # 6. Score des croisements - bonus pour croisements optimaux
-        crossing_quality = self._evaluate_crossing_quality(chronologie)
-        
-        # Score composite avec pondérations optimisées
-        # AUGMENTATION du poids de régularité de 1000 à 5000 pour favoriser les graphiques réguliers
-        delay_term = (total_delay * self.config.crossing_optimization.penalty_per_minute
-                      if self.config.crossing_optimization.enabled else 0)
-        score = (num_rames * 2000                      # Minimiser le nombre de rames
-                + other_warnings * 3000                 # Autres avertissements
-                + cancelled_trips * 15000               # Pénalité élevée pour trajets annulés
-                + delay_term                            # Pénalité pour retards
-                + regularity_penalty * 5000             # Régularité (AUGMENTÉ de 1000 à 5000)
-                + infra_violations * 50000              # Violations critiques
-                - crossing_quality * 500                # Bonus pour bons croisements
-                )
-        
-        return score
-    
-    def _evaluate_crossing_quality(self, chronologie: Dict) -> float:
-        """Évalue la qualité des croisements - bonus pour croisements optimaux sur voie double."""
-        if not chronologie:
-            return 0.0
-        
-        quality_score = 0.0
-        
-        # Analyser tous les croisements effectués
-        for train_id, trajets in chronologie.items():
-            for trajet in trajets:
-                # Vérifier les croisements planifiés
-                if 'crossings' in trajet:
-                    for crossing in trajet['crossings']:
-                        # Bonus si croisement sur voie double (pas d'arrêt nécessaire)
-                        if crossing.get('on_double_track', False):
-                            quality_score += 2.0
-                        # Bonus moindre si croisement avec arrêt minimal
-                        elif crossing.get('stop_duration', 0) <= 2:
-                            quality_score += 1.0
-                        # Pénalité légère si arrêt long
-                        elif crossing.get('stop_duration', 0) > 5:
-                            quality_score -= 0.5
-        
-        return quality_score
-    
+
     def is_valid_solution(self, warnings: Dict) -> bool:
-        """Vérifie si solution valide."""
+        """Vérifie si solution valide (aucune violation d'infrastructure)."""
         return len(warnings.get("infra_violations", [])) == 0
-    
-    def _calculate_regularity_fast(self, chronologie: Dict) -> float:
-        """Calcul rapide de régularité avec coefficient de Gini (cohérent avec core_logic)."""
-        if not chronologie:
-            return 0.0
-        
-        missions_horaires = defaultdict(list)
-        for _, trajets in chronologie.items():
-            for trajet in trajets:
-                mission_key = f"{trajet['origine']} → {trajet['terminus']}"
-                missions_horaires[mission_key].append(trajet['start'].timestamp())
-        
-        total_penalty = 0.0
-        for horaires_ts in missions_horaires.values():
-            if len(horaires_ts) < 2:
-                continue
-            
-            # Calcul vectorisé des intervalles
-            horaires_array = np.array(sorted(horaires_ts))
-            intervalles = np.diff(horaires_array) / 60.0  # Minutes
-            intervalles = intervalles[intervalles > 0.1]
-            
-            if len(intervalles) == 0:
-                total_penalty += 1.0
-                continue
-            
-            # Calcul du coefficient de Gini (cohérent avec calculer_indice_homogeneite)
-            n = len(intervalles)
-            intervalles_sorted = np.sort(intervalles)
-            somme_ponderee = np.sum((np.arange(n) + 1) * intervalles_sorted)
-            somme_totale = np.sum(intervalles_sorted)
-            
-            if somme_totale == 0:
-                total_penalty += 1.0
-                continue
-            
-            gini = (2.0 * somme_ponderee) / (n * somme_totale) - (n + 1.0) / n
-            # On veut pénaliser l'hétérogénéité, donc on utilise Gini directement
-            # (Gini élevé = intervalles hétérogènes = mauvais)
-            total_penalty += max(0.0, gini)
-        
-        return total_penalty
 
 
 # =============================================================================
@@ -361,12 +281,14 @@ def _evaluate_genome_worker(args):
         turnaround_buffers = genome.get('turnaround_buffers', {})
         crossing_stop_durations = genome.get('crossing', {})
         crossing_pair_assignments = genome.get('crossing_pairs', {})
+        retour_offsets = genome.get('retour_offsets', {})
 
         params = SimulationParams(
             cadencements=cadencements,
             turnaround_buffers=turnaround_buffers,
             crossing_stop_durations=crossing_stop_durations,
             crossing_pair_assignments=crossing_pair_assignments,
+            retour_offsets=retour_offsets,
         )
 
         score, chronologie, warnings, stats = evaluer_params_simulation(
@@ -448,22 +370,20 @@ class GeneticOptimizer:
         return crossing_points
     
     def _build_search_space(self) -> Dict:
-        """Construit l'espace de recherche (plages de minutes possibles pour chaque mission).
+        """Construit l'espace de recherche (offsets de cadencement par mission).
 
         Les clés utilisent le format "M{i+1}" (ex: "M1", "M2") pour être compatibles
         avec SimulationParams.get_adjusted_reference_minutes et get_turnaround_buffers.
+
+        ``default = 0`` car le gène timing est un OFFSET appliqué au pattern
+        d'origine de la mission : offset 0 = pattern inchangé (baseline).
         """
         space = {}
         for i, mission in enumerate(self.missions):
             if mission.get('frequence', 0) <= 0:
                 continue
             mid = f"M{i+1}"
-            try:
-                minutes_ref = [int(m.strip()) for m in mission.get("reference_minutes", "0").split(',')
-                              if m.strip().isdigit()] or [0]
-            except:
-                minutes_ref = [0]
-            space[mid] = {'default': minutes_ref[0], 'range': (0, 59)}
+            space[mid] = {'default': 0, 'range': (0, 59)}
         return space
     
     def _identify_ve_gares(self):
@@ -568,15 +488,18 @@ class GeneticOptimizer:
             buf_choices = [0, 0, 0, 3, 5, 8, 10]
             cross_wide = [0, 2, 3, 5]
 
-        # Génome 0 = baseline utilisateur : timing/turnaround/crossing vides
-        # → core_logic utilisera les reference_minutes originales de chaque mission.
-        baseline_genome = {'timing': {}, 'turnaround_buffers': {}, 'crossing': {}, 'crossing_pairs': {}}
+        # Génome 0 = baseline utilisateur : timing/turnaround/crossing vides + retour
+        # ASAP (offset None) → core_logic reproduit exactement le mode simple.
+        baseline_genome = {'timing': {}, 'turnaround_buffers': {}, 'crossing': {},
+                           'crossing_pairs': {}, 'retour_offsets': {}}
         for mission_id in self.search_space.keys():
             baseline_genome['turnaround_buffers'][mission_id] = 0
+            baseline_genome['retour_offsets'][mission_id] = None
         population.append(baseline_genome)
 
         for i in range(1, self.config.population_size):
-            genome = {'timing': {}, 'turnaround_buffers': {}, 'crossing': {}, 'crossing_pairs': {}}
+            genome = {'timing': {}, 'turnaround_buffers': {}, 'crossing': {},
+                      'crossing_pairs': {}, 'retour_offsets': {}}
 
             for mission_id, info in self.search_space.items():
                 if i < self.config.population_size // 4:
@@ -590,6 +513,15 @@ class GeneticOptimizer:
                     genome['turnaround_buffers'][mission_id] = 0
                 else:
                     genome['turnaround_buffers'][mission_id] = random.choice(buf_choices)
+
+                # Offset retour : ~1/3 ASAP (None), 1/3 sur grille de 5 min, 1/3 libre.
+                r = random.random()
+                if i < self.config.population_size // 4 or r < 0.34:
+                    genome['retour_offsets'][mission_id] = None
+                elif r < 0.67:
+                    genome['retour_offsets'][mission_id] = random.randrange(0, 60, 5)
+                else:
+                    genome['retour_offsets'][mission_id] = random.randint(0, 59)
 
             ve_list = self._identify_ve_gares()
             if ve_list and random.random() < 0.6:
@@ -624,6 +556,7 @@ class GeneticOptimizer:
             mid = f"M{j+1}"
             timing_offset = genome.get('timing', {}).get(mid, 0)
             turnaround_buf = genome.get('turnaround_buffers', {}).get(mid, 0)
+            retour_offset = genome.get('retour_offsets', {}).get(mid)
 
             ref_str = mission.get("reference_minutes", "0")
             try:
@@ -638,6 +571,7 @@ class GeneticOptimizer:
                     self.heure_debut, self.heure_fin,
                     adjusted_ref_str, mission['frequence'],
                     turnaround_buffer=turnaround_buf,
+                    retour_offset=retour_offset,
                 )
             except Exception:
                 rencontres = []
@@ -684,7 +618,12 @@ class GeneticOptimizer:
             'use_parallel': False,
             'num_workers': 1,
             'use_cache': self.config.use_cache,
-            'timeout_per_eval': self.config.timeout_per_eval
+            'timeout_per_eval': self.config.timeout_per_eval,
+            # Propager l'optim. des croisements aux workers : sans ça, le worker
+            # recrée un CrossingOptimization désactivé et le plafond d'arrêt
+            # retombe à 5 min au lieu du max_delay utilisateur (pénalité faussée).
+            'crossing_optimization': self.config.crossing_optimization,
+            'turnaround_max_buffer': self.config.turnaround_max_buffer,
         }
         
         # Séparer les génomes déjà dans le cache des autres
@@ -761,7 +700,8 @@ class GeneticOptimizer:
     
     def _crossover(self, p1: Dict, p2: Dict) -> Dict:
         """Croisement à deux points — inclut turnaround_buffers et crossing_pairs."""
-        child = {'timing': {}, 'turnaround_buffers': {}, 'crossing': {}, 'crossing_pairs': {}}
+        child = {'timing': {}, 'turnaround_buffers': {}, 'crossing': {},
+                 'crossing_pairs': {}, 'retour_offsets': {}}
 
         # Timing — union des clés des deux parents pour éviter KeyError sur le génome baseline
         all_timing_keys = set(p1.get('timing', {}).keys()) | set(p2.get('timing', {}).keys())
@@ -804,6 +744,12 @@ class GeneticOptimizer:
             v1 = p1.get('crossing_pairs', {}).get(key, [])
             v2 = p2.get('crossing_pairs', {}).get(key, [])
             child['crossing_pairs'][key] = random.choice([v1, v2])
+
+        # Retour offsets — héritage clé par clé (None = ASAP, valide)
+        for mid in mission_ids:
+            o1 = p1.get('retour_offsets', {}).get(mid)
+            o2 = p2.get('retour_offsets', {}).get(mid)
+            child['retour_offsets'][mid] = random.choice([o1, o2])
 
         return child
     
@@ -854,6 +800,16 @@ class GeneticOptimizer:
                         if random.random() < 0.5:
                             sd[gare] = random.choice(cross_choices)
 
+        # Création d'un gène crossing pour une mission qui n'en a pas (10 %/mission).
+        # Sans ça, un génome démarré sans stratégie de croisement ne pourrait jamais
+        # en acquérir une par mutation (gène inatteignable).
+        if 'crossing' not in mutated:
+            mutated['crossing'] = {}
+        if ve_list:
+            for mid in self.search_space.keys():
+                if mid not in mutated['crossing'] and random.random() < 0.1:
+                    mutated['crossing'][mid] = {ve: random.choice(cross_choices) for ve in ve_list}
+
         # Mutation crossing_pairs (25 % de probabilité par mission)
         if 'crossing_pairs' not in mutated:
             mutated['crossing_pairs'] = {}
@@ -871,12 +827,49 @@ class GeneticOptimizer:
                             current = current + [new_ve]
                     mutated['crossing_pairs'][mid] = current[:3]  # cap à 3 VE préférées
 
+        # Mutation retour_offsets (30 % par mission) — décale le départ retour
+        # cadencé. Peut activer (None→valeur) ou désactiver (→None) le cadencement.
+        if 'retour_offsets' not in mutated:
+            mutated['retour_offsets'] = {}
+        for mid in list(mutated.get('timing', {}).keys()):
+            if random.random() < 0.3:
+                current = mutated['retour_offsets'].get(mid)
+                roll = random.random()
+                if roll < 0.2:
+                    mutated['retour_offsets'][mid] = None  # repasser en ASAP
+                elif current is not None and roll < 0.8:
+                    # Petit décalage autour de la valeur courante (reste régulier).
+                    mutated['retour_offsets'][mid] = (current + random.randint(-5, 5)) % 60
+                else:
+                    mutated['retour_offsets'][mid] = random.randint(0, 59)
+
         return mutated
 
 
 # =============================================================================
 # MODE EXHAUSTIF (INCHANGÉ)
 # =============================================================================
+
+def _construire_durees_theoriques(missions, df_gares):
+    """{label_mission: duree_min} pour chaque mission active et chaque sens.
+
+    Sert de référence au terme de temps de parcours du score. Indépendant des
+    cadencements/offsets (qui ne changent que les heures de départ, pas les temps
+    de marche), donc calculable une fois sur les missions d'origine.
+    """
+    from core_logic import construire_horaire_mission
+    durees = {}
+    for m in missions:
+        if m.get('frequence', 0) <= 0:
+            continue
+        h_aller = construire_horaire_mission(m, 'aller', df_gares)
+        if h_aller:
+            durees[f"{m['origine']} → {m['terminus']}"] = h_aller[-1].get('time_offset_min', 0)
+        h_retour = construire_horaire_mission(m, 'retour', df_gares)
+        if h_retour:
+            durees[f"{m['terminus']} → {m['origine']}"] = h_retour[-1].get('time_offset_min', 0)
+    return durees
+
 
 def evaluer_params_simulation(params, missions, df_gares, heure_debut, heure_fin, allow_sharing=True, config=None):
     from core_logic import executer_simulation_evenementielle, _calculer_stats_homogeneite, _score_chronologie_bruit
@@ -895,6 +888,7 @@ def evaluer_params_simulation(params, missions, df_gares, heure_debut, heure_fin
     turn_bufs = params.get_turnaround_buffers(missions)
     cross_strats = params.get_crossing_strategies(missions, df_gares)
     pair_assignments = params.crossing_pair_assignments or {}
+    retour_offsets = params.get_retour_offsets(missions)
 
     chronologie, warnings, stats = executer_simulation_evenementielle(
         modified_missions, df_gares, heure_debut, heure_fin,
@@ -903,14 +897,20 @@ def evaluer_params_simulation(params, missions, df_gares, heure_debut, heure_fin
         crossing_strategies=cross_strats,
         adjusted_reference_minutes=adjusted_ref,
         crossing_pair_assignments=pair_assignments,
+        retour_reference_offsets=retour_offsets,
     )
 
     max_arret = (config.crossing_optimization.max_delay_minutes
                  if config and config.crossing_optimization and config.crossing_optimization.enabled
                  else 5)
-    score = _score_chronologie_bruit(chronologie, warnings, max_arret_ligne_min=max_arret)
-    extra_delay = sum(params.turnaround_buffers.values()) * 2
-    score += extra_delay
+    durees_theoriques = _construire_durees_theoriques(missions, df_gares)
+    # NB : plus de pénalité directe sur les buffers de retournement. Leur coût
+    # émerge désormais de leurs effets réels (nombre de rames, Gini, temps de
+    # parcours) via le score ci-dessous.
+    score = _score_chronologie_bruit(
+        chronologie, warnings, max_arret_ligne_min=max_arret,
+        durees_theoriques=durees_theoriques,
+    )
 
     return score, chronologie, warnings, stats
 
@@ -984,9 +984,17 @@ def _optimisation_smart_progressive(missions, df_gares, heure_debut, heure_fin,
 
     turnaround_vals = _build_turnaround_range(config)
     crossing_vals = _build_crossing_range(config)
+    # Offsets de départ retour testés : None (ASAP, baseline) + grille de 5 min.
+    retour_offset_vals = [None] + list(range(0, 60, 5))
 
-    phases = [
+    # Phases « mono-paramètre » répétées sur plusieurs passes (une amélioration sur
+    # un paramètre peut en débloquer une sur un autre au tour suivant).
+    main_phases = [
         ('Cadencement', [('cadencement', mid, list(range(0, 60, 5))) for mid in active_mission_ids]),
+        # Retour cadencé : minute de référence du départ retour → départs réguliers
+        # (remplace l'ancien buffer libre au terminus B).
+        ('Retour cadencé', [('retour_offset', mid, retour_offset_vals) for mid in active_mission_ids]),
+        # Retournement = buffer au terminus A (origine) uniquement.
         ('Retournement', [('turnaround', mid, turnaround_vals) for mid in active_mission_ids]),
     ]
 
@@ -997,12 +1005,27 @@ def _optimisation_smart_progressive(missions, df_gares, heure_debut, heure_fin,
         for ve in ve_gares.get(mid, [])
     ]
     if crossing_steps:
-        phases.append(('Croisement', crossing_steps))
+        main_phases.append(('Croisement', crossing_steps))
 
-    phases.append(('Affinement', [('cadencement', mid, list(range(0, 60))) for mid in active_mission_ids]))
+    # Phase conjointe : grille 2D grossière (cadencement × offset retour) par mission.
+    # Indispensable pour les solutions exigeant un mouvement simultané des deux.
+    conjoint_grid = [(c, r) for c in range(0, 60, 10) for r in [None, 0, 15, 30, 45]]
+    conjoint_phase = ('Conjoint', [('conjoint', mid, conjoint_grid) for mid in active_mission_ids])
 
-    # step[-1] est toujours la liste de valeurs, quelle que soit la longueur du tuple.
-    total_steps = sum(sum(len(step[-1]) for step in phase_steps) for _, phase_steps in phases)
+    # Affinement : balayage fin du cadencement ET de l'offset retour.
+    affinement_phase = ('Affinement', (
+        [('cadencement', mid, list(range(0, 60))) for mid in active_mission_ids]
+        + [('retour_offset', mid, [None] + list(range(0, 60))) for mid in active_mission_ids]
+    ))
+
+    NUM_PASSES = 2
+
+    # Total = NUM_PASSES passes des phases mono-paramètre + conjoint + affinement.
+    # (Borne haute : l'arrêt anticipé entre passes peut faire terminer plus tôt.)
+    main_steps_per_pass = sum(sum(len(step[-1]) for step in ps) for _, ps in main_phases)
+    total_steps = (NUM_PASSES * main_steps_per_pass
+                   + sum(len(step[-1]) for step in conjoint_phase[1])
+                   + sum(len(step[-1]) for step in affinement_phase[1]))
 
     # Phase Résolution : préparée mais seulement activée si des violations persistent.
     # On ne l'ajoute au total_steps qu'au moment de la déclencher (progress bar honnête).
@@ -1032,12 +1055,25 @@ def _optimisation_smart_progressive(missions, df_gares, heure_debut, heure_fin,
                     cadencements=dict(best_params.cadencements),
                     turnaround_buffers=dict(best_params.turnaround_buffers),
                     crossing_stop_durations={k: dict(v) for k, v in best_params.crossing_stop_durations.items()},
+                    retour_offsets=dict(best_params.retour_offsets or {}),
                 )
 
                 if step_type in ('cadencement',):
                     trial_params.cadencements[mid] = val
                 elif step_type in ('turnaround', 'turnaround_force'):
+                    # Buffer appliqué au terminus A (origine) ; le terminus B est
+                    # géré par retour_offset (cf. get_turnaround_buffers).
                     trial_params.turnaround_buffers[mid] = val
+                elif step_type == 'retour_offset':
+                    # val peut être None (= retour ASAP, baseline).
+                    trial_params.retour_offsets[mid] = val
+                elif step_type == 'conjoint':
+                    # Mouvement 2D simultané (cadencement, offset retour) : attrape
+                    # les solutions « décaler le départ ET le retour ensemble » que
+                    # la descente coordonnée mono-paramètre rate.
+                    cad_val, roff_val = val
+                    trial_params.cadencements[mid] = cad_val
+                    trial_params.retour_offsets[mid] = roff_val
                 elif step_type in ('crossing', 'crossing_force'):
                     ve_gare = step[2]
                     if mid not in trial_params.crossing_stop_durations:
@@ -1061,8 +1097,21 @@ def _optimisation_smart_progressive(missions, df_gares, heure_debut, heure_fin,
                 if progress_callback and total_steps > 0:
                     progress_callback(steps_done, total_steps, best_score, len(best_chronologie), 0)
 
-    for phase_name, phase_steps in phases:
-        _run_phase(phase_name, phase_steps)
+    # Passes successives des phases mono-paramètre, avec arrêt anticipé dès qu'une
+    # passe complète n'améliore plus le score (au-delà de la tolérance).
+    for pass_idx in range(NUM_PASSES):
+        score_avant_passe = best_score
+        for phase_name, phase_steps in main_phases:
+            _run_phase(phase_name, phase_steps)
+        if best_score >= score_avant_passe - tol:
+            break  # passe complète sans gain : inutile de répéter
+
+    # Phase conjointe (une fois) : mouvements 2D cadencement × offset retour.
+    _run_phase(*conjoint_phase)
+
+    # Affinement final : balayage fin, tolérance nulle pour capter les petits gains.
+    tol = 0.0
+    _run_phase(*affinement_phase)
 
     # Phase Résolution : ne tourne que si des violations persistent OU si aucune solution sans violation n'a été trouvée
     if resolution_steps and best_has_violations:
@@ -1072,7 +1121,9 @@ def _optimisation_smart_progressive(missions, df_gares, heure_debut, heure_fin,
         'mode': 'smart_progressive',
         'best_score': best_score if best_score != float('inf') else None,
         'steps_evaluated': steps_done,
-        'baseline_preserved': not best_params.cadencements and not best_params.turnaround_buffers and not best_params.crossing_stop_durations,
+        'baseline_preserved': (not best_params.cadencements and not best_params.turnaround_buffers
+                               and not best_params.crossing_stop_durations
+                               and not any(v is not None for v in (best_params.retour_offsets or {}).values())),
     }
 
 
@@ -1118,34 +1169,32 @@ def optimize_exhaustive(missions, df_gares, heure_debut, heure_fin, config,
     )
 
     cadence_range = list(range(0, 60, 5))
-    # Plage turnaround étendue si optim. croisement activée
-    if config.crossing_optimization and config.crossing_optimization.enabled:
-        max_buf = max(15, getattr(config, 'turnaround_max_buffer', 30))
-        turnaround_range = [0, 5, 10, max(15, max_buf // 2), max_buf]
-    else:
-        turnaround_range = [0, 5, 10]
+    # On explore l'offset de départ retour (cadencé) plutôt que le buffer libre
+    # au terminus B : départs réguliers garantis. None = retour ASAP (baseline).
+    retour_offset_range = [None, 0, 10, 20, 30, 40, 50]
 
     if len(active_missions) > 3:
         cadence_range = list(range(0, 60, 10))
-        turnaround_range = turnaround_range[:3]
+        retour_offset_range = [None, 0, 20, 40]
 
-    combos = list(product(cadence_range, turnaround_range, repeat=len(active_missions)))
+    combos = list(product(cadence_range, retour_offset_range, repeat=len(active_missions)))
     if len(combos) > 100000:
         cadence_range = list(range(0, 60, 10))
-        combos = list(product(cadence_range, turnaround_range, repeat=len(active_missions)))
+        combos = list(product(cadence_range, retour_offset_range, repeat=len(active_missions)))
 
     for idx, combo in enumerate(combos):
         cadencements = {}
-        turnaround_buffers = {}
+        retour_offsets = {}
         for j, (m_idx, m) in enumerate(active_missions):
             mid = f"M{m_idx+1}"
             cadencements[mid] = combo[2*j]
-            turnaround_buffers[mid] = combo[2*j+1]
+            retour_offsets[mid] = combo[2*j+1]
 
         params = SimulationParams(
             cadencements=cadencements,
-            turnaround_buffers=turnaround_buffers,
+            turnaround_buffers={},
             crossing_stop_durations={},
+            retour_offsets=retour_offsets,
         )
 
         score, chrono, warns, stats = evaluer_params_simulation(
@@ -1185,6 +1234,7 @@ def optimize_exhaustive(missions, df_gares, heure_debut, heure_fin, config,
                         cadencements=dict(best_params.cadencements),
                         turnaround_buffers=dict(best_params.turnaround_buffers),
                         crossing_stop_durations=trial_crossing,
+                        retour_offsets=dict(best_params.retour_offsets or {}),
                     )
                     score, chrono, warns, stats = evaluer_params_simulation(
                         trial, missions, df_gares, heure_debut, heure_fin, allow_sharing, config=config
@@ -1228,11 +1278,10 @@ def optimiser_graphique_horaire(missions, df_gares, heure_debut, heure_fin,
         return optimize_exhaustive(missions, df_gares, heure_debut, heure_fin,
                                   config, scorer, allow_sharing, progress_callback)
     elif config.mode == "simple":
+        # Cadencements vides → le moteur utilise les reference_minutes d'origine de
+        # chaque mission, en préservant les patterns multi-valeurs ("0,30"). (Avant,
+        # on forçait refs[0], ce qui aplatissait les patterns à plusieurs sillons/h.)
         params = SimulationParams(cadencements={}, turnaround_buffers={}, crossing_stop_durations={})
-        for i, m in enumerate(missions):
-            mid = f"M{i+1}"
-            refs = [int(x.strip()) for x in str(m.get('reference_minutes', '0')).split(',') if x.strip().isdigit()]
-            params.cadencements[mid] = refs[0] if refs else 0
         score, chrono, warns, stats = evaluer_params_simulation(
             params, missions, df_gares, heure_debut, heure_fin, allow_sharing, config=config
         )

@@ -30,6 +30,17 @@ from matplotlib.backends.backend_pdf import PdfPages
 import matplotlib.image as mpimg
 
 # =============================================================================
+# CONSTANTES DE SCORING
+# =============================================================================
+# Poids (points par minute) de l'excès de temps de parcours par rapport à la
+# durée théorique de la mission. Crée le gradient « trajets plus courts » :
+# toute minute d'attente subie (conflit) OU d'arrêt stratégique allonge la
+# course et coûte ce poids. Ordre de grandeur : 10 min cumulées ≈ 600 pts,
+# comparable à un déplacement de ~0.2 du Gini moyen, et nettement sous le coût
+# d'une rame (2000). Calibrable.
+POIDS_EXCES_PARCOURS = 60.0
+
+# =============================================================================
 # 1. UTILITAIRES
 # =============================================================================
 
@@ -72,14 +83,46 @@ def _is_crossing_point(infra_code):
     """
     return infra_code in ['VE', 'D', 'Terminus']
 
+def _prochain_creneau(earliest, offset_minute, intervalle, dt_debut):
+    """Premier instant ≥ ``earliest`` sur la grille de cadencement.
+
+    La grille = {ancre + k·intervalle}, ancrée à ``dt_debut`` calé sur
+    ``offset_minute``. Ancrer à dt_debut (plutôt qu'un simple modulo 60) garde
+    les retours en phase avec les allers même pour des intervalles non diviseurs
+    de 60 (ex. fréquence 1,5/h → pas de 40 min). Garantit des départs réguliers :
+    tous les retours d'une mission tombent aux mêmes minutes d'heure en heure.
+
+    Args:
+        earliest (datetime): instant au plus tôt (dispo du train après retournement).
+        offset_minute (int): minute de référence du départ retour (0-59).
+        intervalle (timedelta): pas de cadencement de la mission (60/fréquence).
+        dt_debut (datetime): début de service, ancre de la grille.
+
+    Returns:
+        datetime: le créneau retenu (≥ earliest).
+    """
+    offset_minute = int(offset_minute) % 60
+    creneau = dt_debut.replace(minute=offset_minute, second=0, microsecond=0)
+    # Aligner sur la grille de part et d'autre de earliest (gère aussi les
+    # injections fictives où earliest peut précéder dt_debut).
+    while creneau < earliest:
+        creneau += intervalle
+    while creneau - intervalle >= earliest:
+        creneau -= intervalle
+    return creneau
+
 def enumerer_rencontres(mission, df_gares, heure_debut, heure_fin,
                         reference_minute_str, frequence_par_heure,
-                        turnaround_buffer=0):
+                        turnaround_buffer=0, retour_offset=None):
     """
     Retourne la liste déterministe des rencontres aller×retour idéalisées.
     Chaque entrée: {'aller_idx', 'retour_idx', 'natural_ve', 'candidate_ve'}
+
+    Si ``retour_offset`` est fourni, les départs retour sont calés sur la grille
+    de cadencement (cohérent avec le moteur), au lieu de partir au plus tôt.
     """
     from datetime import datetime, timedelta, time as dt_time
+    import math
 
     if frequence_par_heure <= 0:
         return []
@@ -138,12 +181,23 @@ def enumerer_rencontres(mission, df_gares, heure_debut, heure_fin,
             t += intervalle_min
     allers.sort()
 
-    # Générer les départs retour
+    # Générer les départs retour (en minutes depuis début de service).
+    # Avec retour_offset : caler sur la grille {anchor + k·intervalle}, cohérent
+    # avec _prochain_creneau du moteur (anchor = minute d'offset relative à debut).
     retours = []
-    for t_a in allers:
-        t_r = t_a + duree_aller + t_ret_min
-        if t_r < (fin_min - debut_min):
-            retours.append(t_r)
+    if retour_offset is not None:
+        anchor_t = (int(retour_offset) % 60) - (debut_min % 60)
+        for t_a in allers:
+            t_r0 = t_a + duree_aller + t_ret_min
+            k = math.ceil((t_r0 - anchor_t) / intervalle_min - 1e-9)
+            t_r = anchor_t + k * intervalle_min
+            if t_r < (fin_min - debut_min):
+                retours.append(t_r)
+    else:
+        for t_a in allers:
+            t_r = t_a + duree_aller + t_ret_min
+            if t_r < (fin_min - debut_min):
+                retours.append(t_r)
     retours.sort()
 
     # Calculer les rencontres paires (aller_k, retour_j)
@@ -662,6 +716,7 @@ def executer_simulation_evenementielle(
     crossing_strategies=None,
     adjusted_reference_minutes=None,
     crossing_pair_assignments=None,
+    retour_reference_offsets=None,
 ):
     """
     Moteur événementiel unifié pour la simulation ferroviaire.
@@ -681,6 +736,12 @@ def executer_simulation_evenementielle(
             aux points VE (arrêts prolongés pour laisser passer).
         adjusted_reference_minutes (dict): {m_idx: str} minutes de référence surchargées
             (ex: {"0": "15", "1": "30"}). Si None, utilise mission['reference_minutes'].
+        crossing_pair_assignments (dict): {mission_id: [gares VE préférées]} pour
+            orienter le point de croisement (cf. crossing_pairs côté optimiseur).
+        retour_reference_offsets (dict): {mission_id: int|None} minute de référence
+            du départ retour (cadencement). Si fournie pour une mission, le retour
+            part au prochain créneau de la grille (≥ dispo après retournement),
+            garantissant des départs réguliers. None/absent = comportement ASAP.
 
     Returns:
         tuple: (chronologie, warnings, stats_homogeneite)
@@ -693,6 +754,31 @@ def executer_simulation_evenementielle(
         crossing_strategies = {}
     if adjusted_reference_minutes is None:
         adjusted_reference_minutes = {}
+    if retour_reference_offsets is None:
+        retour_reference_offsets = {}
+
+    def _buffer_directionnel(mission_id, side):
+        """Buffer de retournement pour un côté ('A' origine / 'B' terminus).
+
+        Accepte un int (compat : appliqué aux deux côtés) ou un dict {'A','B'}.
+        """
+        raw = turnaround_buffers.get(mission_id, 0)
+        if isinstance(raw, dict):
+            return raw.get(side, 0)
+        return raw
+
+    def _preferred_ves(mission_id, sens):
+        """VE préférées pour une mission et un sens ('aller'/'retour').
+
+        Accepte une liste simple (compat : appliquée aux deux sens) ou un dict
+        directionnel {'aller': [...], 'retour': [...]}.
+        """
+        raw = crossing_pair_assignments.get(mission_id) if crossing_pair_assignments else None
+        if raw is None:
+            return []
+        if isinstance(raw, dict):
+            return raw.get(sens, []) or []
+        return raw
 
     engine = SimulationEngine(df_gares, heure_debut, heure_fin)
 
@@ -731,7 +817,9 @@ def executer_simulation_evenementielle(
             if horaire_aller:
                 temps_trajet_aller = horaire_aller[-1].get("time_offset_min", 0)
                 t_ret_b = mission.get("temps_retournement_B", 10)
-                buf = turnaround_buffers.get(mission_id, 0)
+                buf = _buffer_directionnel(mission_id, "B")
+                # +60 (vs +intervalle) : marge large couvrant aussi l'attente
+                # éventuelle d'un créneau cadencé pour le départ retour.
                 temps_avant_service = temps_trajet_aller + t_ret_b + buf + 60
                 heure_debut_mission = engine.dt_debut - timedelta(minutes=temps_avant_service)
 
@@ -860,11 +948,11 @@ def executer_simulation_evenementielle(
             gare_arr_bloc = pt_arrivee_bloc.get("gare")
 
             # ── Partie A : extension vers la VE préférée ─────────────────────
-            # Seulement sur le premier essai (use_preferred_ve=True) pour les
-            # trajets aller, quand crossing_pair_assignments est fourni.
-            if (use_preferred_ve and crossing_pair_assignments
-                    and trajet_spec == "aller"):
-                preferred_ves = crossing_pair_assignments.get(mission_id, [])
+            # Sur le premier essai (use_preferred_ve=True), pour les deux sens
+            # (aller ET retour), quand crossing_pair_assignments est fourni.
+            preferred_extension_applied = False
+            if use_preferred_ve and crossing_pair_assignments:
+                preferred_ves = _preferred_ves(mission_id, trajet_spec)
                 if preferred_ves and gare_arr_bloc not in preferred_ves:
                     # Chercher la VE préférée la plus proche au-delà du bloc actuel,
                     # en s'arrêtant dès qu'on rencontre une VE intermédiaire non préférée.
@@ -890,6 +978,7 @@ def executer_simulation_evenementielle(
                             pt_depart_bloc.get("time_offset_min", 0) -
                             depart_stop
                         )
+                        preferred_extension_applied = True
                         bloc_gares = extended
                         next_crossing_idx = look_idx - 1
                         pt_arrivee_bloc = new_arrivee
@@ -938,6 +1027,27 @@ def executer_simulation_evenementielle(
                     mission_label = f"{mission_cfg['terminus']} → {mission_cfg['origine']}"
 
                 if not is_trajet_fictif:
+                    # Attente subie : le train a attendu à gare_dep_bloc qu'un conflit
+                    # se libère (heure_depart_reelle repoussée au-delà de sa dispo).
+                    # On la trace comme un arrêt visible (Marey) porteur de
+                    # crossing_extension_min, pour la traiter à l'identique d'un arrêt
+                    # stratégique. Uniquement en milieu de parcours (index_etape > 0) :
+                    # un retard au départ d'origine relève du cadencement (Gini), pas
+                    # d'une attente en ligne.
+                    conflict_wait = (heure_depart_reelle - dispo_train).total_seconds() / 60.0
+                    if index_etape > 0 and conflict_wait > 0.5:
+                        wait_entry = {
+                            "start": dispo_train,
+                            "end": heure_depart_reelle,
+                            "origine": gare_dep_bloc,
+                            "terminus": gare_dep_bloc,
+                            "mission": mission_label,
+                            "is_mission_start": False,
+                            "crossing_extension_min": conflict_wait,
+                            "subi": True,
+                        }
+                        chronologie_reelle.setdefault(id_train, []).append(wait_entry)
+
                     first_seg = True
                     for i in range(len(bloc_gares) - 1):
                         pt_curr = bloc_gares[i]
@@ -985,6 +1095,12 @@ def executer_simulation_evenementielle(
                                 "mission": mission_label,
                                 "is_mission_start": (first_seg and index_etape == 0),
                             }
+                            # Promesse de VE préférée non tenue : la planification a dû
+                            # se replier sur le croisement naturel (cf. branche conflit).
+                            # On marque le premier segment du bloc pour que le score
+                            # pénalise (légèrement) ce génome.
+                            if first_seg and details.get("preferred_ve_failed"):
+                                seg_entry["crossing_assignment_violated"] = True
                             chronologie_reelle.setdefault(id_train, []).append(seg_entry)
                             first_seg = False
 
@@ -1045,6 +1161,11 @@ def executer_simulation_evenementielle(
                     new_details = details.copy()
                     new_details["use_preferred_ve"] = False
                     new_details["retry_count"] = 0
+                    # Ne marquer la promesse non tenue que si une extension vers une
+                    # VE préférée avait effectivement été appliquée (sinon le repli
+                    # ne change rien et n'est pas une vraie violation).
+                    if preferred_extension_applied:
+                        new_details["preferred_ve_failed"] = True
                     event_counter += 1
                     heapq.heappush(evenements, (
                         heure_depart_reelle, event_counter, "tentative_mouvement", new_details
@@ -1091,27 +1212,46 @@ def executer_simulation_evenementielle(
             trains[id_train]["loc"] = gare_finale
             heure_arrivee_mission = heure
 
-            buf = turnaround_buffers.get(mission_id, 0)
-
             if details["trajet_spec"] == "aller":
+                # Retournement au terminus B, puis éventuel cadencement du retour.
+                buf_b = _buffer_directionnel(mission_id, "B")
                 t_ret_min = mission_cfg.get("temps_retournement_B", 10)
-                heure_dispo_retour = heure_arrivee_mission + timedelta(minutes=t_ret_min + buf)
-                trains[id_train]["dispo_a"] = heure_dispo_retour
+                heure_dispo_retour = heure_arrivee_mission + timedelta(minutes=t_ret_min + buf_b)
+
+                # Cadencement : si un offset retour est défini pour la mission, le
+                # départ est repoussé au prochain créneau de la grille (départs
+                # réguliers d'heure en heure). Sinon comportement ASAP historique.
+                offset_retour = retour_reference_offsets.get(mission_id)
+                heure_depart_retour = heure_dispo_retour
+                if offset_retour is not None:
+                    freq = mission_cfg.get("frequence", 0)
+                    if freq > 0:
+                        intervalle_ret = timedelta(hours=1.0 / freq)
+                        heure_depart_retour = _prochain_creneau(
+                            heure_dispo_retour, offset_retour, intervalle_ret, engine.dt_debut
+                        )
+
+                # La rame reste réservée jusqu'au départ cadencé (pas de réemploi
+                # par un autre aller entre-temps).
+                trains[id_train]["dispo_a"] = heure_depart_retour
 
                 horaire_retour = construire_horaire_mission(mission_cfg, "retour", df_gares)
                 if horaire_retour and len(horaire_retour) > 1:
                     # heure_fin borne le DÉPART du retour, pas son arrivée.
-                    if heure_dispo_retour < engine.dt_fin:
-                        is_retour_fictif = heure_dispo_retour < engine.dt_debut
+                    if heure_depart_retour < engine.dt_fin:
+                        is_retour_fictif = heure_depart_retour < engine.dt_debut
                         event_counter += 1
-                        heapq.heappush(evenements, (heure_dispo_retour, event_counter, "tentative_mouvement", {
+                        heapq.heappush(evenements, (heure_depart_retour, event_counter, "tentative_mouvement", {
                             "id_train": id_train, "mission": mission_cfg, "mission_id": mission_id,
                             "trajet_spec": "retour", "index_etape": 0, "retry_count": 0,
                             "is_trajet_fictif": is_retour_fictif,
                         }))
             else:
+                # Retournement au terminus A (origine) — pas de cadencement requis,
+                # les départs aller sont déjà sur grille.
+                buf_a = _buffer_directionnel(mission_id, "A")
                 t_ret_min = mission_cfg.get("temps_retournement_A", 10)
-                trains[id_train]["dispo_a"] = heure_arrivee_mission + timedelta(minutes=t_ret_min + buf)
+                trains[id_train]["dispo_a"] = heure_arrivee_mission + timedelta(minutes=t_ret_min + buf_a)
 
     trains_a_supprimer = [tid for tid, trajets in chronologie_reelle.items() if not trajets]
     for tid in trains_a_supprimer:
@@ -1123,8 +1263,73 @@ def executer_simulation_evenementielle(
     return chronologie_reelle, warnings, stats_homogeneite
 
 
-def _score_chronologie_bruit(chronologie, warnings, max_arret_ligne_min=5):
-    """Score bas niveau sans appel Streamlit — utilisé par l'optimisation interne."""
+def _calculer_exces_parcours(chronologie, durees_theoriques):
+    """Somme (minutes) du temps de parcours excédentaire vs la durée théorique.
+
+    Découpe chaque rame en courses sur les frontières ``is_mission_start`` et
+    compare la durée réelle (du départ de la course à l'arrivée du dernier
+    segment de circulation) à la durée théorique de la mission/sens. L'excès
+    capture aussi bien les arrêts stratégiques aux VE que les attentes subies en
+    ligne, puisque tous deux repoussent les segments suivants.
+
+    Args:
+        chronologie (dict): {train_id: [segments]}.
+        durees_theoriques (dict): {label_mission: duree_min}, label au format
+            "Origine → Terminus" (sens inclus dans la flèche).
+
+    Returns:
+        float: total des minutes excédentaires (toujours ≥ 0 par course).
+    """
+    if not chronologie or not durees_theoriques:
+        return 0.0
+
+    total = 0.0
+    for trajets in chronologie.values():
+        if not trajets:
+            continue
+        trajets_tries = sorted(trajets, key=lambda x: x['start'])
+
+        # Découpage en courses : chaque is_mission_start ouvre une nouvelle course.
+        courses = []
+        current = None
+        for t in trajets_tries:
+            if t.get('is_mission_start'):
+                if current is not None:
+                    courses.append(current)
+                current = [t]
+            elif current is not None:
+                current.append(t)
+        if current is not None:
+            courses.append(current)
+
+        for segs in courses:
+            # Segments de circulation = origine != terminus (on exclut les arrêts).
+            travel = [s for s in segs if s['origine'] != s['terminus']]
+            if not travel:
+                continue
+            label = travel[0]['mission']
+            theo = durees_theoriques.get(label)
+            if not theo or theo <= 0:
+                continue
+            span = (travel[-1]['end'] - travel[0]['start']).total_seconds() / 60.0
+            exces = span - theo
+            if exces > 0:
+                total += exces
+
+    return total
+
+
+def _score_chronologie_bruit(chronologie, warnings, max_arret_ligne_min=5,
+                             durees_theoriques=None):
+    """Score bas niveau sans appel Streamlit — utilisé par l'optimisation interne.
+
+    Le terme de temps de parcours (``durees_theoriques``) crée le gradient
+    « trajets plus courts » : chaque minute d'attente (subie OU stratégique) est
+    comptée une seule fois, au même tarif, via l'excès de parcours. La pénalité
+    quadratique d'arrêt n'intervient plus qu'au-delà du plafond utilisateur
+    (``max_arret_ligne_min``) pour faire respecter cette borne, sur les deux
+    types d'attente indifféremment.
+    """
     nb_rames = len(chronologie) if chronologie else 0
     nb_violations = len(warnings.get("infra_violations", []))
     nb_fails = len(warnings.get("other", []))
@@ -1138,7 +1343,10 @@ def _score_chronologie_bruit(chronologie, warnings, max_arret_ligne_min=5):
             count += 1
     avg_gini = avg_gini / count if count > 0 else 1.0
 
-    penalty_arrets_ligne = 0.0
+    # Pénalité de dépassement du plafond d'arrêt (stratégique ou subi) + promesses
+    # de VE non tenues. La composante linéaire (ancien 50/min) est remplacée par
+    # le terme de temps de parcours ci-dessous, qui couvre les deux cas.
+    penalty_overflow = 0.0
     violated_count = 0
     if chronologie:
         for steps in chronologie.values():
@@ -1146,16 +1354,18 @@ def _score_chronologie_bruit(chronologie, warnings, max_arret_ligne_min=5):
                 if step.get('crossing_assignment_violated'):
                     violated_count += 1
                 ext = step.get('crossing_extension_min', 0)
-                if ext <= 0:
-                    continue
-                if ext <= max_arret_ligne_min:
-                    penalty_arrets_ligne += ext * 50.0
-                else:
+                if ext > max_arret_ligne_min:
                     over = ext - max_arret_ligne_min
-                    penalty_arrets_ligne += max_arret_ligne_min * 50.0 + (over ** 2) * 800.0
-    penalty_arrets_ligne += violated_count * 1500
+                    penalty_overflow += (over ** 2) * 800.0
+    # Fallback de VE préférée : signal léger « ce génome promet une VE qu'il ne
+    # tient pas » (recalibré de 1500 → 300 pour ne pas écraser le terme Gini).
+    penalty_overflow += violated_count * 300
 
-    return nb_rames * 2000 + nb_violations * 50000 + nb_fails * 3000 - avg_gini * 3000 + penalty_arrets_ligne
+    # Terme de temps de parcours excédentaire (gradient principal).
+    penalty_parcours = _calculer_exces_parcours(chronologie, durees_theoriques) * POIDS_EXCES_PARCOURS
+
+    return (nb_rames * 2000 + nb_violations * 50000 + nb_fails * 3000
+            - avg_gini * 3000 + penalty_overflow + penalty_parcours)
 
 
 def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
