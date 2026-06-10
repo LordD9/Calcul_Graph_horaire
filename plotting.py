@@ -18,9 +18,14 @@ import matplotlib.gridspec as gridspec
 
 # Import des fonctions de calcul physique
 try:
-    from energy_logic import find_implicit_v_cruise, get_physical_profile
+    from energy_logic import (
+        find_implicit_v_cruise,
+        find_v_cruise_no_decel,
+        get_physical_profile,
+    )
 except ImportError:
     find_implicit_v_cruise = None
+    find_v_cruise_no_decel = None
     get_physical_profile = None
 
 
@@ -236,19 +241,33 @@ def creer_graphique_horaire(
                     distance_m = abs(end_dist_km - start_dist_km) * 1000
                     dist_sign = 1 if end_dist_km > start_dist_km else -1
 
-                    # Vitesses cibles
-                    v_end_kph_target = 0 if is_explicit_stop_after else v_start_kph
+                    # Vitesse de croisière + vitesse de sortie.
+                    # Si arrêt après ce segment, profil accel/cruise/decel
+                    # classique (v_end_real = 0). Sinon, c'est une transition
+                    # sans arrêt (point de passage) : pas de phase de
+                    # décélération, sinon le train ralentirait visuellement
+                    # jusqu'à 0 puis "sauterait" à v_cruise au segment suivant
+                    # — c'est ce qui faisait apparaître un faux arrêt aux
+                    # points de passage. v_end_real = v_cruise assure la
+                    # continuité de pente au point de passage.
+                    if is_explicit_stop_after:
+                        v_cruise_kph = find_implicit_v_cruise(
+                            distance_m, v_start_kph, 0,
+                            params['accel_ms2'], params['decel_ms2'], temps_reel_sec
+                        )
+                        v_end_kph_real = 0
+                    else:
+                        v_cruise_kph = find_v_cruise_no_decel(
+                            distance_m, v_start_kph,
+                            params['accel_ms2'], temps_reel_sec
+                        ) if find_v_cruise_no_decel is not None else find_implicit_v_cruise(
+                            distance_m, v_start_kph, v_start_kph,
+                            params['accel_ms2'], params['decel_ms2'], temps_reel_sec
+                        )
+                        v_end_kph_real = v_cruise_kph
 
-                    # Calcul de la vitesse de croisière optimale
-                    v_cruise_kph = find_implicit_v_cruise(
-                        distance_m, v_start_kph, v_end_kph_target,
-                        params['accel_ms2'], params['decel_ms2'], temps_reel_sec
-                    )
-
-                    # Vitesse finale réelle
-                    v_end_kph_real = 0 if is_explicit_stop_after else v_cruise_kph
-
-                    # Profil physique
+                    # Profil physique (avec v_end = v_cruise → pas de phase
+                    # de décélération dans _calculate_phases côté non-arrêt).
                     profile = get_physical_profile(
                         distance_m, v_start_kph, v_end_kph_real, v_cruise_kph,
                         params['accel_ms2'], params['decel_ms2']

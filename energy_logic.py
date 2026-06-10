@@ -208,6 +208,39 @@ def find_implicit_v_cruise(distance_m, v_start_kph, v_end_kph,
     return 0.5 * (v_low + v_high)
 
 
+def find_v_cruise_no_decel(distance_m, v_start_kph, accel_ms2, t_target_sec,
+                            v_max_kph=DEFAULT_V_MAX_KPH):
+    """
+    Trouve la vitesse de croisière pour un segment qui se TERMINE en plein
+    mouvement (transition vers un point de passage sans arrêt) : profil
+    accélération + croisière, sans phase de décélération finale.
+
+    Le train entre à v_start_kph, accélère jusqu'à v_cruise puis croise
+    jusqu'au bout. v_end == v_cruise. Sortie : v_cruise_kph (clampée).
+
+    Résolution : ``0.5*(v_s + v_c)*(v_c - v_s)/a + v_c*(t - (v_c - v_s)/a) = d``
+    se réécrit ``v_c² - 2*v_c*(v_s + t*a) + (v_s² + 2*d*a) = 0``. On prend la
+    plus petite racine (l'autre est non physique : v > v_max).
+    """
+    if distance_m <= 0 or t_target_sec <= 0:
+        return max(v_start_kph, 0.1)
+    v_start_ms = max(0.0, v_start_kph / 3.6)
+    a = max(0.01, accel_ms2)
+    b = v_start_ms + t_target_sec * a
+    discriminant = b * b - (v_start_ms * v_start_ms + 2.0 * distance_m * a)
+    if discriminant < 0:
+        # Train trop lent pour couvrir la distance dans le temps imparti :
+        # on retourne v_max (le tracé se contentera de cruise constant).
+        return v_max_kph
+    v_c_ms = b - math.sqrt(discriminant)
+    v_c_kph = v_c_ms * 3.6
+    if v_c_kph < v_start_kph:
+        return v_start_kph
+    if v_c_kph > v_max_kph:
+        return v_max_kph
+    return v_c_kph
+
+
 # =============================================================================
 # Logique de calcul de consommation
 # =============================================================================

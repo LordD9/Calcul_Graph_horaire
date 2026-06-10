@@ -1251,10 +1251,24 @@ def _construire_horaire_mission_impl(mission, direction, df_gares):
             t_trajet = mission.get('temps_trajet_retour', t_trajet)
             pass_pts = mission.get('passing_points_retour', [])
         else:
-            pass_pts = [{"gare": p["gare"], 
-                        "time_offset_min": t_trajet - p["time_offset_min"],
+            # Inversion symétrique : on conserve les temps de marche segment par
+            # segment entre l'aller et le retour. La formule naïve
+            # ``t_trajet - p["time_offset_min"]`` ajoutait l'arrêt du point au
+            # segment qui le précédait sur le retour, ce qui allongeait
+            # artificiellement ce segment de ``duree_arret_min`` minutes
+            # (visible : décélération étirée / "rupture" mi-segment au tracé
+            #  énergie, et asymétrie aller/retour sans raison apparente).
+            # Démonstration : sur l'aller, arrivée X→Y vaut t(Y) - t(X) - D(X)
+            # car l'arrêt D(X) se produit *après* l'arrivée à X. Pour que le
+            # retour ait le même temps de marche entre les mêmes gares, il faut
+            # retrancher D au moment de l'inversion temporelle.
+            pass_pts = [{"gare": p["gare"],
+                        "time_offset_min": (
+                            t_trajet - p["time_offset_min"]
+                            - (p.get("duree_arret_min", 0) if p.get("arret_commercial", False) else 0)
+                        ),
                         "arret_commercial": p.get("arret_commercial", False),
-                        "duree_arret_min": p.get("duree_arret_min", 0)} 
+                        "duree_arret_min": p.get("duree_arret_min", 0)}
                        for p in reversed(pass_pts)]
     
     pts = [{"gare": o, "time_offset_min": 0, "duree_arret_min": 0}]
