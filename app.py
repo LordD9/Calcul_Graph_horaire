@@ -506,10 +506,15 @@ with st.expander("1. Gares et Infrastructure", expanded=True):
                         "- rampe_section_a_venir: Pente en ‰ (ex: -8 ou 8)"
             default_text = "Nîmes;0;VE;C1500;5\nVauvert;20;D;F;-3\nLe Grau-du-Roi;50;VE;R500;0"
 
+        # Initialisation unique du buffer texte ; le chargement d'un scénario
+        # réécrit cette clé via scenarios_manager.apply_scenario_to_session.
+        if "gares_texte_input" not in st.session_state:
+            st.session_state["gares_texte_input"] = default_text
+
         gares_texte = st.text_area(
             "Liste des gares (une par ligne)",
-            default_text,
-            help=help_text
+            key="gares_texte_input",
+            help=help_text,
         )
 
         if st.form_submit_button("Valider les gares et l'infrastructure"):

@@ -161,6 +161,11 @@ def apply_scenario_to_session(scenario: dict, st_session) -> None:
         df = df.sort_values("distance").reset_index(drop=True)
     st_session["gares"] = df
 
+    # Synchronise le texte du formulaire "Liste des gares" avec l'infra chargée,
+    # sinon le text_area continue d'afficher la valeur par défaut et un clic
+    # involontaire sur "Valider" écraserait l'infra du scénario.
+    st_session["gares_texte_input"] = format_gares_text(df)
+
     # Missions
     st_session["missions"] = [dict(m) for m in scenario.get("missions", [])]
 
@@ -276,6 +281,32 @@ def default_download_filename(scenario: dict) -> str:
     if slug:
         return slug + ".json"
     return "chronofer_scenario_" + datetime.now().strftime("%Y%m%d_%H%M") + ".json"
+
+
+def format_gares_text(df_gares) -> str:
+    """Reconstruit le contenu du text_area "Liste des gares" à partir du DataFrame.
+
+    Format Calcul Energie : ``nom;distance;infra;electrification;rampe``.
+    Format Standard : ``nom;distance;infra``. Le mode est détecté via la
+    présence de la colonne ``electrification``.
+    """
+    if df_gares is None or df_gares.empty:
+        return ""
+    is_energy = "electrification" in df_gares.columns
+    lines = []
+    for _, row in df_gares.iterrows():
+        nom = str(row.get("gare", "")).strip()
+        distance = row.get("distance", "")
+        infra = row.get("infra") or ""
+        if is_energy:
+            electr = row.get("electrification") or "F"
+            rampe = row.get("rampe_section_a_venir", 0)
+            if pd.isna(rampe):
+                rampe = 0
+            lines.append(f"{nom};{distance};{infra};{electr};{rampe}")
+        else:
+            lines.append(f"{nom};{distance};{infra}")
+    return "\n".join(lines)
 
 
 def _reset_session_for_scenario_load(st_session) -> None:
