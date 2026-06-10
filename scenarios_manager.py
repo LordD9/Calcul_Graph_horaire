@@ -169,6 +169,19 @@ def apply_scenario_to_session(scenario: dict, st_session) -> None:
     # Missions
     st_session["missions"] = [dict(m) for m in scenario.get("missions", [])]
 
+    # Pré-remplissage du mode "Saisie manuelle par lot" pour chaque mission.
+    # Le mode "Interface Guidée" ne sait pas relire les passing_points (ses
+    # widgets utilisent des valeurs par défaut indépendantes), donc on force le
+    # mode bulk et on écrit le texte attendu par le parser de app.py.
+    for idx, m in enumerate(st_session["missions"]):
+        bulk_text = format_mission_to_bulk_text(m, mode_calcul="Calcul Energie")
+        m["pp_raw_text"] = bulk_text
+        st_session[f"pp_raw_{idx}"] = bulk_text
+        # _prev_pp_raw_{idx} = bulk_text empêche l'auto-update de tt{idx}
+        # de s'exécuter au premier rendu (texte considéré "déjà appliqué").
+        st_session[f"_prev_pp_raw_{idx}"] = bulk_text
+        st_session[f"saisie_pp_{idx}"] = "Saisie manuelle par lot"
+
     # Heures de service
     svc = scenario.get("service", {})
     h_deb = _parse_time(svc.get("heure_debut"))
@@ -309,6 +322,62 @@ def format_gares_text(df_gares) -> str:
     return "\n".join(lines)
 
 
+def format_mission_to_bulk_text(mission: dict, mode_calcul: str = "Calcul Energie") -> str:
+    """Convertit les points de passage d'une mission en texte pour le mode
+    "Saisie manuelle par lot".
+
+    Format Calcul Energie : ``gare;t_aller;arret_aller[;t_retour;arret_retour]``.
+    Format Standard       : ``gare;t_aller[;t_retour]``.
+
+    Les gares présentes dans l'aller et le retour sont fusionnées sur une seule
+    ligne. Les gares présentes uniquement dans le retour (cas inhabituel) sont
+    émises avec des zéros côté aller — l'utilisateur devra corriger à la main.
+    """
+    aller_pp = mission.get("passing_points") or []
+    retour_pp = mission.get("passing_points_retour") or []
+    retour_by_gare = {pp.get("gare"): pp for pp in retour_pp if pp.get("gare")}
+
+    is_energy = mode_calcul == "Calcul Energie"
+    lines = []
+    used_retour = set()
+
+    for pp in aller_pp:
+        gare = pp.get("gare")
+        if not gare:
+            continue
+        t_a = pp.get("time_offset_min", 0)
+        ar_a = int(pp.get("duree_arret_min") or 0)
+        ret = retour_by_gare.get(gare)
+        if is_energy:
+            if ret is not None:
+                t_r = ret.get("time_offset_min", 0)
+                ar_r = int(ret.get("duree_arret_min") or 0)
+                lines.append(f"{gare};{t_a};{ar_a};{t_r};{ar_r}")
+                used_retour.add(gare)
+            else:
+                lines.append(f"{gare};{t_a};{ar_a}")
+        else:
+            if ret is not None:
+                t_r = ret.get("time_offset_min", 0)
+                lines.append(f"{gare};{t_a};{t_r}")
+                used_retour.add(gare)
+            else:
+                lines.append(f"{gare};{t_a}")
+
+    for pp in retour_pp:
+        gare = pp.get("gare")
+        if not gare or gare in used_retour:
+            continue
+        t_r = pp.get("time_offset_min", 0)
+        ar_r = int(pp.get("duree_arret_min") or 0)
+        if is_energy:
+            lines.append(f"{gare};0;0;{t_r};{ar_r}")
+        else:
+            lines.append(f"{gare};0;{t_r}")
+
+    return "\n".join(lines)
+
+
 def _reset_session_for_scenario_load(st_session) -> None:
     """Vide les états calculés et les clés UI dépendant des missions."""
     for k in ("chronologie_calculee", "warnings_calcul", "stats_homogeneite"):
@@ -318,7 +387,10 @@ def _reset_session_for_scenario_load(st_session) -> None:
         st_session["energy_errors"] = []
     st_session["run_calculation"] = False
 
-    # Suppression des clés UI dynamiques indexées par mission
+    # Suppression des clés UI dynamiques indexées par mission. Sans ce nettoyage,
+    # les valeurs persistées d'un précédent scénario écrasent les valeurs par
+    # défaut lues depuis mission.get(...) et peuvent violer les bornes (min/max)
+    # du nouveau scénario.
     patterns = (
         re.compile(r"^tt\d+$"),
         re.compile(r"^tt_retour_\d+$"),
@@ -328,6 +400,22 @@ def _reset_session_for_scenario_load(st_session) -> None:
         re.compile(r"^orig\d+$"),
         re.compile(r"^term\d+$"),
         re.compile(r"^freq\d+$"),
+        re.compile(r"^tr_a_\d+$"),
+        re.compile(r"^tr_b_\d+$"),
+        re.compile(r"^type_mat_\d+$"),
+        re.compile(r"^ref_mins\d+$"),
+        re.compile(r"^inj_t2_\d+$"),
+        re.compile(r"^asym_\d+$"),
+        re.compile(r"^n_pass_\d+$"),
+        re.compile(r"^n_pass_retour_\d+$"),
+        re.compile(r"^pp_gare_\d+_\d+$"),
+        re.compile(r"^pp_tps_\d+_\d+$"),
+        re.compile(r"^pp_arret_\d+_\d+$"),
+        re.compile(r"^pp_duree_arret_\d+_\d+$"),
+        re.compile(r"^pp_gare_retour_\d+_\d+$"),
+        re.compile(r"^pp_tps_retour_\d+_\d+$"),
+        re.compile(r"^pp_arret_r_\d+_\d+$"),
+        re.compile(r"^pp_duree_arret_r_\d+_\d+$"),
     )
     to_delete = [k for k in list(st_session.keys())
                  if any(p.match(k) for p in patterns)]
