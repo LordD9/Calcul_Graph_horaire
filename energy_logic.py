@@ -473,9 +473,14 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
             total_distance_km += distance_km
 
             # Analyse Infra Segment (simplifiée au départ)
-            electrification_dep = info_depart.get("electrification", "F").upper()
-            is_catenary_segment = electrification_dep in ["C1500", "C25"]
-            puissance_infra_kw = _get_puissance_infra(electrification_dep)
+            # L'infrastructure est définie par la gare au kilométrage le plus faible
+            if info_arrivee.get('distance', 0) < info_depart.get('distance', 0):
+                electrification_seg = info_arrivee.get("electrification", "F").upper()
+            else:
+                electrification_seg = info_depart.get("electrification", "F").upper()
+            
+            is_catenary_segment = electrification_seg in ["C1500", "C25"]
+            puissance_infra_kw = _get_puissance_infra(electrification_seg)
 
             # -- Calcul Profil Vitesse --
             v_initiale_kph = v_precedente_kph
@@ -580,7 +585,7 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
                     limite_txt = "Infra" if p_dispo_charge < puissance_max_batterie_kw else "Capacité Charge"
                     if math.isclose(niveau_batterie_kwh, niveau_max_kwh): limite_txt = "Batterie Pleine"
 
-                    log_msg = f"Traction sous caténaire ({electrification_dep}) | {distance_km:.1f} km | Conso. train: {conso_totale_segment:.1f} kWh | ΔBatt: +{gain_net:.1f} kWh [{limite_txt}]"
+                    log_msg = f"Traction sous caténaire ({electrification_seg}) | {distance_km:.1f} km | Conso. train: {conso_totale_segment:.1f} kWh | ΔBatt: +{gain_net:.1f} kWh [{limite_txt}]"
                 else:
                     # Décharge
                     niveau_batterie_kwh -= conso_totale_segment
