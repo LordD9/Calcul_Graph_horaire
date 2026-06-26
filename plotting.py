@@ -522,21 +522,36 @@ def creer_graphique_batterie(batterie_log, train_id, soc_min_pct=20, soc_max_pct
     ax_soc.axhline(y=soc_max_pct, color='#1f77b4', linestyle='--', linewidth=1, alpha=0.8, label=f'SoC max {soc_max_pct}%')
     ax_soc.axhline(y=soc_min_pct, color='#d62728', linestyle='--', linewidth=1, alpha=0.8, label=f'SoC min {soc_min_pct}%')
 
+    # Assignation de couleurs aux terminaux uniques
+    unique_terminuses = []
+    for is_stat, nom_gare in stats:
+        if is_stat and nom_gare and nom_gare not in unique_terminuses:
+            unique_terminuses.append(nom_gare)
+            
+    cmap = plt.get_cmap('tab10')
+    terminus_colors = {gare: cmap(i % 10) for i, gare in enumerate(unique_terminuses)}
+    seen_terminuses = set()
+
     # Visualisation des terminus
     for i in range(1, len(times)):
         is_stat, nom_gare = stats[i]
         if is_stat and nom_gare:
             t_start = times[i-1]
             t_end = times[i]
-            ax_soc.axvspan(t_start, t_end, color='gray', alpha=0.15)
-            mid_time = t_start + (t_end - t_start) / 2
-            ax_soc.text(mid_time, 98, f"{nom_gare}", rotation=90, va='top', ha='center', fontsize=8, color='#444444')
+            color = terminus_colors[nom_gare]
+            
+            label = f"Terminus {nom_gare}" if nom_gare not in seen_terminuses else None
+            seen_terminuses.add(nom_gare)
+            
+            ax_soc.axvspan(t_start, t_end, color=color, alpha=0.3, label=label)
 
     ax_soc.set_ylim(-5, 105)
     ax_soc.set_ylabel('Batterie (%)')
     ax_soc.set_title(f'Profil de charge - Train {train_id}')
     ax_soc.grid(True, linestyle=':', alpha=0.6)
-    ax_soc.legend(loc='lower left', fontsize='small', frameon=False)
+    
+    # Légende placée intelligemment pour ne pas trop cacher la courbe
+    ax_soc.legend(loc='best', fontsize='small', frameon=True, framealpha=0.8)
 
     # --- 2. Graphique Puissance de Charge ---
     ax_pwr.step(times, p_charges, where='pre', color='#ff7f0e', linewidth=1.5, label='Puissance (C)')
