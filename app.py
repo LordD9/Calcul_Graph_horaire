@@ -2092,10 +2092,10 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
 
                                 durees = ["—"] + [_fmt_dur(times[i] - times[i-1]) for i in range(1, len(times))]
 
-                                df_log = pd.DataFrame(raw_log, columns=["_heure_fin", "Niveau kWh", "SoC", "Événement"])
+                                df_log = pd.DataFrame(raw_log, columns=["_heure_fin", "Niveau kWh", "SoC", "Événement", "P Charge (C)", "Is Stat", "Gare"])
                                 df_log.insert(0, "Heure début", [t.strftime("%H:%M") if isinstance(t, datetime) else str(t) for t in heures_debut])
                                 df_log.insert(1, "Durée", durees)
-                                df_log.drop(columns=["_heure_fin"], inplace=True)
+                                df_log.drop(columns=["_heure_fin", "P Charge (C)", "Is Stat", "Gare"], inplace=True)
                                 df_log["Niveau kWh"] = df_log["Niveau kWh"].apply(lambda x: f"{x:.1f}")
 
                                 st.dataframe(df_log, width="stretch")

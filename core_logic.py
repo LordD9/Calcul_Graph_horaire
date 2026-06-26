@@ -1645,7 +1645,7 @@ def _add_logo_to_figure(fig, logo_img):
     ri = np.clip((np.arange(target_h) * logo_h / target_h + 0.5).astype(int), 0, logo_h - 1)
     ci = np.clip((np.arange(target_w) * logo_w / target_w + 0.5).astype(int), 0, logo_w - 1)
     logo_resampled = logo_img[np.ix_(ri, ci)]
-    fig.figimage(logo_resampled, xo=10, yo=10, zorder=10)
+    return fig.figimage(logo_resampled, xo=10, yo=10, zorder=10)
 
 
 def generer_exports(chronologie, figure, figures_batterie=None, logo_path=None):
@@ -1680,9 +1680,12 @@ def generer_exports(chronologie, figure, figures_batterie=None, logo_path=None):
     if all_figures:
         with PdfPages(bp) as pdf:
             for fig in all_figures:
+                logo_patch = None
                 if logo_img is not None:
-                    _add_logo_to_figure(fig, logo_img)
+                    logo_patch = _add_logo_to_figure(fig, logo_img)
                 pdf.savefig(fig, bbox_inches='tight', dpi=_PDF_DPI)
+                if logo_patch is not None and logo_patch in fig.images:
+                    fig.images.remove(logo_patch)
     bp.seek(0)
 
     return bx, bp

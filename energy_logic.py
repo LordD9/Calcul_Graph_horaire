@@ -427,15 +427,18 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
 
         # Ajouter au log
         pct = (nouveau_niveau / capacite_max_kwh) * 100
-        log_batterie.append((heure_fin, nouveau_niveau, f"{pct:.1f}%", log_msg))
+        p_charge_C = 0.0
+        if duree_h > 0 and 'energie_rechargee_reelle' in locals() and energie_rechargee_reelle > 0:
+            p_charge_C = (energie_rechargee_reelle / duree_h) / capacite_max_kwh
+        log_batterie.append((heure_fin, nouveau_niveau, f"{pct:.1f}%", log_msg, p_charge_C, True, nom_gare))
 
         return nouveau_niveau
 
 
     # Log initial
-    ajouter_log_batt = lambda h, k, m: log_batterie.append((h, k, f"{(k/capacite_max_kwh)*100:.1f}%", m))
+    ajouter_log_batt = lambda h, k, m, p=0.0, is_stat=False, gare="": log_batterie.append((h, k, f"{(k/capacite_max_kwh)*100:.1f}%", m, p, is_stat, gare))
     eol_label = f" [Fin de vie {capacite_eol_pct}%]" if simuler_eol else ""
-    ajouter_log_batt(trajets_train[0]["start"], niveau_batterie_kwh, f"Départ Mission{eol_label}")
+    ajouter_log_batt(trajets_train[0]["start"], niveau_batterie_kwh, f"Départ Mission{eol_label}", 0.0, True, trajets_train[0].get("origine", ""))
 
     v_precedente_kph = 0
 
@@ -586,15 +589,19 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
                     if math.isclose(niveau_batterie_kwh, niveau_max_kwh): limite_txt = "Batterie Pleine"
 
                     log_msg = f"Traction sous caténaire ({electrification_seg}) | {distance_km:.1f} km | Conso. train: {conso_totale_segment:.1f} kWh | ΔBatt: +{gain_net:.1f} kWh [{limite_txt}]"
+                    p_charge_C = 0.0
+                    if duree_planifiee_h > 0 and gain_net > 0:
+                        p_charge_C = (gain_net / duree_planifiee_h) / capacite_max_kwh
                 else:
                     # Décharge
                     niveau_batterie_kwh -= conso_totale_segment
                     niveau_batterie_kwh += recup_possible_kwh
                     delta_batt = conso_totale_segment - recup_possible_kwh
                     log_msg = f"Traction sur batterie | {distance_km:.1f} km | Conso. train: {conso_totale_segment:.1f} kWh, Récup: +{recup_possible_kwh:.1f} kWh | ΔBatt: -{delta_batt:.1f} kWh"
+                    p_charge_C = 0.0
 
                 niveau_batterie_kwh = max(niveau_min_kwh, min(niveau_batterie_kwh, niveau_max_kwh))
-                ajouter_log_batt(trajet["end"], niveau_batterie_kwh, log_msg)
+                ajouter_log_batt(trajet["end"], niveau_batterie_kwh, log_msg, p_charge_C, False, "")
 
                 if niveau_batterie_kwh <= niveau_min_kwh + 0.1:
                     erreurs.append(f"Batterie au seuil minimum à {gare_arrivee_nom}!")

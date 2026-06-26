@@ -489,53 +489,69 @@ def creer_graphique_horaire(
 
 def creer_graphique_batterie(batterie_log, train_id, soc_min_pct=20, soc_max_pct=95):
     """
-    Génère un graphique d'évolution du SoC (State of Charge) pour un train donné.
-    Affiche le % de batterie en fonction du temps, avec seuils 20% et 80%.
-
-    Args:
-        batterie_log (list): Liste de tuples [(datetime, kwh, soc_str, msg), ...]
-        train_id (int/str): Identifiant du train pour le titre
-
-    Returns:
-        fig (matplotlib.figure.Figure)
+    Génère un graphique d'évolution du SoC (State of Charge) et de la puissance de charge pour un train.
     """
     if not batterie_log:
         return None
 
-    # Extraction des données
     times = [x[0] for x in batterie_log]
-    # Parsing du SoC (ex: "85.5%" -> 85.5)
     socs = []
+    p_charges = []
+    stats = []
+
     for x in batterie_log:
         try:
             val = float(x[2].strip('%'))
         except:
             val = 0.0
         socs.append(val)
+        if len(x) > 4:
+            p_charges.append(x[4])
+            stats.append((x[5], x[6]))
+        else:
+            p_charges.append(0.0)
+            stats.append((False, ""))
 
-    # Création figure
-    fig, ax = plt.subplots(figsize=(10, 3))
+    # Création figure avec 2 subplots
+    fig, (ax_soc, ax_pwr) = plt.subplots(2, 1, figsize=(10, 5), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
 
-    # Courbe principale
-    ax.plot(times, socs, color='#2ca02c', linewidth=2, label='SoC (%)')
-    ax.fill_between(times, socs, alpha=0.2, color='#2ca02c')
+    # --- 1. Graphique SoC ---
+    ax_soc.plot(times, socs, color='#2ca02c', linewidth=2, label='SoC (%)')
+    ax_soc.fill_between(times, socs, alpha=0.2, color='#2ca02c')
 
-    # Lignes de seuil (plage d'utilisation configurée)
-    ax.axhline(y=soc_max_pct, color='#1f77b4', linestyle='--', linewidth=1, alpha=0.8, label=f'SoC max {soc_max_pct}%')
-    ax.axhline(y=soc_min_pct, color='#d62728', linestyle='--', linewidth=1, alpha=0.8, label=f'SoC min {soc_min_pct}%')
+    ax_soc.axhline(y=soc_max_pct, color='#1f77b4', linestyle='--', linewidth=1, alpha=0.8, label=f'SoC max {soc_max_pct}%')
+    ax_soc.axhline(y=soc_min_pct, color='#d62728', linestyle='--', linewidth=1, alpha=0.8, label=f'SoC min {soc_min_pct}%')
 
-    # Formatage
-    ax.set_ylim(-5, 105)
-    ax.set_ylabel('Batterie (%)')
-    ax.set_title(f'Profil de charge - Train {train_id}')
-    ax.grid(True, linestyle=':', alpha=0.6)
-    ax.legend(loc='lower center', ncol=3, bbox_to_anchor=(0.5, -0.4), fontsize='small', frameon=False)
+    # Visualisation des terminus
+    for i in range(1, len(times)):
+        is_stat, nom_gare = stats[i]
+        if is_stat and nom_gare:
+            t_start = times[i-1]
+            t_end = times[i]
+            ax_soc.axvspan(t_start, t_end, color='gray', alpha=0.15)
+            mid_time = t_start + (t_end - t_start) / 2
+            ax_soc.text(mid_time, 98, f"{nom_gare}", rotation=90, va='top', ha='center', fontsize=8, color='#444444')
 
-    # Formatage temporel
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
-    plt.setp(ax.get_xticklabels(), rotation=0, ha="center")
+    ax_soc.set_ylim(-5, 105)
+    ax_soc.set_ylabel('Batterie (%)')
+    ax_soc.set_title(f'Profil de charge - Train {train_id}')
+    ax_soc.grid(True, linestyle=':', alpha=0.6)
+    ax_soc.legend(loc='lower left', fontsize='small', frameon=False)
 
-    # Ajustement des marges
+    # --- 2. Graphique Puissance de Charge ---
+    ax_pwr.step(times, p_charges, where='pre', color='#ff7f0e', linewidth=1.5, label='Puissance (C)')
+    ax_pwr.fill_between(times, p_charges, step='pre', alpha=0.2, color='#ff7f0e')
+    
+    # Pour avoir un axe bien cadré s'il y a très peu de puissance (ex: 0 à 1 C)
+    max_p = max(p_charges) if p_charges else 0
+    ax_pwr.set_ylim(-0.1, max(max_p * 1.2, 1.0))
+    ax_pwr.set_ylabel('Charge (C)')
+    ax_pwr.grid(True, linestyle=':', alpha=0.6)
+    ax_pwr.legend(loc='upper right', fontsize='small', frameon=False)
+
+    # Formatage temporel (sur le dernier axe)
+    ax_pwr.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    plt.setp(ax_pwr.get_xticklabels(), rotation=0, ha="center")
+
     plt.tight_layout()
-
     return fig
