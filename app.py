@@ -1969,7 +1969,8 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
                                 soc_min_pct=bat_params_pdf.get("soc_min_pct", 20),
                                 soc_max_pct=bat_params_pdf.get("soc_max_pct", 95),
                                 terminaux_valides=terminaux_valides,
-                                max_c_rate=max_c
+                                max_c_rate=max_c,
+                                df_gares=dataframe_gares
                             )
                             if _fig_b:
                                 figures_batterie_pdf.append(_fig_b)

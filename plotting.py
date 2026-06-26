@@ -487,7 +487,7 @@ def creer_graphique_horaire(
     fig.subplots_adjust(right=0.85)
     return fig
 
-def creer_graphique_batterie(batterie_log, train_id, soc_min_pct=20, soc_max_pct=95, terminaux_valides=None, max_c_rate=4.0):
+def creer_graphique_batterie(batterie_log, train_id, soc_min_pct=20, soc_max_pct=95, terminaux_valides=None, max_c_rate=4.0, df_gares=None):
     """
     Génère un graphique d'évolution du SoC (State of Charge) et de la puissance de charge pour un train.
     """
@@ -496,6 +496,17 @@ def creer_graphique_batterie(batterie_log, train_id, soc_min_pct=20, soc_max_pct
 
     if terminaux_valides is None:
         terminaux_valides = set()
+
+    gares_info = {}
+    if df_gares is not None:
+        try:
+            gares_info = df_gares.set_index('gare').to_dict('index')
+        except:
+            pass
+
+    def is_electrified(nom):
+        elec = gares_info.get(nom, {}).get("electrification", "F").strip().upper()
+        return elec in ["C1500", "C25"] or elec.startswith("R")
 
     times = [x[0] for x in batterie_log]
     socs = []
@@ -543,7 +554,11 @@ def creer_graphique_batterie(batterie_log, train_id, soc_min_pct=20, soc_max_pct
             t_end = times[i]
             color = terminus_colors[nom_gare]
             
-            label = f"Terminus {nom_gare}" if nom_gare not in seen_terminuses else None
+            label_text = f"Terminus {nom_gare}"
+            if is_electrified(nom_gare):
+                label_text += " ⚡"
+                
+            label = label_text if nom_gare not in seen_terminuses else None
             seen_terminuses.add(nom_gare)
             
             ax_soc.axvspan(t_start, t_end, color=color, alpha=0.3, label=label)
