@@ -516,7 +516,7 @@ def creer_graphique_batterie(batterie_log, train_id, soc_min_pct=20, soc_max_pct
             stats.append((False, ""))
 
     # Création figure avec 2 subplots
-    fig, (ax_soc, ax_pwr) = plt.subplots(2, 1, figsize=(10, 5), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+    fig, (ax_soc, ax_pwr) = plt.subplots(2, 1, figsize=(10, 7), sharex=True, gridspec_kw={'height_ratios': [2, 1], 'hspace': 0.6})
 
     # --- 1. Graphique SoC ---
     ax_soc.plot(times, socs, color='#2ca02c', linewidth=2, label='SoC (%)')
@@ -552,6 +552,14 @@ def creer_graphique_batterie(batterie_log, train_id, soc_min_pct=20, soc_max_pct
     ax_soc.set_ylabel('Batterie (%)')
     ax_soc.set_title(f'Profil de charge - Train {train_id}')
     ax_soc.grid(True, linestyle=':', alpha=0.6)
+    
+    # Formatage temporel pour ax_soc
+    ax_soc.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    ax_soc.tick_params(axis='x', labelbottom=True)
+    plt.setp(ax_soc.get_xticklabels(), rotation=0, ha="center")
+    
+    # Légende pour ax_soc placée en dessous de ax_soc
+    ax_soc.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15), ncol=4, fontsize='small', frameon=False)
 
     # --- 2. Graphique Puissance de Charge ---
     ax_pwr.step(times, p_charges, where='pre', color='#ff7f0e', linewidth=1.5, label='Puissance (C)')
@@ -566,16 +574,14 @@ def creer_graphique_batterie(batterie_log, train_id, soc_min_pct=20, soc_max_pct
     ax_pwr.set_ylabel('Charge (C)')
     ax_pwr.grid(True, linestyle=':', alpha=0.6)
 
-    # Formatage temporel (sur le dernier axe)
+    # Formatage temporel pour ax_pwr
     ax_pwr.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
     plt.setp(ax_pwr.get_xticklabels(), rotation=0, ha="center")
 
-    # Légende globale sous le graphique
-    handles_soc, labels_soc = ax_soc.get_legend_handles_labels()
-    handles_pwr, labels_pwr = ax_pwr.get_legend_handles_labels()
-    fig.legend(handles_soc + handles_pwr, labels_soc + labels_pwr, loc='upper center', bbox_to_anchor=(0.5, 0.05), ncol=4, fontsize='small', frameon=False)
+    # Légende pour ax_pwr placée en dessous de ax_pwr
+    ax_pwr.legend(loc='upper center', bbox_to_anchor=(0.5, -0.3), ncol=2, fontsize='small', frameon=False)
 
     plt.tight_layout()
-    # Ajuster le bas pour faire de la place à la légende
-    plt.subplots_adjust(bottom=0.2)
+    # On ajoute de l'espace en bas pour la légende du graphique du bas
+    plt.subplots_adjust(bottom=0.15)
     return fig
