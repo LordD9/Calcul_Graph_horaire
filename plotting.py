@@ -487,12 +487,15 @@ def creer_graphique_horaire(
     fig.subplots_adjust(right=0.85)
     return fig
 
-def creer_graphique_batterie(batterie_log, train_id, soc_min_pct=20, soc_max_pct=95):
+def creer_graphique_batterie(batterie_log, train_id, soc_min_pct=20, soc_max_pct=95, terminaux_valides=None, max_c_rate=4.0):
     """
     Génère un graphique d'évolution du SoC (State of Charge) et de la puissance de charge pour un train.
     """
     if not batterie_log:
         return None
+
+    if terminaux_valides is None:
+        terminaux_valides = set()
 
     times = [x[0] for x in batterie_log]
     socs = []
@@ -522,10 +525,10 @@ def creer_graphique_batterie(batterie_log, train_id, soc_min_pct=20, soc_max_pct
     ax_soc.axhline(y=soc_max_pct, color='#1f77b4', linestyle='--', linewidth=1, alpha=0.8, label=f'SoC max {soc_max_pct}%')
     ax_soc.axhline(y=soc_min_pct, color='#d62728', linestyle='--', linewidth=1, alpha=0.8, label=f'SoC min {soc_min_pct}%')
 
-    # Assignation de couleurs aux terminaux uniques
+    # Assignation de couleurs aux terminaux valides uniquement
     unique_terminuses = []
     for is_stat, nom_gare in stats:
-        if is_stat and nom_gare and nom_gare not in unique_terminuses:
+        if is_stat and nom_gare and nom_gare in terminaux_valides and nom_gare not in unique_terminuses:
             unique_terminuses.append(nom_gare)
             
     cmap = plt.get_cmap('tab10')
@@ -535,7 +538,7 @@ def creer_graphique_batterie(batterie_log, train_id, soc_min_pct=20, soc_max_pct
     # Visualisation des terminus
     for i in range(1, len(times)):
         is_stat, nom_gare = stats[i]
-        if is_stat and nom_gare:
+        if is_stat and nom_gare and nom_gare in terminaux_valides:
             t_start = times[i-1]
             t_end = times[i]
             color = terminus_colors[nom_gare]
@@ -549,24 +552,30 @@ def creer_graphique_batterie(batterie_log, train_id, soc_min_pct=20, soc_max_pct
     ax_soc.set_ylabel('Batterie (%)')
     ax_soc.set_title(f'Profil de charge - Train {train_id}')
     ax_soc.grid(True, linestyle=':', alpha=0.6)
-    
-    # Légende placée intelligemment pour ne pas trop cacher la courbe
-    ax_soc.legend(loc='best', fontsize='small', frameon=True, framealpha=0.8)
 
     # --- 2. Graphique Puissance de Charge ---
     ax_pwr.step(times, p_charges, where='pre', color='#ff7f0e', linewidth=1.5, label='Puissance (C)')
     ax_pwr.fill_between(times, p_charges, step='pre', alpha=0.2, color='#ff7f0e')
     
+    # Ligne rouge continue pour puissance max
+    ax_pwr.axhline(y=max_c_rate, color='red', linestyle='-', linewidth=1.5, label=f'Max ({max_c_rate}C)')
+
     # Pour avoir un axe bien cadré s'il y a très peu de puissance (ex: 0 à 1 C)
     max_p = max(p_charges) if p_charges else 0
-    ax_pwr.set_ylim(-0.1, max(max_p * 1.2, 1.0))
+    ax_pwr.set_ylim(-0.1, max(max_p * 1.2, max_c_rate * 1.2, 1.0))
     ax_pwr.set_ylabel('Charge (C)')
     ax_pwr.grid(True, linestyle=':', alpha=0.6)
-    ax_pwr.legend(loc='upper right', fontsize='small', frameon=False)
 
     # Formatage temporel (sur le dernier axe)
     ax_pwr.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
     plt.setp(ax_pwr.get_xticklabels(), rotation=0, ha="center")
 
+    # Légende globale sous le graphique
+    handles_soc, labels_soc = ax_soc.get_legend_handles_labels()
+    handles_pwr, labels_pwr = ax_pwr.get_legend_handles_labels()
+    fig.legend(handles_soc + handles_pwr, labels_soc + labels_pwr, loc='upper center', bbox_to_anchor=(0.5, 0.05), ncol=4, fontsize='small', frameon=False)
+
     plt.tight_layout()
+    # Ajuster le bas pour faire de la place à la légende
+    plt.subplots_adjust(bottom=0.2)
     return fig

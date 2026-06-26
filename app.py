@@ -1954,13 +1954,22 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
                 figures_batterie_pdf = []
                 bat_figs_by_train = {}
                 if mode_calcul == "Calcul Energie":
+                    terminaux_valides = set()
+                    for m in st.session_state.get('missions', []):
+                        if "origine" in m: terminaux_valides.add(m["origine"])
+                        if "terminus" in m: terminaux_valides.add(m["terminus"])
+                        
                     bat_params_pdf = st.session_state.energy_params.get("batterie", {})
+                    max_c = bat_params_pdf.get("facteur_charge_C", 4.0)
+
                     for _tid, (_res, _tmat) in resultats_energie_par_train.items():
                         if _tmat == "batterie" and _res.get("batterie_log"):
                             _fig_b = creer_graphique_batterie(
                                 _res["batterie_log"], _tid,
                                 soc_min_pct=bat_params_pdf.get("soc_min_pct", 20),
                                 soc_max_pct=bat_params_pdf.get("soc_max_pct", 95),
+                                terminaux_valides=terminaux_valides,
+                                max_c_rate=max_c
                             )
                             if _fig_b:
                                 figures_batterie_pdf.append(_fig_b)
