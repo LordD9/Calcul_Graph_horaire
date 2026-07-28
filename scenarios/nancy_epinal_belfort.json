@@ -1,0 +1,203 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "nom": "Nancy - Epinal - Belfort",
+    "description": "",
+    "auteur": "",
+    "date_creation": "2026-07-28",
+    "date_modification": "2026-07-28",
+    "tags": []
+  },
+  "service": {
+    "heure_debut": "06:00",
+    "heure_fin": "22:00"
+  },
+  "infrastructure": {
+    "gares": [
+      {
+        "gare": "Belfort-TGV-Meroux",
+        "distance": 0.0,
+        "infra": "VE",
+        "electrification": "C25",
+        "rampe_section_a_venir": -2.0
+      },
+      {
+        "gare": "Belfort",
+        "distance": 7.0,
+        "infra": "D",
+        "electrification": "R5000",
+        "rampe_section_a_venir": 5.0
+      },
+      {
+        "gare": "Trois-Chênes",
+        "distance": 9.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": 5.0
+      },
+      {
+        "gare": "Bas-Évette",
+        "distance": 14.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "Champagney",
+        "distance": 23.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": -6.0
+      },
+      {
+        "gare": "Ronchamp",
+        "distance": 29.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": -6.0
+      },
+      {
+        "gare": "Lure",
+        "distance": 39.0,
+        "infra": "D",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "Luxeuil-les-Bains",
+        "distance": 57.0,
+        "infra": "VE",
+        "electrification": "F",
+        "rampe_section_a_venir": -2.0
+      },
+      {
+        "gare": "Aillevillers",
+        "distance": 72.0,
+        "infra": "D",
+        "electrification": "F",
+        "rampe_section_a_venir": 9.0
+      },
+      {
+        "gare": "Bains-les-Bains",
+        "distance": 85.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": 3.0
+      },
+      {
+        "gare": "Xertigny",
+        "distance": 96.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": -5.0
+      },
+      {
+        "gare": "Epinal",
+        "distance": 115.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": -3.0
+      }
+    ]
+  },
+  "missions": [
+    {
+      "origine": "Belfort-TGV-Meroux",
+      "terminus": "Epinal",
+      "frequence": 1.0,
+      "temps_trajet": 76,
+      "temps_retournement_A": 10,
+      "temps_retournement_B": 10,
+      "reference_minutes": "0",
+      "passing_points": [
+        {
+          "gare": "Belfort",
+          "time_offset_min": 5,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Trois-Chênes",
+          "time_offset_min": 9,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Bas-Évette",
+          "time_offset_min": 13,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Champagney",
+          "time_offset_min": 18,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Ronchamp",
+          "time_offset_min": 24,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Lure",
+          "time_offset_min": 30,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Luxeuil-les-Bains",
+          "time_offset_min": 40,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Aillevillers",
+          "time_offset_min": 50,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Bains-les-Bains",
+          "time_offset_min": 58,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Xertigny",
+          "time_offset_min": 64,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        }
+      ],
+      "trajet_asymetrique": false,
+      "temps_trajet_retour": 76,
+      "passing_points_retour": [],
+      "pp_raw_text": "Belfort-TGV-Meroux;0;0\nBelfort;5;1\nTrois-Chênes;9;1\nBas-Évette;13;1\nChampagney;18;1\nRonchamp;24;1\nLure;30;1\nLuxeuil-les-Bains;40;1\nAillevillers;50;1\nBains-les-Bains;58;1\nXertigny;64;1\nEpinal;76;1",
+      "type_materiel": "diesel",
+      "inject_from_terminus_2": true
+    }
+  ],
+  "energy_params": {
+    "diesel": {
+      "masse_tonne": 50,
+      "capacite_batterie_kwh": 800,
+      "facteur_charge_C": 1.0,
+      "recuperation_pct": 75,
+      "soc_min_pct": 20,
+      "soc_max_pct": 95,
+      "capacite_eol_pct": 70,
+      "simuler_fin_de_vie": false,
+      "davis_A_N_t": 15.0,
+      "davis_B_N_t_kph": 0.1,
+      "davis_C_N_t_kph2": 0.0041,
+      "accel_ms2": 1.0,
+      "decel_ms2": 0.6,
+      "facteur_aux_kwh_h": 43.0,
+      "rendement_thermique_pct": 38,
+      "rendement_electrique_pct": 88,
+      "kwh_per_liter_diesel": 10.0
+    }
+  }
+}

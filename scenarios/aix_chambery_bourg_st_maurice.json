@@ -1,0 +1,233 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "nom": "Aix - Chambéry - Bourg st-Maurice",
+    "description": "",
+    "auteur": "",
+    "date_creation": "2026-07-20",
+    "date_modification": "2026-07-20",
+    "tags": [
+      "Aix",
+      "Chambéry",
+      "Bourg Saint-Maurice"
+    ]
+  },
+  "service": {
+    "heure_debut": "16:00",
+    "heure_fin": "16:00"
+  },
+  "infrastructure": {
+    "gares": [
+      {
+        "gare": "Bourg St-Maurice",
+        "distance": 0.0,
+        "infra": "VE",
+        "electrification": "C25",
+        "rampe_section_a_venir": -15.0
+      },
+      {
+        "gare": "Landry",
+        "distance": 6.0,
+        "infra": "VE",
+        "electrification": "C25",
+        "rampe_section_a_venir": -15.0
+      },
+      {
+        "gare": "Aime la Plagne",
+        "distance": 14.0,
+        "infra": "VE",
+        "electrification": "C25",
+        "rampe_section_a_venir": -12.0
+      },
+      {
+        "gare": "Moutiers Salins Brides les Bains",
+        "distance": 29.0,
+        "infra": "VE",
+        "electrification": "C25",
+        "rampe_section_a_venir": -8.0
+      },
+      {
+        "gare": "Petit-Cœur La Léchère les bains",
+        "distance": 34.0,
+        "infra": "F",
+        "electrification": "C25",
+        "rampe_section_a_venir": -10.0
+      },
+      {
+        "gare": "Notre-Dame de Briançon",
+        "distance": 37.0,
+        "infra": "VE",
+        "electrification": "C25",
+        "rampe_section_a_venir": -10.0
+      },
+      {
+        "gare": "Albertville",
+        "distance": 57.0,
+        "infra": "VE",
+        "electrification": "C1500",
+        "rampe_section_a_venir": -4.0
+      },
+      {
+        "gare": "Frontenex",
+        "distance": 64.0,
+        "infra": "VE",
+        "electrification": "C1500",
+        "rampe_section_a_venir": -2.0
+      },
+      {
+        "gare": "Grésy-sur-Isère",
+        "distance": 71.0,
+        "infra": "VE",
+        "electrification": "C1500",
+        "rampe_section_a_venir": -3.0
+      },
+      {
+        "gare": "St-Pierre d'Albigny",
+        "distance": 80.0,
+        "infra": "D",
+        "electrification": "C1500",
+        "rampe_section_a_venir": -1.0
+      },
+      {
+        "gare": "Montmélian",
+        "distance": 92.0,
+        "infra": "F",
+        "electrification": "C1500",
+        "rampe_section_a_venir": -1.0
+      },
+      {
+        "gare": "Chambéry - Challes les Eaux",
+        "distance": 105.0,
+        "infra": "F",
+        "electrification": "C1500",
+        "rampe_section_a_venir": -1.0
+      },
+      {
+        "gare": "Viviers-du-Lac",
+        "distance": 114.0,
+        "infra": "F",
+        "electrification": "C1500",
+        "rampe_section_a_venir": -3.0
+      },
+      {
+        "gare": "Aix-les-Bains le Revard",
+        "distance": 119.0,
+        "infra": "F",
+        "electrification": "C1500",
+        "rampe_section_a_venir": 0.0
+      }
+    ]
+  },
+  "missions": [
+    {
+      "origine": "Bourg St-Maurice",
+      "terminus": "Aix-les-Bains le Revard",
+      "frequence": 1.0,
+      "temps_trajet": 107,
+      "temps_retournement_A": 15,
+      "temps_retournement_B": 15,
+      "reference_minutes": "0",
+      "passing_points": [
+        {
+          "gare": "Landry",
+          "time_offset_min": 7,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Aime la Plagne",
+          "time_offset_min": 14,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Moutiers Salins Brides les Bains",
+          "time_offset_min": 27,
+          "arret_commercial": true,
+          "duree_arret_min": 2
+        },
+        {
+          "gare": "Petit-Cœur La Léchère les bains",
+          "time_offset_min": 33,
+          "arret_commercial": false,
+          "duree_arret_min": 0
+        },
+        {
+          "gare": "Notre-Dame de Briançon",
+          "time_offset_min": 35,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Albertville",
+          "time_offset_min": 48,
+          "arret_commercial": true,
+          "duree_arret_min": 7
+        },
+        {
+          "gare": "Frontenex",
+          "time_offset_min": 61,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Grésy-sur-Isère",
+          "time_offset_min": 67,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "St-Pierre d'Albigny",
+          "time_offset_min": 76,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Montmélian",
+          "time_offset_min": 84,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Chambéry - Challes les Eaux",
+          "time_offset_min": 93,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Viviers-du-Lac",
+          "time_offset_min": 102,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        }
+      ],
+      "trajet_asymetrique": false,
+      "temps_trajet_retour": 107,
+      "passing_points_retour": [],
+      "pp_raw_text": "Bourg St-Maurice;0;0\nLandry;7;1\nAime la Plagne;14;1\nMoutiers Salins Brides les Bains;27;2\nPetit-Cœur La Léchère les bains;33;0\nNotre-Dame de Briançon;35;1\nAlbertville;48;7\nFrontenex;61;1\nGrésy-sur-Isère;67;1\nSt-Pierre d'Albigny;76;1\nMontmélian;84;1\nChambéry - Challes les Eaux;93;1\nViviers-du-Lac;102;1\nAix-les-Bains le Revard;107;0",
+      "type_materiel": "diesel",
+      "inject_from_terminus_2": true
+    }
+  ],
+  "energy_params": {
+    "diesel": {
+      "masse_tonne": 50,
+      "capacite_batterie_kwh": 800,
+      "facteur_charge_C": 1.0,
+      "recuperation_pct": 75,
+      "soc_min_pct": 20,
+      "soc_max_pct": 95,
+      "capacite_eol_pct": 70,
+      "simuler_fin_de_vie": false,
+      "davis_A_N_t": 15.0,
+      "davis_B_N_t_kph": 0.1,
+      "davis_C_N_t_kph2": 0.0041,
+      "accel_ms2": 1.0,
+      "decel_ms2": 0.6,
+      "facteur_aux_kwh_h": 43.0,
+      "rendement_thermique_pct": 38,
+      "rendement_electrique_pct": 88,
+      "kwh_per_liter_diesel": 10.0
+    }
+  }
+}
