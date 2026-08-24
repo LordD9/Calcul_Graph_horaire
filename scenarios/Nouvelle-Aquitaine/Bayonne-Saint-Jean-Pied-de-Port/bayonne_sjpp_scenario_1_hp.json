@@ -1,14 +1,12 @@
 {
   "schema_version": 1,
   "metadata": {
-    "nom": "Bayonne-SJPP 2032+ Croisement Ossès",
+    "nom": "bayonne_sjpp_scenario_1_hp",
     "description": "",
     "auteur": "",
-    "date_creation": "2026-06-09",
-    "date_modification": "2026-06-09",
-    "tags": [],
-    "region": "Nouvelle-Aquitaine",
-    "ligne": "Bayonne-Saint-Jean-Pied-de-Port"
+    "date_creation": "2026-08-21",
+    "date_modification": "2026-08-21",
+    "tags": []
   },
   "service": {
     "heure_debut": "06:00",
@@ -20,7 +18,7 @@
         "gare": "Saint-Jean-Pied-de-Port",
         "distance": 0.0,
         "infra": "F",
-        "electrification": "R2500",
+        "electrification": "0",
         "rampe_section_a_venir": -5.0
       },
       {
@@ -61,7 +59,7 @@
       {
         "gare": "Ustaritz",
         "distance": 40.0,
-        "infra": "VE",
+        "infra": "F",
         "electrification": "0",
         "rampe_section_a_venir": -1.0
       },
@@ -92,11 +90,11 @@
     {
       "origine": "Saint-Jean-Pied-de-Port",
       "terminus": "Bayonne",
-      "frequence": 1.0,
-      "temps_trajet": 60,
-      "temps_retournement_A": 5,
-      "temps_retournement_B": 5,
-      "reference_minutes": "0",
+      "frequence": 0.5,
+      "temps_trajet": 62,
+      "temps_retournement_A": 10,
+      "temps_retournement_B": 15,
+      "reference_minutes": "55",
       "passing_points": [
         {
           "gare": "Ossès - Saint-Martin-d'Arrossa",
@@ -112,7 +110,7 @@
         },
         {
           "gare": "Itxassou",
-          "time_offset_min": 33,
+          "time_offset_min": 32,
           "arret_commercial": true,
           "duree_arret_min": 1
         },
@@ -132,7 +130,7 @@
           "gare": "Ustaritz",
           "time_offset_min": 49,
           "arret_commercial": true,
-          "duree_arret_min": 2
+          "duree_arret_min": 1
         },
         {
           "gare": "Villefranque",
@@ -142,58 +140,58 @@
         },
         {
           "gare": "PK2",
-          "time_offset_min": 58,
+          "time_offset_min": 60,
           "arret_commercial": false,
           "duree_arret_min": 0
         }
       ],
       "trajet_asymetrique": false,
-      "temps_trajet_retour": 60,
+      "temps_trajet_retour": 62,
       "passing_points_retour": [],
-      "pp_raw_text": "Saint-Jean-Pied-de-Port;0;0\nOssès - Saint-Martin-d'Arrossa;13;2\nBidarray - Pont-Noblia;21;1\nItxassou;33;1\nCambo-les-Bains;40;2\nHalsou - Larressore;44;1\nUstaritz;49;2\nVillefranque;53;1\nPK2;58;0\nBayonne;60;0",
+      "pp_raw_text": "Saint-Jean-Pied-de-Port;0;0\nOssès - Saint-Martin-d'Arrossa;13;2\nBidarray - Pont-Noblia;21;1\nItxassou;32;1\nCambo-les-Bains;40;2\nHalsou - Larressore;44;1\nUstaritz;49;1\nVillefranque;53;1\nPK2;60;0\nBayonne;62;0",
       "type_materiel": "batterie",
-      "inject_from_terminus_2": true
+      "inject_from_terminus_2": false
     },
     {
       "origine": "Cambo-les-Bains",
       "terminus": "Bayonne",
-      "frequence": 1.0,
-      "temps_trajet": 20,
-      "temps_retournement_A": 5,
-      "temps_retournement_B": 5,
-      "reference_minutes": "12",
+      "frequence": 0.5,
+      "temps_trajet": 25,
+      "temps_retournement_A": 10,
+      "temps_retournement_B": 10,
+      "reference_minutes": "32",
       "passing_points": [
         {
           "gare": "Halsou - Larressore",
-          "time_offset_min": 4,
+          "time_offset_min": 5,
           "arret_commercial": true,
           "duree_arret_min": 1
         },
         {
           "gare": "Ustaritz",
-          "time_offset_min": 10,
+          "time_offset_min": 12,
           "arret_commercial": true,
           "duree_arret_min": 2
         },
         {
           "gare": "Villefranque",
-          "time_offset_min": 13,
+          "time_offset_min": 16,
           "arret_commercial": true,
           "duree_arret_min": 1
         },
         {
           "gare": "PK2",
-          "time_offset_min": 18,
+          "time_offset_min": 23,
           "arret_commercial": false,
           "duree_arret_min": 0
         }
       ],
       "trajet_asymetrique": false,
-      "temps_trajet_retour": 20,
+      "temps_trajet_retour": 25,
       "passing_points_retour": [],
-      "pp_raw_text": "Cambo-les-Bains;0;0\nHalsou - Larressore;4;1\nUstaritz;10;2\nVillefranque;13;1\nPK2;18;0\nBayonne;20;0",
+      "pp_raw_text": "Cambo-les-Bains;0;0\nHalsou - Larressore;5;1\nUstaritz;12;2\nVillefranque;16;1\nPK2;23;0\nBayonne;25;0",
       "type_materiel": "batterie",
-      "inject_from_terminus_2": true
+      "inject_from_terminus_2": false
     }
   ],
   "energy_params": {

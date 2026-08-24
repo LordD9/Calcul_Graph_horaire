@@ -6,7 +6,9 @@
     "auteur": "",
     "date_creation": "2026-06-09",
     "date_modification": "2026-06-09",
-    "tags": []
+    "tags": [],
+    "region": "Nouvelle-Aquitaine",
+    "ligne": "Bayonne-Saint-Jean-Pied-de-Port"
   },
   "service": {
     "heure_debut": "06:00",
