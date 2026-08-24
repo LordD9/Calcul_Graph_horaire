@@ -8,8 +8,9 @@ matériel) pour le mode "Calcul Energie".
 
 Un scénario = un fichier JSON autonome décrit dans `scenarios/_schema.md`.
 La bibliothèque côté serveur est alimentée hors-app (dépôt manuel dans
-`scenarios/`). L'utilisateur télécharge ses configurations depuis l'UI et
-peut aussi recharger un fichier JSON via l'onglet "Importer un fichier".
+`scenarios/<région>/<ligne>/`). L'utilisateur télécharge ses configurations
+depuis l'UI et peut aussi recharger un fichier JSON via l'onglet
+« Importer un fichier ».
 """
 
 from __future__ import annotations
@@ -31,16 +32,62 @@ CURRENT_SCHEMA_VERSION = 1
 
 _MATERIEL_TYPES = ("diesel", "electrique", "bimode", "batterie")
 
+UNCLASSIFIED_REGION = "Non classé"
+DEFAULT_LIGNE = "Général"
+
+# Mapping paramètre énergétique -> (clé widget Streamlit, coerceur)
+_ENERGY_WIDGET_MAP = (
+    ("masse_tonne", "masse_{mat}", int),
+    ("facteur_aux_kwh_h", "f_aux_{mat}", float),
+    ("capacite_batterie_kwh", "cap_batt_{mat}", int),
+    ("facteur_charge_C", "f_charge_c_{mat}", float),
+    ("simuler_fin_de_vie", "eol_check_{mat}", bool),
+    ("capacite_eol_pct", "eol_pct_{mat}", int),
+    ("soc_min_pct", "soc_min_{mat}", int),
+    ("soc_max_pct", "soc_max_{mat}", int),
+    ("accel_ms2", "accel_{mat}", float),
+    ("decel_ms2", "decel_{mat}", float),
+    ("davis_A_N_t", "f_davis_a_{mat}", float),
+    ("davis_B_N_t_kph", "f_davis_b_{mat}", float),
+    ("davis_C_N_t_kph2", "f_davis_c_{mat}", float),
+    ("rendement_thermique_pct", "rend_therm_{mat}", int),
+    ("kwh_per_liter_diesel", "f_kwh_l_{mat}", float),
+    ("rendement_electrique_pct", "rend_elec_{mat}", int),
+    ("recuperation_pct", "recup_{mat}", int),
+)
+
 
 # =============================================================================
 # Découverte et lecture
 # =============================================================================
 
+def classify_scenario_path(path: Path, metadata: dict | None = None) -> tuple[str, str]:
+    """Déduit (région, ligne) depuis le chemin relatif à `scenarios/`.
+
+    Convention : `scenarios/<région>/<ligne>/<fichier>.json`.
+    Un seul niveau de dossier → région = ce dossier, ligne = « Général ».
+    Fichier à la racine → métadonnées, sinon « Non classé » / « Général ».
+    """
+    metadata = metadata or {}
+    try:
+        rel = path.resolve().relative_to(SCENARIOS_DIR.resolve())
+    except ValueError:
+        rel = Path(path.name)
+    parts = rel.parts
+    if len(parts) >= 3:
+        return parts[0], parts[1]
+    if len(parts) == 2:
+        return parts[0], metadata.get("ligne") or DEFAULT_LIGNE
+    region = (metadata.get("region") or "").strip() or UNCLASSIFIED_REGION
+    ligne = (metadata.get("ligne") or "").strip() or DEFAULT_LIGNE
+    return region, ligne
+
+
 def list_scenarios() -> list[dict]:
     """Parcourt `scenarios/` récursivement et retourne la liste des scénarios.
 
-    Chaque entrée : {"path": Path, "metadata": dict}. Les fichiers invalides
-    sont silencieusement ignorés.
+    Chaque entrée : path, rel_path, region, ligne, metadata.
+    Les fichiers invalides sont silencieusement ignorés.
     """
     if not SCENARIOS_DIR.exists():
         return []
@@ -49,25 +96,77 @@ def list_scenarios() -> list[dict]:
         try:
             with path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
-            md = data.get("metadata", {}) or {}
+            md = dict(data.get("metadata", {}) or {})
             if "nom" not in md:
                 md["nom"] = path.stem
-            result.append({"path": path, "metadata": md})
+            region, ligne = classify_scenario_path(path, md)
+            try:
+                rel_path = path.resolve().relative_to(SCENARIOS_DIR.resolve()).as_posix()
+            except ValueError:
+                rel_path = path.name
+            result.append({
+                "path": path,
+                "rel_path": rel_path,
+                "region": region,
+                "ligne": ligne,
+                "metadata": md,
+            })
         except (OSError, json.JSONDecodeError):
             continue
     return result
 
 
-def load_scenario(source: Union[Path, str, IO]) -> dict:
-    """Charge un scénario depuis un chemin ou un file-like (st.file_uploader).
+def group_scenarios_by_region_line(scenarios: list[dict] | None = None) -> dict[str, dict[str, list[dict]]]:
+    """Regroupe les scénarios en arbre {région: {ligne: [scénarios]}}.
 
+    Les clés sont triées (sauf « Non classé », toujours en dernier).
+    """
+    if scenarios is None:
+        scenarios = list_scenarios()
+    tree: dict[str, dict[str, list[dict]]] = {}
+    for s in scenarios:
+        tree.setdefault(s["region"], {}).setdefault(s["ligne"], []).append(s)
+
+    def _sort_label(label: str) -> tuple[int, str]:
+        return (1 if label == UNCLASSIFIED_REGION else 0, label.casefold())
+
+    ordered: dict[str, dict[str, list[dict]]] = {}
+    for region in sorted(tree, key=_sort_label):
+        ordered[region] = {
+            ligne: tree[region][ligne]
+            for ligne in sorted(tree[region], key=_sort_label)
+        }
+    return ordered
+
+
+def load_scenario(source: Union[Path, str, IO, bytes]) -> dict:
+    """Charge un scénario depuis un chemin, des bytes ou un file-like.
+
+    Relit toujours la source (seek(0) sur les flux déjà consommés).
     Applique les migrations puis valide. Lève ValueError sur erreur grave.
     """
-    if hasattr(source, "read"):
+    if isinstance(source, (bytes, bytearray)):
+        raw = bytes(source).decode("utf-8")
+        data = json.loads(raw)
+    elif hasattr(source, "read"):
+        if hasattr(source, "seek"):
+            try:
+                source.seek(0)
+            except Exception:
+                pass
         raw = source.read()
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8")
+        if not (raw or "").strip():
+            raise ValueError(
+                "Le fichier scénario est vide (flux déjà consommé ou fichier invalide)."
+            )
         data = json.loads(raw)
+        if hasattr(source, "seek"):
+            try:
+                source.seek(0)
+            except Exception:
+                pass
     else:
         path = Path(source)
         with path.open("r", encoding="utf-8") as f:
@@ -133,6 +232,8 @@ def build_scenario_from_session(st_session) -> dict:
             "date_creation": today_iso,
             "date_modification": today_iso,
             "tags": [],
+            "region": "",
+            "ligne": "",
         },
         "service": {
             "heure_debut": _time_to_str(h_deb),
@@ -149,10 +250,14 @@ def build_scenario_from_session(st_session) -> dict:
 def apply_scenario_to_session(scenario: dict, st_session) -> None:
     """Injecte un scénario chargé dans le session_state.
 
-    Vide les états calculés et les clés UI temporaires des missions précédentes
-    avant d'écraser gares/missions/energy_params/heures de service.
+    Vide les états calculés et TOUTES les clés widgets liées au scénario
+    précédent, puis réécrit gares / missions / energy_params / heures de
+    service ET les clés widgets correspondantes. À appeler avant le rendu
+    des widgets (callback ou début de script), sinon Streamlit ignore
+    les nouvelles valeurs.
     """
     _reset_session_for_scenario_load(st_session)
+    st_session["_scenario_ui_epoch"] = int(st_session.get("_scenario_ui_epoch") or 0) + 1
 
     # Infrastructure -> DataFrame
     gares = scenario.get("infrastructure", {}).get("gares", [])
@@ -166,30 +271,26 @@ def apply_scenario_to_session(scenario: dict, st_session) -> None:
     # involontaire sur "Valider" écraserait l'infra du scénario.
     st_session["gares_texte_input"] = format_gares_text(df)
 
-    # Missions
-    st_session["missions"] = [dict(m) for m in scenario.get("missions", [])]
+    # Missions (copies indépendantes)
+    missions = [dict(m) for m in scenario.get("missions", [])]
+    st_session["missions"] = missions
+    st_session["nombre_missions"] = max(len(missions), 1)
 
     # Pré-remplissage du mode "Saisie manuelle par lot" pour chaque mission.
     # Le mode "Interface Guidée" ne sait pas relire les passing_points (ses
     # widgets utilisent des valeurs par défaut indépendantes), donc on force le
     # mode bulk et on écrit le texte attendu par le parser de app.py.
-    for idx, m in enumerate(st_session["missions"]):
+    for idx, m in enumerate(missions):
         bulk_text = format_mission_to_bulk_text(m, mode_calcul="Calcul Energie")
         m["pp_raw_text"] = bulk_text
-        st_session[f"pp_raw_{idx}"] = bulk_text
-        # _prev_pp_raw_{idx} = bulk_text empêche l'auto-update de tt{idx}
-        # de s'exécuter au premier rendu (texte considéré "déjà appliqué").
-        st_session[f"_prev_pp_raw_{idx}"] = bulk_text
-        st_session[f"saisie_pp_{idx}"] = "Saisie manuelle par lot"
+        _seed_mission_widget_keys(st_session, idx, m, bulk_text)
 
     # Heures de service
     svc = scenario.get("service", {})
     h_deb = _parse_time(svc.get("heure_debut"))
     h_fin = _parse_time(svc.get("heure_fin"))
-    if h_deb is not None:
-        st_session["heure_debut_service"] = h_deb
-    if h_fin is not None:
-        st_session["heure_fin_service"] = h_fin
+    st_session["heure_debut_service"] = h_deb or dt_time(6, 0)
+    st_session["heure_fin_service"] = h_fin or dt_time(22, 0)
 
     # Paramètres énergie : merge avec les défauts pour les types absents
     energy_params = {}
@@ -200,10 +301,20 @@ def apply_scenario_to_session(scenario: dict, st_session) -> None:
         if mat in sc_energy and isinstance(sc_energy[mat], dict):
             merged.update(sc_energy[mat])
         energy_params[mat] = merged
+        _seed_energy_widget_keys(st_session, mat, merged)
     st_session["energy_params"] = energy_params
 
     # Mode de calcul forcé : un scénario s'applique au mode Énergie
     st_session["mode_calcul"] = "Calcul Energie"
+    st_session["mode_calcul_selector"] = "Calcul Energie"
+
+    md = dict(scenario.get("metadata", {}) or {})
+    st_session["_loaded_scenario_meta"] = md
+    st_session["scenario_dl_name"] = md.get("nom") or ""
+    st_session["scenario_dl_tags"] = ", ".join(md.get("tags") or [])
+    st_session["scenario_dl_desc"] = md.get("description") or ""
+    st_session["scenario_dl_region"] = md.get("region") or ""
+    st_session["scenario_dl_ligne"] = md.get("ligne") or ""
 
 
 # =============================================================================
@@ -378,14 +489,88 @@ def format_mission_to_bulk_text(mission: dict, mode_calcul: str = "Calcul Energi
     return "\n".join(lines)
 
 
+def _seed_mission_widget_keys(st_session, idx: int, mission: dict, bulk_text: str) -> None:
+    """Écrit les clés widgets d'une mission pour que Streamlit les affiche."""
+    st_session[f"pp_raw_{idx}"] = bulk_text
+    # _prev_pp_raw_{idx} = bulk_text empêche l'auto-update de tt{idx}
+    # de s'exécuter au premier rendu (texte considéré "déjà appliqué").
+    st_session[f"_prev_pp_raw_{idx}"] = bulk_text
+    st_session[f"saisie_pp_{idx}"] = "Saisie manuelle par lot"
+
+    origine = mission.get("origine")
+    terminus = mission.get("terminus")
+    if origine:
+        st_session[f"orig{idx}"] = origine
+    if terminus:
+        st_session[f"term{idx}"] = terminus
+    st_session[f"freq{idx}"] = float(mission.get("frequence", 1.0))
+    st_session[f"tt{idx}"] = int(mission.get("temps_trajet", 45) or 45)
+    st_session[f"tr_a_{idx}"] = int(mission.get("temps_retournement_A", 10) or 10)
+    st_session[f"tr_b_{idx}"] = int(mission.get("temps_retournement_B", 10) or 10)
+    st_session[f"type_mat_{idx}"] = mission.get("type_materiel") or "diesel"
+    st_session[f"ref_mins{idx}"] = str(mission.get("reference_minutes", "0") or "0")
+    st_session[f"inj_t2_{idx}"] = bool(mission.get("inject_from_terminus_2", False))
+    st_session[f"asym_{idx}"] = bool(mission.get("trajet_asymetrique", False))
+    t_retour = mission.get("temps_trajet_retour", mission.get("temps_trajet", 45))
+    st_session[f"tt_retour_{idx}"] = int(t_retour or 45)
+    st_session[f"n_pass_{idx}"] = len(mission.get("passing_points") or [])
+    st_session[f"n_pass_retour_{idx}"] = len(mission.get("passing_points_retour") or [])
+
+
+def _seed_energy_widget_keys(st_session, mat: str, params: dict) -> None:
+    """Écrit les clés widgets des paramètres énergétiques d'un matériel."""
+    for param_key, key_tpl, caster in _ENERGY_WIDGET_MAP:
+        if param_key not in params:
+            continue
+        raw = params[param_key]
+        try:
+            value = caster(raw)
+        except (TypeError, ValueError):
+            continue
+        st_session[key_tpl.format(mat=mat)] = value
+
+
 def _reset_session_for_scenario_load(st_session) -> None:
-    """Vide les états calculés et les clés UI dépendant des missions."""
+    """Vide les états calculés et les clés UI dépendant du scénario précédent."""
     for k in ("chronologie_calculee", "warnings_calcul", "stats_homogeneite"):
         if k in st_session:
             st_session[k] = None if k == "chronologie_calculee" else {}
     if "energy_errors" in st_session:
         st_session["energy_errors"] = []
     st_session["run_calculation"] = False
+    st_session["roulement_manuel"] = {}
+
+    # Clés widgets « stables » (non indexées par mission). Il faut les
+    # supprimer AVANT de les réécrire, sinon Streamlit peut restaurer
+    # la valeur du run précédent et ignorer le nouveau scénario.
+    stable_keys = (
+        "heure_debut_service",
+        "heure_fin_service",
+        "gares_texte_input",
+        "nombre_missions",
+        "mode_calcul_selector",
+        "scenario_dl_name",
+        "scenario_dl_tags",
+        "scenario_dl_desc",
+        "scenario_dl_region",
+        "scenario_dl_ligne",
+        "_loaded_scenario_meta",
+    )
+    for k in stable_keys:
+        if k in st_session:
+            try:
+                del st_session[k]
+            except KeyError:
+                pass
+
+    for mat in _MATERIEL_TYPES:
+        for _param, key_tpl, _caster in _ENERGY_WIDGET_MAP:
+            k = key_tpl.format(mat=mat)
+            if k in st_session:
+                try:
+                    del st_session[k]
+                except KeyError:
+                    pass
 
     # Suppression des clés UI dynamiques indexées par mission. Sans ce nettoyage,
     # les valeurs persistées d'un précédent scénario écrasent les valeurs par

@@ -18,7 +18,10 @@ Version courante : `1`.
 - `auteur` (string) : auteur du scénario.
 - `date_creation` (string ISO `YYYY-MM-DD`) : date de création.
 - `date_modification` (string ISO `YYYY-MM-DD`) : dernière modification.
-- `tags` (array de strings) : étiquettes pour filtrer (région, type de ligne, etc.).
+- `tags` (array de strings) : étiquettes pour filtrer (type de desserte, matériel, etc.).
+- `region` (string, optionnel) : région d'appartenance. Utilisée si le fichier
+  n'est pas déjà rangé dans `scenarios/<région>/<ligne>/`.
+- `ligne` (string, optionnel) : nom de la ligne. Idem.
 
 ### `service` (objet)
 
@@ -80,5 +83,25 @@ L'écriture dans ce dossier se fait **hors application** : l'utilisateur téléc
 un scénario depuis l'UI (bouton dans le menu d'export du graphe horaire) puis
 dépose le fichier ici manuellement (via Box, git, etc.).
 
-Sous-dossiers facultatifs pour catégoriser (région, type de ligne…). Le chargeur
-explore récursivement.
+### Arborescence (région → ligne)
+
+Le chargeur explore récursivement. Pour une navigation à deux niveaux dans l'UI,
+déposer les fichiers ainsi :
+
+```
+scenarios/
+  <région>/
+    <ligne>/
+      <slug>.json
+```
+
+Exemples :
+
+```
+scenarios/Bretagne/Auray-Quiberon/auray_quiberon_freq_heure_omnibus.json
+scenarios/Occitanie/Nimes-Le-Grau-du-Roi/nimes_grau_du_roi.json
+```
+
+- Fichier à la racine de `scenarios/` → classé dans **Non classé / Général**
+  (sauf si `metadata.region` / `metadata.ligne` sont renseignés).
+- Un seul niveau de dossier → le dossier est la région, la ligne vaut **Général**.

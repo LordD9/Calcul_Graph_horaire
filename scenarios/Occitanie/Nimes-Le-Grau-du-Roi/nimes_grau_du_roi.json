@@ -6,7 +6,13 @@
     "auteur": "Cerema",
     "date_creation": "2026-06-09",
     "date_modification": "2026-06-09",
-    "tags": ["TER", "batterie", "voie_unique"]
+    "tags": [
+      "TER",
+      "batterie",
+      "voie_unique"
+    ],
+    "region": "Occitanie",
+    "ligne": "Nimes-Le-Grau-du-Roi"
   },
   "service": {
     "heure_debut": "06:00",
@@ -14,9 +20,27 @@
   },
   "infrastructure": {
     "gares": [
-      {"gare": "Nîmes", "distance": 0.0, "infra": "VE", "electrification": "C1500", "rampe_section_a_venir": 5.0},
-      {"gare": "Vauvert", "distance": 20.0, "infra": "D", "electrification": "F", "rampe_section_a_venir": -3.0},
-      {"gare": "Le Grau-du-Roi", "distance": 50.0, "infra": "VE", "electrification": "R500", "rampe_section_a_venir": 0.0}
+      {
+        "gare": "Nîmes",
+        "distance": 0.0,
+        "infra": "VE",
+        "electrification": "C1500",
+        "rampe_section_a_venir": 5.0
+      },
+      {
+        "gare": "Vauvert",
+        "distance": 20.0,
+        "infra": "D",
+        "electrification": "F",
+        "rampe_section_a_venir": -3.0
+      },
+      {
+        "gare": "Le Grau-du-Roi",
+        "distance": 50.0,
+        "infra": "VE",
+        "electrification": "R500",
+        "rampe_section_a_venir": 0.0
+      }
     ]
   },
   "missions": [
@@ -33,10 +57,20 @@
       "type_materiel": "batterie",
       "inject_from_terminus_2": false,
       "passing_points": [
-        {"gare": "Vauvert", "time_offset_min": 20, "arret_commercial": true, "duree_arret_min": 2}
+        {
+          "gare": "Vauvert",
+          "time_offset_min": 20,
+          "arret_commercial": true,
+          "duree_arret_min": 2
+        }
       ],
       "passing_points_retour": [
-        {"gare": "Vauvert", "time_offset_min": 25, "arret_commercial": true, "duree_arret_min": 2}
+        {
+          "gare": "Vauvert",
+          "time_offset_min": 25,
+          "arret_commercial": true,
+          "duree_arret_min": 2
+        }
       ],
       "pp_raw_text": "Vauvert;20;2;25;2"
     }

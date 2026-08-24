@@ -1,12 +1,14 @@
 {
   "schema_version": 1,
   "metadata": {
-    "nom": "auray_quiberon_freq_40mn_omnibus",
+    "nom": "auray_quiberon_freq_heure_omnibus",
     "description": "",
     "auteur": "",
     "date_creation": "2026-06-09",
     "date_modification": "2026-06-09",
-    "tags": []
+    "tags": [],
+    "region": "Bretagne",
+    "ligne": "Auray-Quiberon"
   },
   "service": {
     "heure_debut": "06:00",
@@ -90,65 +92,59 @@
     {
       "origine": "Quiberon",
       "terminus": "Auray",
-      "frequence": 1.5,
-      "temps_trajet": 29,
+      "frequence": 1.0,
+      "temps_trajet": 39,
       "temps_retournement_A": 10,
       "temps_retournement_B": 10,
       "reference_minutes": "0",
       "passing_points": [
         {
           "gare": "St-Pierre Quiberon",
-          "time_offset_min": 3,
+          "time_offset_min": 5,
           "arret_commercial": true,
           "duree_arret_min": 1
         },
         {
           "gare": "Kerhostin",
-          "time_offset_min": 7,
-          "arret_commercial": true,
-          "duree_arret_min": 1
-        },
-        {
-          "gare": "L'Isthme",
           "time_offset_min": 9,
           "arret_commercial": true,
           "duree_arret_min": 1
         },
         {
-          "gare": "Penthièvre",
+          "gare": "L'Isthme",
           "time_offset_min": 11,
           "arret_commercial": true,
           "duree_arret_min": 1
         },
         {
+          "gare": "Penthièvre",
+          "time_offset_min": 14,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
           "gare": "Les Sables-Blancs",
-          "time_offset_min": 13,
+          "time_offset_min": 17,
           "arret_commercial": true,
           "duree_arret_min": 1
         },
         {
           "gare": "Plouharnel-Carnac",
-          "time_offset_min": 17,
+          "time_offset_min": 22,
           "arret_commercial": true,
           "duree_arret_min": 2
         },
         {
           "gare": "Belz-Ploemel",
-          "time_offset_min": 23,
+          "time_offset_min": 31,
           "arret_commercial": true,
           "duree_arret_min": 1
-        },
-        {
-          "gare": "PK 585,758",
-          "time_offset_min": 28,
-          "arret_commercial": false,
-          "duree_arret_min": 0
         }
       ],
       "trajet_asymetrique": false,
-      "temps_trajet_retour": 29,
+      "temps_trajet_retour": 39,
       "passing_points_retour": [],
-      "pp_raw_text": "Quiberon;0;0\nSt-Pierre Quiberon;3;1\nKerhostin;7;1\nL'Isthme;9;1\nPenthièvre;11;1\nLes Sables-Blancs;13;1\nPlouharnel-Carnac;17;2\nBelz-Ploemel;23;1\nPK 585,758;28;0\nAuray;29;0",
+      "pp_raw_text": "Quiberon;0;0\nSt-Pierre Quiberon;5;1\nKerhostin;9;1\nL'Isthme;11;1\nPenthièvre;14;1\nLes Sables-Blancs;17;1\nPlouharnel-Carnac;22;2\nBelz-Ploemel;31;1\nAuray;39;0",
       "type_materiel": "batterie",
       "inject_from_terminus_2": true
     }

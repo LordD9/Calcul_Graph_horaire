@@ -343,6 +343,86 @@ if "heure_fin_service" not in st.session_state:
     st.session_state.heure_fin_service = datetime.strptime("22:00", "%H:%M").time()
 
 
+_SCENARIO_PLACEHOLDER = "— Sélectionner —"
+
+
+def _apply_pending_scenario():
+    """Lit et applique un scénario en attente AVANT le rendu des widgets.
+
+    Les boutons de chargement se contentent de déposer une source dans
+    `_pending_scenario_source` (callback Streamlit). On relit toujours
+    le fichier ici pour que le 2e chargement écrase réellement le 1er.
+    """
+    pending = st.session_state.pop("_pending_scenario_source", None)
+    if not pending:
+        return
+    try:
+        kind = pending.get("type")
+        if kind == "path":
+            data = scenarios_manager.load_scenario(pending["path"])
+        elif kind == "bytes":
+            data = scenarios_manager.load_scenario(pending["bytes"])
+        else:
+            raise ValueError(f"Source de scénario inconnue : {kind!r}")
+        scenarios_manager.apply_scenario_to_session(data, st.session_state)
+        nom = (
+            data.get("metadata", {}).get("nom")
+            or pending.get("name")
+            or "scénario"
+        )
+        st.session_state["_scenario_loaded_msg"] = f"Scénario « {nom} » chargé."
+    except Exception as e:
+        st.session_state["_scenario_load_error"] = f"Impossible de charger le scénario : {e}"
+
+
+def _on_scenario_region_change():
+    for k in ("scenario_ligne", "scenario_selector"):
+        st.session_state.pop(k, None)
+
+
+def _on_scenario_ligne_change():
+    st.session_state.pop("scenario_selector", None)
+
+
+def _queue_library_scenario():
+    """Callback : mémorise le chemin à relire au prochain passage en tête de script."""
+    rel = st.session_state.get("scenario_selector")
+    if not rel or rel == _SCENARIO_PLACEHOLDER:
+        return
+    sc = next(
+        (s for s in scenarios_manager.list_scenarios() if s["rel_path"] == rel),
+        None,
+    )
+    if sc is None:
+        st.session_state["_scenario_load_error"] = "Scénario introuvable dans la bibliothèque."
+        return
+    st.session_state["_pending_scenario_source"] = {
+        "type": "path",
+        "path": str(sc["path"]),
+        "name": sc["metadata"].get("nom") or sc["path"].stem,
+    }
+
+
+def _queue_uploaded_scenario():
+    """Callback : copie les bytes du fichier importé pour une relecture sûre."""
+    epoch = st.session_state.get("_scenario_ui_epoch", 0)
+    uploaded_file = st.session_state.get(f"scenario_upload_{epoch}")
+    if uploaded_file is None:
+        return
+    raw = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
+    if not raw:
+        st.session_state["_scenario_load_error"] = "Le fichier importé est vide."
+        return
+    st.session_state["_pending_scenario_source"] = {
+        "type": "bytes",
+        "bytes": raw,
+        "name": getattr(uploaded_file, "name", None),
+    }
+
+
+_apply_pending_scenario()
+
+
 def _compter_trains_initiaux(missions, heure_debut, heure_fin):
     """Compte le nombre de trains aller initiaux sur la plage de service."""
     total = 0
@@ -435,6 +515,9 @@ with st.expander("1. Gares et Infrastructure", expanded=True):
         _scenario_loaded_flag = st.session_state.pop("_scenario_loaded_msg", None)
         if _scenario_loaded_flag:
             st.success(_scenario_loaded_flag)
+        _scenario_load_error = st.session_state.pop("_scenario_load_error", None)
+        if _scenario_load_error:
+            st.error(_scenario_load_error)
 
         with st.expander("📚 Charger un scénario", expanded=(st.session_state.gares is None)):
             tab_biblio, tab_fichier = st.tabs(["Bibliothèque", "Importer un fichier"])
@@ -443,53 +526,100 @@ with st.expander("1. Gares et Infrastructure", expanded=True):
                 scenarios = scenarios_manager.list_scenarios()
                 if not scenarios:
                     st.caption("Aucun scénario dans `scenarios/`. Téléchargez votre configuration "
-                               "actuelle depuis le menu d'export du graphe horaire pour démarrer la bibliothèque.")
+                               "actuelle depuis le menu d'export du graphe horaire, puis déposez-la "
+                               "dans `scenarios/<région>/<ligne>/`.")
                 else:
+                    tree = scenarios_manager.group_scenarios_by_region_line(scenarios)
+                    regions = list(tree.keys())
+                    placeholder = _SCENARIO_PLACEHOLDER
+                    st.caption("Naviguez par région puis par ligne. Fichiers : `scenarios/<région>/<ligne>/`.")
+
+                    col_r, col_l = st.columns(2)
+                    with col_r:
+                        region = st.selectbox(
+                            "Région",
+                            regions,
+                            key="scenario_region",
+                            on_change=_on_scenario_region_change,
+                        )
+                    lignes = list(tree.get(region, {}).keys())
+                    if st.session_state.get("scenario_ligne") not in lignes and lignes:
+                        st.session_state["scenario_ligne"] = lignes[0]
+                    with col_l:
+                        ligne = st.selectbox(
+                            "Ligne",
+                            lignes,
+                            key="scenario_ligne",
+                            on_change=_on_scenario_ligne_change,
+                        )
+
+                    line_scenarios = tree.get(region, {}).get(ligne, [])
+                    rel_options = [placeholder] + [s["rel_path"] for s in line_scenarios]
+                    labels = {s["rel_path"]: s["metadata"]["nom"] for s in line_scenarios}
+
+                    def _fmt_scenario(rel):
+                        if rel == placeholder:
+                            return placeholder
+                        return labels.get(rel, rel)
+
+                    if st.session_state.get("scenario_selector") not in rel_options:
+                        st.session_state["scenario_selector"] = placeholder
+
                     col_sel, col_btn = st.columns([4, 1])
                     with col_sel:
-                        options = ["— Sélectionner —"] + [s["metadata"]["nom"] for s in scenarios]
-                        choix = st.selectbox("Scénario", options, key="scenario_selector")
+                        choix = st.selectbox(
+                            "Scénario",
+                            rel_options,
+                            format_func=_fmt_scenario,
+                            key="scenario_selector",
+                        )
                     with col_btn:
                         st.markdown("&nbsp;")  # alignement vertical
                         load_clicked = st.button(
                             "Charger",
-                            disabled=(choix == "— Sélectionner —"),
+                            disabled=(choix == placeholder),
                             key="scenario_load_btn",
+                            on_click=_queue_library_scenario,
                         )
+                    # Filet de sécurité : si le callback n'a pas tourné, on
+                    # file la source et on relance pour l'appliquer en tête.
+                    if load_clicked and "_scenario_loaded_msg" not in st.session_state:
+                        _queue_library_scenario()
+                        st.rerun()
 
-                    if choix != "— Sélectionner —":
-                        sc_meta = next(s for s in scenarios if s["metadata"]["nom"] == choix)
-                        md = sc_meta["metadata"]
-                        tags_str = ", ".join(md.get("tags", []) or [])
-                        st.caption(
-                            f"**{md['nom']}** — {md.get('description', '')}  \n"
-                            f"Auteur : {md.get('auteur', '?')} · "
-                            f"Modifié : {md.get('date_modification', '?')}  \n"
-                            f"Tags : {tags_str or '—'}"
-                        )
-
-                    if load_clicked and choix != "— Sélectionner —":
-                        sc_meta = next(s for s in scenarios if s["metadata"]["nom"] == choix)
-                        try:
-                            scenario_data = scenarios_manager.load_scenario(sc_meta["path"])
-                            scenarios_manager.apply_scenario_to_session(scenario_data, st.session_state)
-                            st.session_state["_scenario_loaded_msg"] = f"Scénario « {choix} » chargé."
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Impossible de charger le scénario : {e}")
+                    if choix != placeholder:
+                        sc_meta = next((s for s in line_scenarios if s["rel_path"] == choix), None)
+                        if sc_meta:
+                            md = sc_meta["metadata"]
+                            tags_str = ", ".join(md.get("tags", []) or [])
+                            st.caption(
+                                f"**{md['nom']}** — {sc_meta['region']} / {sc_meta['ligne']}  \n"
+                                f"{md.get('description', '')}  \n"
+                                f"Auteur : {md.get('auteur') or '?'} · "
+                                f"Modifié : {md.get('date_modification') or '?'}  \n"
+                                f"Tags : {tags_str or '—'}"
+                            )
 
             with tab_fichier:
+                upload_key = f"scenario_upload_{st.session_state.get('_scenario_ui_epoch', 0)}"
+
                 uploaded = st.file_uploader(
-                    "Fichier scénario (.json)", type=["json"], key="scenario_upload"
+                    "Fichier scénario (.json)", type=["json"], key=upload_key
                 )
                 if uploaded is not None:
                     try:
-                        data = scenarios_manager.load_scenario(uploaded)
+                        data = scenarios_manager.load_scenario(
+                            uploaded.getvalue() if hasattr(uploaded, "getvalue") else uploaded
+                        )
                         nom = data.get("metadata", {}).get("nom") or uploaded.name
                         st.caption(f"Prêt à importer : **{nom}**")
-                        if st.button("Appliquer ce fichier", key="scenario_apply_upload_btn"):
-                            scenarios_manager.apply_scenario_to_session(data, st.session_state)
-                            st.session_state["_scenario_loaded_msg"] = f"Scénario importé : {nom}"
+                        apply_clicked = st.button(
+                            "Appliquer ce fichier",
+                            key="scenario_apply_upload_btn",
+                            on_click=_queue_uploaded_scenario,
+                        )
+                        if apply_clicked and "_scenario_loaded_msg" not in st.session_state:
+                            _queue_uploaded_scenario()
                             st.rerun()
                     except Exception as e:
                         st.error(f"Fichier invalide : {e}")
@@ -649,7 +779,9 @@ if st.session_state.get('gares') is not None:
     options_materiel_list = list(options_materiel_map.keys())
 
     with st.expander("3. Missions", expanded=True):
-        nombre_missions = st.number_input("Nombre de types de missions", 1, 10, len(st.session_state.missions) or 1)
+        if "nombre_missions" not in st.session_state:
+            st.session_state.nombre_missions = len(st.session_state.missions) or 1
+        nombre_missions = st.number_input("Nombre de types de missions", 1, 10, key="nombre_missions")
 
         while len(st.session_state.missions) < nombre_missions:
             st.session_state.missions.append({})
@@ -1998,6 +2130,17 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
                             "Tags (séparés par virgules, optionnel)",
                             key="scenario_dl_tags",
                         )
+                        col_reg, col_lig = st.columns(2)
+                        region_dl = col_reg.text_input(
+                            "Région (optionnel)",
+                            key="scenario_dl_region",
+                            help="Pour classer le fichier : `scenarios/<région>/<ligne>/`.",
+                        )
+                        ligne_dl = col_lig.text_input(
+                            "Ligne (optionnel)",
+                            key="scenario_dl_ligne",
+                            help="Sous-dossier de la région dans la bibliothèque.",
+                        )
                         desc_dl = st.text_area(
                             "Description (optionnel)",
                             key="scenario_dl_desc",
@@ -2014,6 +2157,10 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
                                 ]
                             if desc_dl:
                                 scenario_dict["metadata"]["description"] = desc_dl
+                            if region_dl:
+                                scenario_dict["metadata"]["region"] = region_dl.strip()
+                            if ligne_dl:
+                                scenario_dict["metadata"]["ligne"] = ligne_dl.strip()
 
                             scenario_bytes = scenarios_manager.serialize_scenario(scenario_dict)
                             default_name = scenarios_manager.default_download_filename(scenario_dict)
@@ -2025,7 +2172,7 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
                                 mime="application/json",
                                 key="dl_scenario_json",
                                 help="Le fichier peut être rechargé via l'onglet « Importer un fichier » "
-                                     "ou déposé dans `scenarios/` pour alimenter la bibliothèque.",
+                                     "ou déposé dans `scenarios/<région>/<ligne>/` pour la bibliothèque.",
                             )
                         except Exception as e:
                             st.error(f"Impossible de préparer le scénario : {e}")
