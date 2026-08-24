@@ -26,6 +26,7 @@ Usage :
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
+from pathlib import Path
 import json
 import re # Import re, bien que les helpers soient supprimés
 from collections import defaultdict
@@ -51,6 +52,70 @@ from optimisation_logic import (
     optimiser_graphique_horaire)
 
 import scenarios_manager
+
+
+def _library_scenarios():
+    """Liste les scénarios en normalisant region / ligne / rel_path.
+
+    Tolère un `scenarios_manager` plus ancien (déploiement Streamlit Cloud
+    qui n'aurait pas encore rechargé le module).
+    """
+    raw = scenarios_manager.list_scenarios()
+    out = []
+    scenarios_dir = getattr(scenarios_manager, "SCENARIOS_DIR", Path(__file__).parent / "scenarios")
+    classify = getattr(scenarios_manager, "classify_scenario_path", None)
+    for s in raw:
+        md = dict(s.get("metadata") or {})
+        path = s.get("path")
+        rel = s.get("rel_path")
+        if not rel and path is not None:
+            try:
+                rel = Path(path).resolve().relative_to(Path(scenarios_dir).resolve()).as_posix()
+            except Exception:
+                rel = Path(path).name
+        region = s.get("region")
+        ligne = s.get("ligne")
+        if not region or not ligne:
+            if callable(classify) and path is not None:
+                region, ligne = classify(Path(path), md)
+            else:
+                region = (md.get("region") or "").strip() or "Non classé"
+                ligne = (md.get("ligne") or "").strip() or "Général"
+        if "nom" not in md:
+            md["nom"] = Path(path).stem if path is not None else "scénario"
+        entry = dict(s)
+        entry["metadata"] = md
+        entry["rel_path"] = rel or md["nom"]
+        entry["region"] = region
+        entry["ligne"] = ligne
+        out.append(entry)
+    return out
+
+
+def _group_scenarios_library(scenarios):
+    """Regroupe {région: {ligne: [scénarios]}}, avec repli si le module est ancien."""
+    fn = getattr(scenarios_manager, "group_scenarios_by_region_line", None)
+    if callable(fn):
+        try:
+            tree = fn(scenarios)
+            if tree:
+                return tree
+        except (TypeError, KeyError, AttributeError):
+            pass
+    tree = {}
+    for s in scenarios:
+        tree.setdefault(s["region"], {}).setdefault(s["ligne"], []).append(s)
+
+    def _sort_label(label):
+        return (1 if label == "Non classé" else 0, str(label).casefold())
+
+    ordered = {}
+    for region in sorted(tree, key=_sort_label):
+        ordered[region] = {
+            ligne: tree[region][ligne]
+            for ligne in sorted(tree[region], key=_sort_label)
+        }
+    return ordered
 
 
 def _parse_bulk_pp_for_endpoints(raw_text, terminus, origine, mode_calcul):
@@ -316,7 +381,9 @@ st.title("Graphique horaire ferroviaire - Prototype")
 if "gares" not in st.session_state: st.session_state.gares = None
 if "missions" not in st.session_state: st.session_state.missions = []
 if "roulement_manuel" not in st.session_state: st.session_state.roulement_manuel = {}
-if "mode_calcul" not in st.session_state: st.session_state.mode_calcul = "Standard"
+if "mode_calcul" not in st.session_state: st.session_state.mode_calcul = "Calcul Energie"
+if "mode_calcul_selector" not in st.session_state: st.session_state.mode_calcul_selector = "Calcul Energie"
+if "mode_generation" not in st.session_state: st.session_state.mode_generation = "Rotation optimisée"
 if "chronologie_calculee" not in st.session_state: st.session_state.chronologie_calculee = None
 if "stats_homogeneite" not in st.session_state: st.session_state.stats_homogeneite = {}
 if "run_calculation" not in st.session_state: st.session_state.run_calculation = False
@@ -390,7 +457,7 @@ def _queue_library_scenario():
     if not rel or rel == _SCENARIO_PLACEHOLDER:
         return
     sc = next(
-        (s for s in scenarios_manager.list_scenarios() if s["rel_path"] == rel),
+        (s for s in _library_scenarios() if s.get("rel_path") == rel),
         None,
     )
     if sc is None:
@@ -507,7 +574,12 @@ def estimer_temps_calcul(missions, heure_debut, heure_fin, mode="simple", optimi
 with st.expander("1. Gares et Infrastructure", expanded=True):
 
     # Sélection du mode de calcul qui conditionne l'affichage
-    st.session_state.mode_calcul = st.radio("Mode de calcul", ["Standard", "Calcul Energie"], horizontal=True, key="mode_calcul_selector")
+    st.session_state.mode_calcul = st.radio(
+        "Mode de calcul",
+        ["Calcul Energie", "Standard"],
+        horizontal=True,
+        key="mode_calcul_selector",
+    )
     mode_calcul = st.session_state.mode_calcul
 
     # En mode Énergie, proposer de charger un scénario pré-enregistré
@@ -523,13 +595,13 @@ with st.expander("1. Gares et Infrastructure", expanded=True):
             tab_biblio, tab_fichier = st.tabs(["Bibliothèque", "Importer un fichier"])
 
             with tab_biblio:
-                scenarios = scenarios_manager.list_scenarios()
+                scenarios = _library_scenarios()
                 if not scenarios:
                     st.caption("Aucun scénario dans `scenarios/`. Téléchargez votre configuration "
                                "actuelle depuis le menu d'export du graphe horaire, puis déposez-la "
                                "dans `scenarios/<région>/<ligne>/`.")
                 else:
-                    tree = scenarios_manager.group_scenarios_by_region_line(scenarios)
+                    tree = _group_scenarios_library(scenarios)
                     regions = list(tree.keys())
                     placeholder = _SCENARIO_PLACEHOLDER
                     st.caption("Naviguez par région puis par ligne. Fichiers : `scenarios/<région>/<ligne>/`.")
@@ -760,12 +832,23 @@ if st.session_state.get('gares') is not None:
                  "avant cette heure est tracé jusqu'au bout, même si l'arrivée est après.",
         )
 
-        # Le mode de génération n'est affiché qu'en mode "Standard"
-        mode_generation = "Rotation optimisée" # Par défaut pour le mode Énergie
-        if mode_calcul == "Standard":
-            mode_generation = st.radio("Mode de génération des trains", ["Manuel", "Rotation optimisée"],index=1)
-        else:
-            st.info("Le mode 'Calcul Energie' utilise le moteur événementiel pour simuler les trajets et la consommation énergétique.")
+        # Rotation optimisée = défaut. Le mode Manuel est une option : les
+        # roulements sont saisis (ou importés), et l'énergie est tout de même
+        # évaluée si on est en Calcul Énergie.
+        mode_generation = st.radio(
+            "Mode de génération des trains",
+            ["Rotation optimisée", "Manuel"],
+            horizontal=True,
+            key="mode_generation",
+            help="Rotation optimisée : l'algorithme construit les roulements. "
+                 "Manuel : vous les définissez (saisie ou import Excel). "
+                 "En Calcul Énergie, la consommation est évaluée dans les deux cas.",
+        )
+        if mode_calcul == "Calcul Energie":
+            if mode_generation == "Manuel":
+                st.info("Les roulements saisis manuellement seront simulés énergétiquement (consommation, batterie, etc.).")
+            else:
+                st.info("Le moteur événementiel simule les trajets et la consommation énergétique.")
 
     # --- SECTION 3: Définition des missions ---
 
@@ -1020,9 +1103,10 @@ if st.session_state.get('gares') is not None:
                     "inject_from_terminus_2": inject_t2
                 }
 
-    # --- SECTION 4: Mode Manuel (uniquement en mode Standard) ---
-    if mode_calcul == "Standard" and mode_generation == "Manuel":
-        with st.expander("4. Construction manuelle des roulements", expanded=True):
+    # --- SECTION 4/5: Mode Manuel (option, y compris en Calcul Énergie) ---
+    if mode_generation == "Manuel":
+        _manual_num = "5" if mode_calcul == "Calcul Energie" else "4"
+        with st.expander(f"{_manual_num}. Construction manuelle des roulements", expanded=True):
             nombre_trains = st.number_input("Nombre de trains", 1, 30, len(st.session_state.roulement_manuel) or 1)
 
             current_ids = list(st.session_state.roulement_manuel.keys())
@@ -1315,9 +1399,10 @@ if st.session_state.get('gares') is not None:
                         st.session_state.energy_params[type_mat] = params
 
 
-    # --- SECTION 5: Vérification de Fréquence (uniquement en mode Standard/Manuel) ---
-    if mode_calcul == "Standard" and mode_generation == "Manuel" and any(st.session_state.roulement_manuel.values()):
-        with st.expander("5. Vérification de cohérence des fréquences", expanded=True):
+    # --- SECTION 5: Vérification de Fréquence (mode Manuel) ---
+    if mode_generation == "Manuel" and any(st.session_state.roulement_manuel.values()):
+        _freq_num = "5b" if mode_calcul == "Calcul Energie" else "5"
+        with st.expander(f"{_freq_num}. Vérification de cohérence des fréquences", expanded=True):
             analyses = analyser_frequences_manuelles(st.session_state.roulement_manuel, st.session_state.missions, heure_debut_service, heure_fin_service)
             for mission_key, resultat in analyses.items():
                 st.subheader(f"Analyse pour: {mission_key}")
@@ -1332,9 +1417,10 @@ if st.session_state.get('gares') is not None:
 # SECTION : PARAMÈTRES D'OPTIMISATION AVANCÉE
 # =============================================================================
 
-if st.session_state.gares is not None and st.session_state.missions and not (mode_calcul == "Standard" and mode_generation == "Manuel"):
+if st.session_state.gares is not None and st.session_state.missions:
     st.markdown("---")
-    with st.expander("5. ⚙️ Configuration de l'Optimisation", expanded=True):
+    if mode_generation != "Manuel":
+      with st.expander("5. ⚙️ Configuration de l'Optimisation", expanded=True):
 
         st.markdown("""
         **Sélectionnez un mode d'optimisation** pour générer les horaires de manière intelligente.
@@ -1546,41 +1632,47 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
         fenetre_heures = st.number_input("Durée de la fenêtre (h)", 1.0, duree_heures_s, min(5.0, duree_heures_s))
         decalage_heures = st.slider("Début de la fenêtre (h)", 0.0, max(0.0, duree_heures_s - fenetre_heures), 0.0, 0.5)
 
-        st.subheader("Options d'optimisation")
+        allow_sharing = st.session_state.get("allow_sharing_checkbox", True)
+        if mode_generation != "Manuel":
+            st.subheader("Options d'optimisation")
 
-        col_opt1, col_opt2 = st.columns(2)
+            col_opt1, col_opt2 = st.columns(2)
 
-        with col_opt1:
-            allow_sharing = st.checkbox(
-                "Autoriser le partage des rames entre missions",
-                value=True,
-                key="allow_sharing_checkbox",
-                help="""
-                Si activé, les rames peuvent être réutilisées entre missions du MÊME type de matériel :
-                - ✅ Diesel avec Diesel
-                - ✅ Batterie avec Batterie
-                - ✅ Électrique avec Électrique
-                - ✅ Bimode avec Bimode
-                - ❌ JAMAIS entre types différents (ex: Diesel + Batterie)
+            with col_opt1:
+                allow_sharing = st.checkbox(
+                    "Autoriser le partage des rames entre missions",
+                    value=True,
+                    key="allow_sharing_checkbox",
+                    help="""
+                    Si activé, les rames peuvent être réutilisées entre missions du MÊME type de matériel :
+                    - ✅ Diesel avec Diesel
+                    - ✅ Batterie avec Batterie
+                    - ✅ Électrique avec Électrique
+                    - ✅ Bimode avec Bimode
+                    - ❌ JAMAIS entre types différents (ex: Diesel + Batterie)
 
-                Cela réduit le nombre total de rames nécessaires.
-                """
-            )
+                    Cela réduit le nombre total de rames nécessaires.
+                    """
+                )
 
-        with col_opt2:
-            # Affichage du nombre attendu de rames (estimation)
-            if st.session_state.missions:
-                # Calcul approximatif du nombre de rames si pas de partage
-                nb_missions = len([m for m in st.session_state.missions if m.get("frequence", 0) > 0])
-                if nb_missions > 0:
-                    if allow_sharing:
-                        st.info(f"📊 Partage activé : nombre de rames optimisé")
-                    else:
-                        st.warning(f"⚠️ Sans partage : environ {nb_missions * 2}+ rames nécessaires")
-
+            with col_opt2:
+                # Affichage du nombre attendu de rames (estimation)
+                if st.session_state.missions:
+                    # Calcul approximatif du nombre de rames si pas de partage
+                    nb_missions = len([m for m in st.session_state.missions if m.get("frequence", 0) > 0])
+                    if nb_missions > 0:
+                        if allow_sharing:
+                            st.info(f"📊 Partage activé : nombre de rames optimisé")
+                        else:
+                            st.warning(f"⚠️ Sans partage : environ {nb_missions * 2}+ rames nécessaires")
+        else:
+            if not any(st.session_state.roulement_manuel.values()):
+                st.warning("Définissez au moins une étape de roulement dans la section « Construction manuelle des roulements ».")
 
         estimation = "N/A"
-        if mode_generation == "Rotation optimisée" or mode_calcul == "Calcul Energie":
+        if mode_generation != "Manuel" and (
+            mode_generation == "Rotation optimisée" or mode_calcul == "Calcul Energie"
+        ):
             _mode_est = st.session_state.get("optimization_mode", "simple")
             _params_est = st.session_state.get("genetic_params", {}) if _mode_est == "genetic" else {}
             estimation = estimer_temps_calcul(
@@ -1609,7 +1701,28 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
             # Déterminer si on utilise l'optimisation avancée
             use_advanced = st.session_state.get('use_advanced_optimization', False)
 
-            if use_advanced:
+            if mode_generation == "Manuel":
+                with st.spinner("Génération du graphique à partir des roulements manuels..."):
+                    try:
+                        if not any(st.session_state.roulement_manuel.values()):
+                            st.error("Aucun roulement manuel défini. Ajoutez des étapes (ou importez un Excel) avant de générer.")
+                        else:
+                            chronologie = preparer_roulement_manuel(st.session_state.roulement_manuel)
+                            warnings = {}
+                            from core_logic import _calculer_stats_homogeneite
+                            stats_homogeneite = _calculer_stats_homogeneite(chronologie)
+                            st.session_state.chronologie_calculee = chronologie
+                            st.session_state.warnings_calcul = warnings
+                            st.session_state.stats_homogeneite = stats_homogeneite
+                            st.success("✅ Graphique généré à partir des roulements manuels.")
+                    except Exception as e:
+                        st.error(f"Une erreur est survenue lors de la génération du graphique : {e}")
+                        st.session_state.chronologie_calculee = None
+                        st.session_state.warnings_calcul = {}
+                        st.session_state.stats_homogeneite = {}
+                        st.stop()
+
+            elif use_advanced:
                 # =====================================================================
                 # MODE OPTIMISATION AVANCÉE
                 # =====================================================================
@@ -1818,32 +1931,22 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
                 with st.spinner("Génération du graphique en cours..."):
                     try:
                         _t0_standard = time.time()
-                        if mode_generation == "Manuel":
-                            chronologie = preparer_roulement_manuel(st.session_state.roulement_manuel)
-                            warnings = {} # Pas de warnings en mode manuel pour l'instant
-
-                            # Calculer les stats d'homogénéité
-                            from core_logic import _calculer_stats_homogeneite
-                            stats_homogeneite = _calculer_stats_homogeneite(chronologie)
-                        else:
-                            chronologie, warnings, stats_homogeneite = generer_tous_trajets_optimises(
-                                st.session_state.missions,
-                                st.session_state.gares,
-                                heure_debut_service,
-                                heure_fin_service,
-                                allow_sharing=allow_sharing,
-                                search_strategy='smart'
-                            )
+                        chronologie, warnings, stats_homogeneite = generer_tous_trajets_optimises(
+                            st.session_state.missions,
+                            st.session_state.gares,
+                            heure_debut_service,
+                            heure_fin_service,
+                            allow_sharing=allow_sharing,
+                            search_strategy='smart'
+                        )
 
                         _elapsed_standard = time.time() - _t0_standard
-                        # Calibration adaptative
-                        if mode_generation != "Manuel":
-                            _n_std = _compter_trains_initiaux(st.session_state.missions, heure_debut_service, heure_fin_service)
-                            st.session_state["last_calcul_info"] = {
-                                "mode": "simple",
-                                "n_events": _n_std,
-                                "elapsed_s": _elapsed_standard,
-                            }
+                        _n_std = _compter_trains_initiaux(st.session_state.missions, heure_debut_service, heure_fin_service)
+                        st.session_state["last_calcul_info"] = {
+                            "mode": "simple",
+                            "n_events": _n_std,
+                            "elapsed_s": _elapsed_standard,
+                        }
 
                         st.session_state.chronologie_calculee = chronologie
                         st.session_state.warnings_calcul = warnings
@@ -2280,77 +2383,8 @@ if st.session_state.gares is not None and st.session_state.missions and not (mod
                         st.warning("Aucun résultat énergétique à afficher.")
 
 else:
-    st.warning("Veuillez d'abord définir et valider les gares à la section 1.")
-
-# Bloc séparé pour le mode Manuel : bouton de calcul + affichage des résultats
-if (st.session_state.get('gares') is not None and st.session_state.missions
-        and mode_calcul == "Standard" and mode_generation == "Manuel"):
-
-    with st.expander("6. Calcul et Affichage", expanded=True):
-        dt_debut_s = datetime.combine(datetime.min, heure_debut_service)
-        dt_fin_s = datetime.combine(datetime.min, heure_fin_service)
-        duree_heures_s = (dt_fin_s - dt_debut_s).total_seconds() / 3600
-        if duree_heures_s <= 0: duree_heures_s += 24
-        fenetre_heures = st.number_input("Durée de la fenêtre (h)", 1.0, duree_heures_s, min(5.0, duree_heures_s), key="fenetre_manuel")
-        decalage_heures = st.slider("Début de la fenêtre (h)", 0.0, max(0.0, duree_heures_s - fenetre_heures), 0.0, 0.5, key="decalage_manuel")
-
-        if "run_calculation_manuel" not in st.session_state:
-            st.session_state.run_calculation_manuel = False
-
-        if st.button("🚀 Générer le graphique horaire", type="primary", key="btn_generate_manuel"):
-            st.session_state.run_calculation_manuel = True
-
-        if st.session_state.run_calculation_manuel:
-            st.session_state.run_calculation_manuel = False
-
-            with st.spinner("Génération du graphique en cours..."):
-                try:
-                    chronologie = preparer_roulement_manuel(st.session_state.roulement_manuel)
-                    warnings = {}
-                    from core_logic import _calculer_stats_homogeneite
-                    stats_homogeneite = _calculer_stats_homogeneite(chronologie)
-
-                    st.session_state.chronologie_calculee = chronologie
-                    st.session_state.warnings_calcul = warnings
-                    st.session_state.stats_homogeneite = stats_homogeneite
-                    st.success("✅ Graphique généré avec succès !")
-
-                except Exception as e:
-                    st.error(f"Une erreur est survenue lors de la génération du graphique : {e}")
-                    st.session_state.chronologie_calculee = None
-                    st.session_state.warnings_calcul = {}
-                    st.session_state.stats_homogeneite = {}
-                    st.stop()
-
-        if st.session_state.chronologie_calculee:
-            chronologie = st.session_state.chronologie_calculee
-            params_affichage = {'duree_fenetre': fenetre_heures, 'decalage_heure': decalage_heures}
-            dataframe_gares = st.session_state.gares
-            figure = creer_graphique_horaire(
-                chronologie,
-                dataframe_gares,
-                heure_debut_service,
-                params_affichage,
-                mode_calcul=mode_calcul,
-                missions_par_train={},
-                all_energy_params=st.session_state.energy_params
-            )
-            st.subheader("Graphique horaire")
-            st.pyplot(figure)
-
-            excel_buffer, pdf_buffer = generer_exports(chronologie, figure, logo_path="logo.png")
-            st.download_button("Télécharger roulements (Excel)", excel_buffer, "roulements.xlsx", key="dl_excel_manuel")
-            st.download_button("Télécharger graphique (PDF)", pdf_buffer, "graphique.pdf", key="dl_pdf_manuel")
-
-            temps_theoriques = {}
-            for m in st.session_state.missions:
-                orig, term = m.get('origine', ''), m.get('terminus', '')
-                t_aller = m.get('temps_trajet') or 0
-                t_retour = m.get('temps_trajet_retour') or t_aller if m.get('trajet_asymetrique') else t_aller
-                if orig and term:
-                    temps_theoriques[f"{orig} → {term}"] = t_aller
-                    temps_theoriques[f"{term} → {orig}"] = t_retour
-            _afficher_tableau_temps_parcours(chronologie, temps_theoriques, df_gares=dataframe_gares)
+    if st.session_state.get('gares') is None:
+        st.warning("Veuillez d'abord définir et valider les gares à la section 1.")
 
 
 # =============================================================================
@@ -2361,9 +2395,8 @@ st.markdown("---")
 st.caption("""
 🚄 **Chronofer** - Développé par le Cerema.
 
-Modes d'optimisation :
-- **Simple** : Simulation directe basée sur les temps de retournement.
-- **Fast / Smart** : Heuristiques de recherche progressive.
-- **Exhaustif** : Exploration complète pour solutions optimales (petites instances).
-- **Génétique** : Algorithme évolutionnaire parallèle pour grandes instances.
+Modes :
+- **Calcul Énergie** (défaut) : simulation de consommation sur les roulements générés ou saisis.
+- **Rotation optimisée** : algorithmes Simple / Fast / Smart / Exhaustif / Génétique.
+- **Manuel** (option) : roulements saisis ou importés Excel, avec évaluation énergétique.
 """)

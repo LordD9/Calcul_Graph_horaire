@@ -307,6 +307,7 @@ def apply_scenario_to_session(scenario: dict, st_session) -> None:
     # Mode de calcul forcé : un scénario s'applique au mode Énergie
     st_session["mode_calcul"] = "Calcul Energie"
     st_session["mode_calcul_selector"] = "Calcul Energie"
+    st_session["mode_generation"] = "Rotation optimisée"
 
     md = dict(scenario.get("metadata", {}) or {})
     st_session["_loaded_scenario_meta"] = md
@@ -549,6 +550,7 @@ def _reset_session_for_scenario_load(st_session) -> None:
         "gares_texte_input",
         "nombre_missions",
         "mode_calcul_selector",
+        "mode_generation",
         "scenario_dl_name",
         "scenario_dl_tags",
         "scenario_dl_desc",
