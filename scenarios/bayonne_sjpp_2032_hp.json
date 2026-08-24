@@ -1,0 +1,218 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "nom": "bayonne_sjpp_2032_",
+    "description": "",
+    "auteur": "",
+    "date_creation": "2026-08-21",
+    "date_modification": "2026-08-21",
+    "tags": []
+  },
+  "service": {
+    "heure_debut": "06:00",
+    "heure_fin": "22:00"
+  },
+  "infrastructure": {
+    "gares": [
+      {
+        "gare": "Saint-Jean-Pied-de-Port",
+        "distance": 0.0,
+        "infra": "F",
+        "electrification": "0",
+        "rampe_section_a_venir": -5.0
+      },
+      {
+        "gare": "Ossès - Saint-Martin-d'Arrossa",
+        "distance": 11.0,
+        "infra": "VE",
+        "electrification": "0",
+        "rampe_section_a_venir": -4.0
+      },
+      {
+        "gare": "Bidarray - Pont-Noblia",
+        "distance": 17.0,
+        "infra": "F",
+        "electrification": "0",
+        "rampe_section_a_venir": -4.0
+      },
+      {
+        "gare": "Itxassou",
+        "distance": 27.0,
+        "infra": "F",
+        "electrification": "0",
+        "rampe_section_a_venir": -3.0
+      },
+      {
+        "gare": "Cambo-les-Bains",
+        "distance": 33.0,
+        "infra": "VE",
+        "electrification": "0",
+        "rampe_section_a_venir": -2.0
+      },
+      {
+        "gare": "Halsou - Larressore",
+        "distance": 36.0,
+        "infra": "F",
+        "electrification": "0",
+        "rampe_section_a_venir": -1.0
+      },
+      {
+        "gare": "Ustaritz",
+        "distance": 40.0,
+        "infra": "F",
+        "electrification": "0",
+        "rampe_section_a_venir": -1.0
+      },
+      {
+        "gare": "Villefranque",
+        "distance": 43.0,
+        "infra": "F",
+        "electrification": "0",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "PK2",
+        "distance": 50.0,
+        "infra": "D",
+        "electrification": "C1500",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "Bayonne",
+        "distance": 52.0,
+        "infra": "D",
+        "electrification": "C1500",
+        "rampe_section_a_venir": 0.0
+      }
+    ]
+  },
+  "missions": [
+    {
+      "origine": "Saint-Jean-Pied-de-Port",
+      "terminus": "Bayonne",
+      "frequence": 0.5,
+      "temps_trajet": 62,
+      "temps_retournement_A": 10,
+      "temps_retournement_B": 15,
+      "reference_minutes": "55",
+      "passing_points": [
+        {
+          "gare": "Ossès - Saint-Martin-d'Arrossa",
+          "time_offset_min": 13,
+          "arret_commercial": true,
+          "duree_arret_min": 2
+        },
+        {
+          "gare": "Bidarray - Pont-Noblia",
+          "time_offset_min": 21,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Itxassou",
+          "time_offset_min": 32,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Cambo-les-Bains",
+          "time_offset_min": 40,
+          "arret_commercial": true,
+          "duree_arret_min": 2
+        },
+        {
+          "gare": "Halsou - Larressore",
+          "time_offset_min": 44,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Ustaritz",
+          "time_offset_min": 49,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Villefranque",
+          "time_offset_min": 53,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "PK2",
+          "time_offset_min": 60,
+          "arret_commercial": false,
+          "duree_arret_min": 0
+        }
+      ],
+      "trajet_asymetrique": false,
+      "temps_trajet_retour": 62,
+      "passing_points_retour": [],
+      "pp_raw_text": "Saint-Jean-Pied-de-Port;0;0\nOssès - Saint-Martin-d'Arrossa;13;2\nBidarray - Pont-Noblia;21;1\nItxassou;32;1\nCambo-les-Bains;40;2\nHalsou - Larressore;44;1\nUstaritz;49;1\nVillefranque;53;1\nPK2;60;0\nBayonne;62;0",
+      "type_materiel": "batterie",
+      "inject_from_terminus_2": false
+    },
+    {
+      "origine": "Cambo-les-Bains",
+      "terminus": "Bayonne",
+      "frequence": 0.5,
+      "temps_trajet": 25,
+      "temps_retournement_A": 10,
+      "temps_retournement_B": 10,
+      "reference_minutes": "32",
+      "passing_points": [
+        {
+          "gare": "Halsou - Larressore",
+          "time_offset_min": 5,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Ustaritz",
+          "time_offset_min": 12,
+          "arret_commercial": true,
+          "duree_arret_min": 2
+        },
+        {
+          "gare": "Villefranque",
+          "time_offset_min": 16,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "PK2",
+          "time_offset_min": 23,
+          "arret_commercial": false,
+          "duree_arret_min": 0
+        }
+      ],
+      "trajet_asymetrique": false,
+      "temps_trajet_retour": 25,
+      "passing_points_retour": [],
+      "pp_raw_text": "Cambo-les-Bains;0;0\nHalsou - Larressore;5;1\nUstaritz;12;2\nVillefranque;16;1\nPK2;23;0\nBayonne;25;0",
+      "type_materiel": "batterie",
+      "inject_from_terminus_2": false
+    }
+  ],
+  "energy_params": {
+    "batterie": {
+      "masse_tonne": 50,
+      "capacite_batterie_kwh": 800,
+      "facteur_charge_C": 1.0,
+      "recuperation_pct": 75,
+      "soc_min_pct": 20,
+      "soc_max_pct": 95,
+      "capacite_eol_pct": 70,
+      "simuler_fin_de_vie": true,
+      "davis_A_N_t": 15.0,
+      "davis_B_N_t_kph": 0.1,
+      "davis_C_N_t_kph2": 0.0041,
+      "accel_ms2": 1.0,
+      "decel_ms2": 0.6,
+      "facteur_aux_kwh_h": 43.0,
+      "rendement_thermique_pct": 38,
+      "rendement_electrique_pct": 88,
+      "kwh_per_liter_diesel": 10.0
+    }
+  }
+}
