@@ -95,7 +95,7 @@
       "frequence": 1.0,
       "temps_trajet": 60,
       "temps_retournement_A": 5,
-      "temps_retournement_B": 5,
+      "temps_retournement_B": 10,
       "reference_minutes": "0",
       "passing_points": [
         {
@@ -160,8 +160,8 @@
       "frequence": 1.0,
       "temps_trajet": 20,
       "temps_retournement_A": 5,
-      "temps_retournement_B": 5,
-      "reference_minutes": "12",
+      "temps_retournement_B": 10,
+      "reference_minutes": "10",
       "passing_points": [
         {
           "gare": "Halsou - Larressore",

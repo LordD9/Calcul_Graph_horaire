@@ -4,11 +4,11 @@
     "nom": "bayonne_sjpp_scenario_3",
     "description": "",
     "auteur": "",
-    "date_creation": "2026-06-09",
-    "date_modification": "2026-06-09",
+    "date_creation": "2026-08-24",
+    "date_modification": "2026-08-24",
     "tags": [],
-    "region": "Nouvelle-Aquitaine",
-    "ligne": "Bayonne-Saint-Jean-Pied-de-Port"
+    "region": "",
+    "ligne": ""
   },
   "service": {
     "heure_debut": "06:00",
@@ -95,7 +95,7 @@
       "frequence": 1.0,
       "temps_trajet": 50,
       "temps_retournement_A": 8,
-      "temps_retournement_B": 8,
+      "temps_retournement_B": 10,
       "reference_minutes": "0",
       "passing_points": [
         {
@@ -150,7 +150,7 @@
       "trajet_asymetrique": false,
       "temps_trajet_retour": 50,
       "passing_points_retour": [],
-      "pp_raw_text": "Saint-Jean-Pied-de-Port;0;0\nOssès - Saint-Martin-d'Arrossa;9;1\nBidarray - Pont-Noblia;14;1\nItxassou;24;2\nCambo-les-Bains;30;1\nHalsou - Larressore;33;1\nUstaritz;39;2\nVillefranque;43;1\nPK2;48;0\nBayonne;50;0",
+      "pp_raw_text": "Ossès - Saint-Martin-d'Arrossa;9;1\nBidarray - Pont-Noblia;14;1\nItxassou;24;2\nCambo-les-Bains;30;1\nHalsou - Larressore;33;1\nUstaritz;39;2\nVillefranque;43;1\nPK2;48;0",
       "type_materiel": "batterie",
       "inject_from_terminus_2": true
     },
@@ -160,7 +160,7 @@
       "frequence": 1.0,
       "temps_trajet": 20,
       "temps_retournement_A": 8,
-      "temps_retournement_B": 8,
+      "temps_retournement_B": 10,
       "reference_minutes": "0",
       "passing_points": [
         {
@@ -191,7 +191,7 @@
       "trajet_asymetrique": false,
       "temps_trajet_retour": 20,
       "passing_points_retour": [],
-      "pp_raw_text": "Cambo-les-Bains;0;0\nHalsou - Larressore;4;1\nUstaritz;10;2\nVillefranque;13;1\nPK2;18;0\nBayonne;20;0",
+      "pp_raw_text": "Halsou - Larressore;4;1\nUstaritz;10;2\nVillefranque;13;1\nPK2;18;0",
       "type_materiel": "batterie",
       "inject_from_terminus_2": true
     }
