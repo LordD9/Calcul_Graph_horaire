@@ -875,6 +875,8 @@ if st.session_state.get('gares') is not None:
             with st.container(border=True):
                 st.subheader(f"Mission {i+1} (trajet Aller)")
                 mission = st.session_state.missions[i]
+                if f"saisie_pp_{i}" not in st.session_state:
+                    st.session_state[f"saisie_pp_{i}"] = "Saisie manuelle par lot"
 
                 cols = st.columns([2, 2, 3])
                 origine = cols[0].selectbox(f"Origine M{i+1}", gares_list, index=gares_list.index(mission.get("origine", gares_list[0])) if mission.get("origine") in gares_list else 0, key=f"orig{i}")
@@ -886,7 +888,7 @@ if st.session_state.get('gares') is not None:
                 # Auto-update du temps trajet planifié si la saisie en lot contient
                 # le terminus (aller) ou l'origine (retour). On détecte un changement
                 # du texte brut pour éviter d'écraser une modif manuelle ultérieure.
-                _is_bulk = st.session_state.get(f"saisie_pp_{i}", "Interface Guidée") == "Saisie manuelle par lot"
+                _is_bulk = st.session_state.get(f"saisie_pp_{i}", "Saisie manuelle par lot") == "Saisie manuelle par lot"
                 if _is_bulk:
                     _cur_bulk = st.session_state.get(f"pp_raw_{i}", "")
                     _prev_bulk = st.session_state.get(f"_prev_pp_raw_{i}")
@@ -938,7 +940,12 @@ if st.session_state.get('gares') is not None:
                 st.markdown("**Points de passage optionnels :**")
                 trajet_asymetrique = st.checkbox("Saisir un temps/parcours différent pour le retour", mission.get("trajet_asymetrique", False), key=f"asym_{i}")
 
-                saisie_pp_mode = st.radio("Méthode de saisie des points de passage", ["Interface Guidée", "Saisie manuelle par lot"], key=f"saisie_pp_{i}", horizontal=True)
+                saisie_pp_mode = st.radio(
+                    "Méthode de saisie des points de passage",
+                    ["Saisie manuelle par lot", "Interface Guidée"],
+                    key=f"saisie_pp_{i}",
+                    horizontal=True,
+                )
 
                 passing_points = []
                 passing_points_retour = []
@@ -1439,7 +1446,7 @@ if st.session_state.gares is not None and st.session_state.missions:
                 optimization_mode = st.selectbox(
                     "Algorithme",
                     ["simple", "fast", "smart_progressive", "exhaustif", "genetic"],
-                    index=2,  # Smart progressive par défaut
+                    index=0,  # Simple par défaut
                     format_func=lambda x: {
                         "simple": "🎯 Simple - Simulation directe (respect strict paramètres)",
                         "fast": "⚡ Fast - Ultra rapide avec logique optimisée (pas de 10 min)",
@@ -1570,11 +1577,39 @@ if st.session_state.gares is not None and st.session_state.missions:
                     ⚠️ **Garantie** : Aucune violation d'infrastructure ne sera créée
                     """)
 
+            st.markdown("---")
+            st.subheader("Partage des rames")
+            col_share1, col_share2 = st.columns(2)
+            with col_share1:
+                allow_sharing = st.checkbox(
+                    "Autoriser le partage des rames entre missions",
+                    value=True,
+                    key="allow_sharing_checkbox",
+                    help="""
+                    Si activé, les rames peuvent être réutilisées entre missions du MÊME type de matériel :
+                    - ✅ Diesel avec Diesel
+                    - ✅ Batterie avec Batterie
+                    - ✅ Électrique avec Électrique
+                    - ✅ Bimode avec Bimode
+                    - ❌ JAMAIS entre types différents (ex: Diesel + Batterie)
+
+                    Cela réduit le nombre total de rames nécessaires.
+                    """
+                )
+            with col_share2:
+                if st.session_state.missions:
+                    nb_missions = len([m for m in st.session_state.missions if m.get("frequence", 0) > 0])
+                    if nb_missions > 0:
+                        if allow_sharing:
+                            st.info("📊 Partage activé : nombre de rames optimisé")
+                        else:
+                            st.warning(f"⚠️ Sans partage : environ {nb_missions * 2}+ rames nécessaires")
+
             # Récapitulatif
             st.markdown("---")
             st.subheader("📋 Récapitulatif de la configuration")
 
-            col_recap1, col_recap2, col_recap3 = st.columns(3)
+            col_recap1, col_recap2, col_recap3, col_recap4 = st.columns(4)
 
             with col_recap1:
                 st.metric("Mode", optimization_mode.upper())
@@ -1589,6 +1624,9 @@ if st.session_state.gares is not None and st.session_state.missions:
                     st.metric("Croisements", "❌ Désactivé")
 
             with col_recap3:
+                st.metric("Partage rames", "✅ Activé" if allow_sharing else "❌ Désactivé")
+
+            with col_recap4:
                 _opt_params_est = {}
                 if optimization_mode == "genetic":
                     _opt_params_est = {"population_size": population_size, "generations": generations}
@@ -1633,39 +1671,7 @@ if st.session_state.gares is not None and st.session_state.missions:
         decalage_heures = st.slider("Début de la fenêtre (h)", 0.0, max(0.0, duree_heures_s - fenetre_heures), 0.0, 0.5)
 
         allow_sharing = st.session_state.get("allow_sharing_checkbox", True)
-        if mode_generation != "Manuel":
-            st.subheader("Options d'optimisation")
-
-            col_opt1, col_opt2 = st.columns(2)
-
-            with col_opt1:
-                allow_sharing = st.checkbox(
-                    "Autoriser le partage des rames entre missions",
-                    value=True,
-                    key="allow_sharing_checkbox",
-                    help="""
-                    Si activé, les rames peuvent être réutilisées entre missions du MÊME type de matériel :
-                    - ✅ Diesel avec Diesel
-                    - ✅ Batterie avec Batterie
-                    - ✅ Électrique avec Électrique
-                    - ✅ Bimode avec Bimode
-                    - ❌ JAMAIS entre types différents (ex: Diesel + Batterie)
-
-                    Cela réduit le nombre total de rames nécessaires.
-                    """
-                )
-
-            with col_opt2:
-                # Affichage du nombre attendu de rames (estimation)
-                if st.session_state.missions:
-                    # Calcul approximatif du nombre de rames si pas de partage
-                    nb_missions = len([m for m in st.session_state.missions if m.get("frequence", 0) > 0])
-                    if nb_missions > 0:
-                        if allow_sharing:
-                            st.info(f"📊 Partage activé : nombre de rames optimisé")
-                        else:
-                            st.warning(f"⚠️ Sans partage : environ {nb_missions * 2}+ rames nécessaires")
-        else:
+        if mode_generation == "Manuel":
             if not any(st.session_state.roulement_manuel.values()):
                 st.warning("Définissez au moins une étape de roulement dans la section « Construction manuelle des roulements ».")
 
@@ -2309,10 +2315,14 @@ if st.session_state.gares is not None and st.session_state.missions:
                         conso_elec_kwh = resultat_train.get("total_conso_electrique_kwh", 0)
                         total_litres = resultat_train.get("total_litres_diesel", 0)
                         recup_kwh = resultat_train.get("total_recup_kwh", 0)
+                        conso_aux_kwh = resultat_train.get("total_conso_aux_kwh", 0)
+                        conso_brute_kwh = resultat_train.get("total_conso_brute_kwh", 0)
 
                         conso_kwh_km_str = "N/A"
                         conso_L_km_str = "N/A"
                         recup_kwh_km_str = "N/A"
+                        aux_kwh_km_str = "N/A"
+                        aux_pct_str = "N/A"
 
                         if total_km > 0:
                             # kwh/km - Afficher si le train a un rendement elec
@@ -2326,6 +2336,9 @@ if st.session_state.gares is not None and st.session_state.missions:
                             # recup/km - Afficher si le train peut récupérer
                             if mat_can_recup:
                                 recup_kwh_km_str = f"{recup_kwh / total_km:.2f}" if recup_kwh > 0 else "0.00"
+                            aux_kwh_km_str = f"{conso_aux_kwh / total_km:.2f}"
+                        if conso_brute_kwh > 0:
+                            aux_pct_str = f"{100.0 * conso_aux_kwh / conso_brute_kwh:.1f} %"
 
 
                         resultats_globaux.append({
@@ -2333,6 +2346,8 @@ if st.session_state.gares is not None and st.session_state.missions:
                             "Type": options_materiel_map.get(type_mat, type_mat),
                             "Dist. (km)": f"{total_km:.1f}",
                             "Conso. Électrique (kWh/km)": conso_kwh_km_str,
+                            "Dont consommation des auxiliaires (kWh/km)": aux_kwh_km_str,
+                            "Dont consommation des auxiliaires (%)": aux_pct_str,
                             "Conso. Diesel (L/km)": conso_L_km_str,
                             "Économie Récupération (kWh/km)": recup_kwh_km_str,
                         })
@@ -2373,6 +2388,8 @@ if st.session_state.gares is not None and st.session_state.missions:
                         cols_to_display = ["Train", "Type", "Dist. (km)"]
                         if has_elec:
                             cols_to_display.append("Conso. Électrique (kWh/km)")
+                        cols_to_display.append("Dont consommation des auxiliaires (kWh/km)")
+                        cols_to_display.append("Dont consommation des auxiliaires (%)")
                         if has_diesel:
                             cols_to_display.append("Conso. Diesel (L/km)")
                         if can_recup:

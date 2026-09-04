@@ -283,6 +283,7 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
     total_recup_kwh = 0
     total_conso_thermique_kwh = 0
     total_conso_electrique_kwh = 0
+    total_conso_aux_kwh = 0
     total_distance_km = 0
     erreurs = []
 
@@ -356,11 +357,12 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
 
     # --- Helper: Comptabilise l'aux d'un arrêt dans les totaux globaux ---
     def _ajouter_aux_arret(duree_h, electrification_str):
-        nonlocal total_conso_brute_kwh, total_conso_electrique_kwh, total_conso_thermique_kwh
+        nonlocal total_conso_brute_kwh, total_conso_electrique_kwh, total_conso_thermique_kwh, total_conso_aux_kwh
         if duree_h <= 0:
             return
         conso_aux = facteur_aux_kwh_h * duree_h
         total_conso_brute_kwh += conso_aux
+        total_conso_aux_kwh += conso_aux
         is_cat = str(electrification_str).strip().upper() in ["C1500", "C25"]
         if type_materiel in ["electrique", "batterie"] or (type_materiel == "bimode" and is_cat):
             total_conso_electrique_kwh += conso_aux
@@ -369,7 +371,7 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
 
     # --- Helper: Gestion de l'arrêt (Recharge ou Décharge Aux) ---
     def simuler_arret(nom_gare, heure_debut, heure_fin, niveau_actuel, contexte="Arrêt"):
-        nonlocal total_conso_brute_kwh, total_conso_electrique_kwh
+        nonlocal total_conso_brute_kwh, total_conso_electrique_kwh, total_conso_aux_kwh
         duree_h = (heure_fin - heure_debut).total_seconds() / 3600.0
         if duree_h <= 0: return niveau_actuel
 
@@ -382,6 +384,7 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
         # Comptabiliser dans le total (consommation réelle du train, même à l'arrêt)
         total_conso_brute_kwh += conso_aux
         total_conso_electrique_kwh += conso_aux
+        total_conso_aux_kwh += conso_aux
 
         # Logique de recharge
         nouveau_niveau = niveau_actuel
@@ -473,6 +476,7 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
 
             # Initialisation segment
             conso_aux_segment_kwh = facteur_aux_kwh_h * duree_planifiee_h
+            total_conso_aux_kwh += conso_aux_segment_kwh
             total_distance_km += distance_km
 
             # Analyse Infra Segment (simplifiée au départ)
@@ -639,6 +643,7 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
         "total_conso_nette_kwh": total_conso_brute_kwh - total_recup_kwh,
         "total_conso_electrique_kwh": total_conso_electrique_kwh,
         "total_conso_thermique_kwh": total_conso_thermique_kwh,
+        "total_conso_aux_kwh": total_conso_aux_kwh,
         "total_litres_diesel": total_litres_diesel,
         "total_distance_km": total_distance_km,
         "batterie_log": log_batterie,

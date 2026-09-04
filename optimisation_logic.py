@@ -135,7 +135,7 @@ class SimulationParams:
 @dataclass
 class OptimizationConfig:
     """Configuration générale de l'optimisation."""
-    mode: str = "smart_progressive"  # Options: "simple", "fast", "smart_progressive", "exhaustif", "genetic"
+    mode: str = "simple"  # Options: "simple", "fast", "smart_progressive", "exhaustif", "genetic"
     crossing_optimization: CrossingOptimization = None
     
     # Paramètres génétiques optimisés
