@@ -1283,6 +1283,14 @@ if st.session_state.get('gares') is not None:
                             value=float(params.get("facteur_aux_kwh_h", 50.0)),
                             step=1.0, key=f"f_aux_{type_mat}"
                         )
+                        params["taux_aux_terminus_pct"] = c1.slider(
+                            "Taux d'utilisation des auxiliaires au terminus",
+                            min_value=0,
+                            max_value=100,
+                            value=int(params.get("taux_aux_terminus_pct", 100)),
+                            key=f"taux_aux_term_{type_mat}",
+                            help="Pourcentage de la puissance auxiliaires consommé lorsque le train est immobilisé au terminus (sans voyageurs). 100 % = même consommation qu'en ligne ; 0 % = auxiliaires coupés au terminus.",
+                        )
 
                         # Affichage conditionnel des paramètres batterie dans la 2e colonne
                         if type_mat == "batterie":
@@ -2305,6 +2313,13 @@ if st.session_state.gares is not None and st.session_state.missions:
                     has_elec = False
                     can_recup = False # Au moins un train peut-il récupérer ?
 
+                    def _fmt_dont_aux(valeur_km, part_pct):
+                        if valeur_km is None:
+                            return "N/A"
+                        if part_pct is None:
+                            return f"{valeur_km:.2f}"
+                        return f"{valeur_km:.2f} ({part_pct:.0f}%)"
+
                     for id_train, (resultat_train, type_mat) in resultats_energie_par_train.items():
 
                         # Vérifier si ce type de matériel peut récupérer
@@ -2315,31 +2330,31 @@ if st.session_state.gares is not None and st.session_state.missions:
                         conso_elec_kwh = resultat_train.get("total_conso_electrique_kwh", 0)
                         total_litres = resultat_train.get("total_litres_diesel", 0)
                         recup_kwh = resultat_train.get("total_recup_kwh", 0)
-                        conso_aux_kwh = resultat_train.get("total_conso_aux_kwh", 0)
-                        conso_brute_kwh = resultat_train.get("total_conso_brute_kwh", 0)
+                        aux_elec_kwh = resultat_train.get("total_conso_aux_electrique_kwh", 0)
+                        aux_litres = resultat_train.get("total_aux_litres_diesel", 0)
 
                         conso_kwh_km_str = "N/A"
                         conso_L_km_str = "N/A"
                         recup_kwh_km_str = "N/A"
                         aux_kwh_km_str = "N/A"
-                        aux_pct_str = "N/A"
+                        aux_L_km_str = "N/A"
 
                         if total_km > 0:
                             # kwh/km - Afficher si le train a un rendement elec
                             if type_mat in ["electrique", "bimode", "batterie"]:
                                 conso_kwh_km_str = f"{conso_elec_kwh / total_km:.2f}"
+                                pct_aux_elec = (100.0 * aux_elec_kwh / conso_elec_kwh) if conso_elec_kwh > 0 else None
+                                aux_kwh_km_str = _fmt_dont_aux(aux_elec_kwh / total_km, pct_aux_elec)
                                 has_elec = True
                             # L/km - Afficher si le train a un rendement thermique
                             if type_mat in ["diesel", "bimode"]:
                                 conso_L_km_str = f"{total_litres / total_km:.2f}"
+                                pct_aux_diesel = (100.0 * aux_litres / total_litres) if total_litres > 0 else None
+                                aux_L_km_str = _fmt_dont_aux(aux_litres / total_km, pct_aux_diesel)
                                 has_diesel = True
                             # recup/km - Afficher si le train peut récupérer
                             if mat_can_recup:
                                 recup_kwh_km_str = f"{recup_kwh / total_km:.2f}" if recup_kwh > 0 else "0.00"
-                            aux_kwh_km_str = f"{conso_aux_kwh / total_km:.2f}"
-                        if conso_brute_kwh > 0:
-                            aux_pct_str = f"{100.0 * conso_aux_kwh / conso_brute_kwh:.1f} %"
-
 
                         resultats_globaux.append({
                             "Train": id_train,
@@ -2347,8 +2362,8 @@ if st.session_state.gares is not None and st.session_state.missions:
                             "Dist. (km)": f"{total_km:.1f}",
                             "Conso. Électrique (kWh/km)": conso_kwh_km_str,
                             "Dont consommation des auxiliaires (kWh/km)": aux_kwh_km_str,
-                            "Dont consommation des auxiliaires (%)": aux_pct_str,
                             "Conso. Diesel (L/km)": conso_L_km_str,
+                            "Dont consommation des auxiliaires (L/km)": aux_L_km_str,
                             "Économie Récupération (kWh/km)": recup_kwh_km_str,
                         })
 
@@ -2384,14 +2399,14 @@ if st.session_state.gares is not None and st.session_state.missions:
                     if resultats_globaux:
                         df_bilan = pd.DataFrame(resultats_globaux)
 
-                        # Construction dynamique des colonnes
+                        # Construction dynamique des colonnes : conso puis « dont auxiliaires »
                         cols_to_display = ["Train", "Type", "Dist. (km)"]
                         if has_elec:
                             cols_to_display.append("Conso. Électrique (kWh/km)")
-                        cols_to_display.append("Dont consommation des auxiliaires (kWh/km)")
-                        cols_to_display.append("Dont consommation des auxiliaires (%)")
+                            cols_to_display.append("Dont consommation des auxiliaires (kWh/km)")
                         if has_diesel:
                             cols_to_display.append("Conso. Diesel (L/km)")
+                            cols_to_display.append("Dont consommation des auxiliaires (L/km)")
                         if can_recup:
                              cols_to_display.append("Économie Récupération (kWh/km)")
 

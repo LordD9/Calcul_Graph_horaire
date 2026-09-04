@@ -39,6 +39,7 @@ DEFAULT_LIGNE = "Général"
 _ENERGY_WIDGET_MAP = (
     ("masse_tonne", "masse_{mat}", int),
     ("facteur_aux_kwh_h", "f_aux_{mat}", float),
+    ("taux_aux_terminus_pct", "taux_aux_term_{mat}", int),
     ("capacite_batterie_kwh", "cap_batt_{mat}", int),
     ("facteur_charge_C", "f_charge_c_{mat}", float),
     ("simuler_fin_de_vie", "eol_check_{mat}", bool),

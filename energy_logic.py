@@ -61,6 +61,7 @@ def get_default_energy_params():
         "decel_ms2": 0.6,
 
         "facteur_aux_kwh_h": 43.0,
+        "taux_aux_terminus_pct": 100,  # % de la puissance aux. à l'arrêt au terminus (sans voyageurs)
 
         # Rendements (basés sur l'analyse)
         "rendement_thermique_pct": 38,
@@ -284,6 +285,8 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
     total_conso_thermique_kwh = 0
     total_conso_electrique_kwh = 0
     total_conso_aux_kwh = 0
+    total_conso_aux_electrique_kwh = 0
+    total_conso_aux_thermique_kwh = 0
     total_distance_km = 0
     erreurs = []
 
@@ -306,6 +309,10 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
     recup_pct = params.get("recuperation_pct", 65) / 100.0
     kwh_per_liter = params.get("kwh_per_liter_diesel", 10.0)
     facteur_aux_kwh_h = params.get("facteur_aux_kwh_h", 50.0)
+    try:
+        taux_aux_terminus = max(0.0, min(100.0, float(params.get("taux_aux_terminus_pct", 100)))) / 100.0
+    except (TypeError, ValueError):
+        taux_aux_terminus = 1.0
     accel_ms2 = params.get("accel_ms2", 0.5)
     decel_ms2 = params.get("decel_ms2", 0.8)
 
@@ -355,23 +362,58 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
 
         return delta_h_inc if sens_increasing else -delta_h_inc
 
-    # --- Helper: Comptabilise l'aux d'un arrêt dans les totaux globaux ---
-    def _ajouter_aux_arret(duree_h, electrification_str):
-        nonlocal total_conso_brute_kwh, total_conso_electrique_kwh, total_conso_thermique_kwh, total_conso_aux_kwh
-        if duree_h <= 0:
+    def _termini_from_trajet(trajet):
+        """Gares de retournement (origine/terminus de mission) pour un segment."""
+        label = (trajet or {}).get("mission") or ""
+        if " → " in label:
+            a, b = label.split(" → ", 1)
+            termini = {a.strip(), b.strip()}
+            termini.discard("")
+            if termini:
+                return termini
+        termini = set()
+        for k in ("origine", "terminus"):
+            v = mission.get(k)
+            if v:
+                termini.add(v)
+        return termini
+
+    def _est_arret_terminus(nom_gare, trajet=None):
+        """True si le train est immobilisé à un terminus (sans voyageurs)."""
+        return bool(nom_gare) and nom_gare in _termini_from_trajet(trajet)
+
+    def _puissance_aux_kw(au_terminus=False):
+        if au_terminus:
+            return facteur_aux_kwh_h * taux_aux_terminus
+        return facteur_aux_kwh_h
+
+    def _source_aux_electrique(electrification_str):
+        is_cat = str(electrification_str).strip().upper() in ["C1500", "C25"]
+        return type_materiel in ["electrique", "batterie"] or (type_materiel == "bimode" and is_cat)
+
+    def _comptabiliser_aux(conso_aux, electrification_str, force_electrique=False):
+        nonlocal total_conso_brute_kwh, total_conso_electrique_kwh, total_conso_thermique_kwh
+        nonlocal total_conso_aux_kwh, total_conso_aux_electrique_kwh, total_conso_aux_thermique_kwh
+        if conso_aux <= 0:
             return
-        conso_aux = facteur_aux_kwh_h * duree_h
         total_conso_brute_kwh += conso_aux
         total_conso_aux_kwh += conso_aux
-        is_cat = str(electrification_str).strip().upper() in ["C1500", "C25"]
-        if type_materiel in ["electrique", "batterie"] or (type_materiel == "bimode" and is_cat):
+        if force_electrique or _source_aux_electrique(electrification_str):
             total_conso_electrique_kwh += conso_aux
+            total_conso_aux_electrique_kwh += conso_aux
         else:
             total_conso_thermique_kwh += conso_aux
+            total_conso_aux_thermique_kwh += conso_aux
+
+    # --- Helper: Comptabilise l'aux d'un arrêt dans les totaux globaux ---
+    def _ajouter_aux_arret(duree_h, electrification_str, au_terminus=False):
+        if duree_h <= 0:
+            return
+        conso_aux = _puissance_aux_kw(au_terminus) * duree_h
+        _comptabiliser_aux(conso_aux, electrification_str)
 
     # --- Helper: Gestion de l'arrêt (Recharge ou Décharge Aux) ---
-    def simuler_arret(nom_gare, heure_debut, heure_fin, niveau_actuel, contexte="Arrêt"):
-        nonlocal total_conso_brute_kwh, total_conso_electrique_kwh, total_conso_aux_kwh
+    def simuler_arret(nom_gare, heure_debut, heure_fin, niveau_actuel, contexte="Arrêt", au_terminus=False):
         duree_h = (heure_fin - heure_debut).total_seconds() / 3600.0
         if duree_h <= 0: return niveau_actuel
 
@@ -379,12 +421,11 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
         electrification = info_gare.get("electrification", "F")
         puissance_infra_kw = _get_puissance_infra(electrification)
 
-        # Conso auxiliaires
-        conso_aux = facteur_aux_kwh_h * duree_h
-        # Comptabiliser dans le total (consommation réelle du train, même à l'arrêt)
-        total_conso_brute_kwh += conso_aux
-        total_conso_electrique_kwh += conso_aux
-        total_conso_aux_kwh += conso_aux
+        # Conso auxiliaires (réduite au terminus si le taux < 100 %)
+        p_aux_kw = _puissance_aux_kw(au_terminus)
+        conso_aux = p_aux_kw * duree_h
+        # Batterie : les auxiliaires sont toujours pris sur le système électrique
+        _comptabiliser_aux(conso_aux, electrification, force_electrique=True)
 
         # Logique de recharge
         nouveau_niveau = niveau_actuel
@@ -393,7 +434,7 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
         # Si infrastructure de recharge disponible (Catenary ou Borne)
         if puissance_infra_kw > 0:
             # Les auxiliaires sont pris sur l'infra
-            puissance_dispo_charge = max(0, puissance_infra_kw - facteur_aux_kwh_h)
+            puissance_dispo_charge = max(0, puissance_infra_kw - p_aux_kw)
 
             # Limite de puissance (kW)
             limite_puissance = min(puissance_dispo_charge, puissance_max_batterie_kw)
@@ -461,13 +502,17 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
 
         # --- CAS 1 : ARRÊT EXPLICITE (Distance = 0) ---
         if distance_km == 0:
+            au_terminus = _est_arret_terminus(gare_depart_nom, trajet)
             if is_batterie:
-                niveau_batterie_kwh = simuler_arret(gare_depart_nom, trajet["start"], trajet["end"], niveau_batterie_kwh, contexte="Stationnement")
+                niveau_batterie_kwh = simuler_arret(
+                    gare_depart_nom, trajet["start"], trajet["end"], niveau_batterie_kwh,
+                    contexte="Stationnement", au_terminus=au_terminus,
+                )
             else:
-                # Aux pendant le stationnement (consommation réelle même à l'arrêt)
+                # Aux pendant le stationnement (réduit au terminus si taux < 100 %)
                 duree_stat_h = max(0, (trajet["end"] - trajet["start"]).total_seconds() / 3600.0)
                 elec_stat = info_depart.get("electrification", "F")
-                _ajouter_aux_arret(duree_stat_h, elec_stat)
+                _ajouter_aux_arret(duree_stat_h, elec_stat, au_terminus=au_terminus)
 
         # --- CAS 2 : MOUVEMENT ---
         else:
@@ -563,8 +608,12 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
                     recup_possible_kwh = (abs(e_total_necessaire_J) * recup_pct) / JOULES_PER_KWH
 
             total_recup_kwh += recup_possible_kwh
-            if source_actuelle == "electrique": total_conso_electrique_kwh += (conso_traction_kwh + conso_aux_segment_kwh)
-            else: total_conso_thermique_kwh += (conso_traction_kwh + conso_aux_segment_kwh)
+            if source_actuelle == "electrique":
+                total_conso_electrique_kwh += (conso_traction_kwh + conso_aux_segment_kwh)
+                total_conso_aux_electrique_kwh += conso_aux_segment_kwh
+            else:
+                total_conso_thermique_kwh += (conso_traction_kwh + conso_aux_segment_kwh)
+                total_conso_aux_thermique_kwh += conso_aux_segment_kwh
             total_conso_brute_kwh += (conso_traction_kwh + conso_aux_segment_kwh)
 
             # -- Logique Batterie (Mouvement) --
@@ -619,23 +668,27 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
 
             # Si un trou significatif (> 1 min) existe entre l'arrivée ici et le départ suivant
             if gap_seconds > 60:
+                gare_attente = trajet["terminus"]
+                au_terminus = _est_arret_terminus(gare_attente, trajet)
                 if is_batterie:
                     niveau_batterie_kwh = simuler_arret(
-                        trajet["terminus"],
+                        gare_attente,
                         trajet["end"],
                         next_trajet["start"],
                         niveau_batterie_kwh,
-                        contexte="Attente/Terminus"
+                        contexte="Attente/Terminus" if au_terminus else "Attente",
+                        au_terminus=au_terminus,
                     )
                 else:
-                    # Aux pendant l'attente/terminus pour les autres types
+                    # Aux pendant l'attente/terminus (taux réduit si terminus sans voyageurs)
                     gap_h = gap_seconds / 3600.0
-                    info_term = gares_info.get(trajet["terminus"], {})
+                    info_term = gares_info.get(gare_attente, {})
                     elec_term = info_term.get("electrification", "F")
-                    _ajouter_aux_arret(gap_h, elec_term)
+                    _ajouter_aux_arret(gap_h, elec_term, au_terminus=au_terminus)
 
     # --- Bilan final ---
     total_litres_diesel = total_conso_thermique_kwh / kwh_per_liter if kwh_per_liter > 0 else 0
+    total_aux_litres_diesel = total_conso_aux_thermique_kwh / kwh_per_liter if kwh_per_liter > 0 else 0
 
     return {
         "total_conso_brute_kwh": total_conso_brute_kwh,
@@ -644,7 +697,10 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
         "total_conso_electrique_kwh": total_conso_electrique_kwh,
         "total_conso_thermique_kwh": total_conso_thermique_kwh,
         "total_conso_aux_kwh": total_conso_aux_kwh,
+        "total_conso_aux_electrique_kwh": total_conso_aux_electrique_kwh,
+        "total_conso_aux_thermique_kwh": total_conso_aux_thermique_kwh,
         "total_litres_diesel": total_litres_diesel,
+        "total_aux_litres_diesel": total_aux_litres_diesel,
         "total_distance_km": total_distance_km,
         "batterie_log": log_batterie,
         "erreurs": erreurs
