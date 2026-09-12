@@ -6,7 +6,7 @@ from energy_logic import (
     fingerprint_energie,
     get_default_energy_params,
 )
-from test_energy_aux_terminus import _df_gares, _t
+from test_energy_aux_terminus import _df_gares, _df_gares_elec, _t
 
 
 def test_associer_aller_puis_retour():
@@ -47,3 +47,20 @@ def test_fingerprint_change_horaire_et_masse():
     p2 = {"diesel": dict(get_default_energy_params(), masse_tonne=80)}
     assert k1 != fingerprint_energie(p2, missions, chrono)
     assert k1 == fingerprint_energie(p, missions, chrono)
+
+
+def test_fingerprint_change_si_electrification_change():
+    missions = [{"origine": "A", "terminus": "B", "type_materiel": "diesel"}]
+    chrono = {"T1": [{"start": _t(8, 0), "end": _t(8, 20), "origine": "A", "terminus": "B"}]}
+    p = {"diesel": get_default_energy_params()}
+    k1 = fingerprint_energie(p, missions, chrono, _df_gares())
+    k2 = fingerprint_energie(p, missions, chrono, _df_gares_elec())
+    assert k1 != k2
+
+
+def test_flotte_sans_mission_renvoie_erreur():
+    chrono = {"T1": [{"start": _t(8, 0), "end": _t(8, 20), "origine": "Z", "terminus": "Y"}]}
+    res, mpt, err = calculer_energie_flotte(chrono, [], _df_gares(), {"diesel": get_default_energy_params()})
+    assert res == {}
+    assert mpt == {}
+    assert err and "Impossible de trouver la mission" in err[0]

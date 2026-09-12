@@ -21,10 +21,11 @@ Fonctions principales :
 - `get_physical_profile` : Génère les courbes de vitesse/position/énergie.
 """
 
+import json
+import math
+import numpy as np
 import pandas as pd
 from datetime import timedelta
-import numpy as np
-import math # Importer math pour isclose
 
 # Constantes physiques
 JOULES_PER_KWH = 3_600_000
@@ -723,8 +724,7 @@ def associer_mission_au_train(trajets, missions):
 
 
 def fingerprint_energie(energy_params, missions, chronologie, df_gares=None):
-    """Cle de cache : materiel + types + horaires reels + electrification."""
-    import json
+    """Cle de cache : materiel + missions + horaires + infra gares."""
     skeleton = []
     for tid, trajets in sorted((chronologie or {}).items(), key=lambda x: str(x[0])):
         for t in trajets or []:
@@ -735,18 +735,23 @@ def fingerprint_energie(energy_params, missions, chronologie, df_gares=None):
                 t.get("origine"),
                 t.get("terminus"),
             ))
-    elec = []
+    gares_hash = []
     if df_gares is not None and hasattr(df_gares, "columns"):
-        if "gare" in df_gares.columns and "electrification" in df_gares.columns:
-            elec = list(zip(
-                df_gares["gare"].astype(str).tolist(),
-                df_gares["electrification"].astype(str).tolist(),
-            ))
+        cols = [c for c in ("gare", "distance", "rampe", "rampe_section_a_venir", "electrification") if c in df_gares.columns]
+        if cols:
+            gares_hash = df_gares[cols].astype(str).values.tolist()
     payload = {
         "params": energy_params,
-        "types": [m.get("type_materiel") for m in missions],
+        "missions": [
+            {
+                "origine": m.get("origine"),
+                "terminus": m.get("terminus"),
+                "type_materiel": m.get("type_materiel"),
+            }
+            for m in (missions or [])
+        ],
         "skeleton": skeleton,
-        "elec": elec,
+        "gares": gares_hash,
     }
     return json.dumps(payload, sort_keys=True, default=str)
 
@@ -776,7 +781,12 @@ def calculer_energie_flotte(chronologie, missions, df_gares, energy_params):
             continue
         missions_par_train[id_train] = mission
         type_mat = mission.get("type_materiel", "diesel")
-        params_mat = (energy_params or {}).get(type_mat) or get_default_energy_params()
+        params_mat = (energy_params or {}).get(type_mat)
+        if not params_mat:
+            erreurs.append(
+                f"Train {id_train}: parametres materiel '{type_mat}' absents, valeurs par defaut."
+            )
+            params_mat = get_default_energy_params()
         resultat = calculer_consommation_trajet(trajets, mission, df_gares, params_mat)
         resultats[id_train] = (resultat, type_mat)
         for err in resultat.get("erreurs") or []:

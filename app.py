@@ -1717,7 +1717,7 @@ if st.session_state.gares is not None and st.session_state.missions:
             st.session_state.energy_cache_key = None
 
         if st.session_state.get("chronologie_calculee") and mode_calcul == "Calcul Energie":
-            if st.button("Recalculer l energie uniquement", help="Garde la grille horaire, recalcule conso / batterie avec le materiel actuel."):
+            if st.button("Recalculer l energie uniquement", help="Garde la grille horaire, recalcule conso / batterie avec le materiel actuel.", key="btn_recalc_energie"):
                 st.session_state.run_energy_only = True
                 st.session_state.energy_cache_key = None
 
@@ -2057,7 +2057,6 @@ if st.session_state.gares is not None and st.session_state.missions:
                 must_recompute = (
                     st.session_state.get("run_energy_only")
                     or st.session_state.get("energy_cache_key") != energy_key
-                    or not resultats_energie_par_train
                 )
                 if must_recompute:
                     with st.spinner("Calcul de la consommation energetique..."):
