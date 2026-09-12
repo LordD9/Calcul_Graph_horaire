@@ -24,7 +24,6 @@ import pandas as pd
 from io import BytesIO
 from collections import defaultdict
 import itertools
-from functools import lru_cache
 import json
 from matplotlib.backends.backend_pdf import PdfPages
 import matplotlib.image as mpimg
@@ -1427,18 +1426,24 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
 # 5. CONSTRUCTION DES HORAIRES DE MISSION
 # =============================================================================
 
-@lru_cache(maxsize=128)
-def construire_horaire_mission(mission_tuple, direction, df_gares_tuple):
-    """Version cachée de la construction d'horaire (pour performances)."""
-    mission = json.loads(mission_tuple)
-    df_gares = pd.DataFrame(json.loads(df_gares_tuple))
-    return _construire_horaire_mission_impl(mission, direction, df_gares)
+_horaire_mission_cache = {}
+_HORAIRE_CACHE_MAX = 256
+
+
+def _horaire_cache_key(mission, direction, df_gares):
+    gares = tuple(df_gares["gare"].tolist()) if "gare" in df_gares.columns else ()
+    dist = tuple(df_gares["distance"].tolist()) if "distance" in df_gares.columns else ()
+    return (
+        direction,
+        json.dumps(mission, sort_keys=True, default=str),
+        gares,
+        dist,
+    )
+
 
 def construire_horaire_mission_cached(mission, direction, df_gares):
-    """Wrapper pour cacher les appels répétés."""
-    mission_json = json.dumps(mission, sort_keys=True)
-    df_json = df_gares.to_json(orient='records')
-    return construire_horaire_mission((mission_json, direction, df_json))
+    """Alias historique : meme cache que construire_horaire_mission."""
+    return construire_horaire_mission(mission, direction, df_gares)
 
 def _construire_horaire_mission_impl(mission, direction, df_gares):
     """Implémentation réelle de la construction d'horaire."""
@@ -1540,8 +1545,16 @@ def _construire_horaire_mission_impl(mission, direction, df_gares):
 
 # Wrapper pour compatibilité
 def construire_horaire_mission(mission, direction, df_gares):
-    """Construction d'horaire de mission (sans cache)."""
-    return _construire_horaire_mission_impl(mission, direction, df_gares)
+    """Construction d'horaire de mission (cache identite gares + mission)."""
+    key = _horaire_cache_key(mission, direction, df_gares)
+    hit = _horaire_mission_cache.get(key)
+    if hit is not None:
+        return hit
+    res = _construire_horaire_mission_impl(mission, direction, df_gares)
+    if len(_horaire_mission_cache) >= _HORAIRE_CACHE_MAX:
+        _horaire_mission_cache.clear()
+    _horaire_mission_cache[key] = res
+    return res
 
 def preparer_roulement_manuel(roulement):
     """Prépare les roulements manuels pour la simulation."""
@@ -1691,8 +1704,13 @@ def generer_exports(chronologie, figure, figures_batterie=None, logo_path=None):
     return bx, bp
 
 def reset_caches():
-    """Réinitialise les caches."""
-    construire_horaire_mission_cached.cache_clear()
+    """Reinitialise les caches d'horaires et d'evaluation."""
+    _horaire_mission_cache.clear()
+    try:
+        from optimisation_logic import reset_eval_cache
+        reset_eval_cache()
+    except ImportError:
+        pass
 
 def _calculer_stats_homogeneite(chronologie):
     """Calcule les statistiques d'homogénéité PAR MISSION ET PAR SENS (aller/retour séparés)."""
