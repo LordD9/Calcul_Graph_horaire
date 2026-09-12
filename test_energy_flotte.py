@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """Tests recalcul energie flotte sans toucher a la grille."""
-from datetime import datetime
-
 from energy_logic import (
     associer_mission_au_train,
     calculer_energie_flotte,
@@ -39,10 +37,13 @@ def test_flotte_deux_rames_independantes():
     assert res["T1"][0]["total_distance_km"] > 0
 
 
-def test_fingerprint_change_quand_masse_change():
+def test_fingerprint_change_horaire_et_masse():
     missions = [{"type_materiel": "diesel"}]
-    chrono = {"T1": [1, 2]}
-    p1 = {"diesel": get_default_energy_params()}
+    chrono = {"T1": [{"start": _t(8, 0), "end": _t(8, 20), "origine": "A", "terminus": "B"}]}
+    p = {"diesel": get_default_energy_params()}
+    k1 = fingerprint_energie(p, missions, chrono)
+    chrono2 = {"T1": [{"start": _t(9, 0), "end": _t(9, 20), "origine": "A", "terminus": "B"}]}
+    assert k1 != fingerprint_energie(p, missions, chrono2)
     p2 = {"diesel": dict(get_default_energy_params(), masse_tonne=80)}
-    assert fingerprint_energie(p1, missions, chrono) != fingerprint_energie(p2, missions, chrono)
-    assert fingerprint_energie(p1, missions, chrono) == fingerprint_energie(p1, missions, chrono)
+    assert k1 != fingerprint_energie(p2, missions, chrono)
+    assert k1 == fingerprint_energie(p, missions, chrono)

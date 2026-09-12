@@ -1712,7 +1712,7 @@ if st.session_state.gares is not None and st.session_state.missions:
         if "run_calculation" not in st.session_state:
             st.session_state.run_calculation = False
 
-        if st.button("Generer le graphique horaire", type="primary"):
+        if st.button("Generer le graphique horaire", type="primary", key="btn_gen_graph"):
             st.session_state.run_calculation = True
             st.session_state.energy_cache_key = None
 
@@ -2052,6 +2052,7 @@ if st.session_state.gares is not None and st.session_state.missions:
                     st.session_state.energy_params,
                     st.session_state.missions,
                     chronologie,
+                    dataframe_gares,
                 )
                 must_recompute = (
                     st.session_state.get("run_energy_only")

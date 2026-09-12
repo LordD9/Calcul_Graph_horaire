@@ -722,14 +722,31 @@ def associer_mission_au_train(trajets, missions):
     return None
 
 
-def fingerprint_energie(energy_params, missions, chronologie):
-    """Cle de cache : params materiel + types + taille de la chronologie."""
+def fingerprint_energie(energy_params, missions, chronologie, df_gares=None):
+    """Cle de cache : materiel + types + horaires reels + electrification."""
     import json
+    skeleton = []
+    for tid, trajets in sorted((chronologie or {}).items(), key=lambda x: str(x[0])):
+        for t in trajets or []:
+            skeleton.append((
+                str(tid),
+                str(t.get("start")),
+                str(t.get("end")),
+                t.get("origine"),
+                t.get("terminus"),
+            ))
+    elec = []
+    if df_gares is not None and hasattr(df_gares, "columns"):
+        if "gare" in df_gares.columns and "electrification" in df_gares.columns:
+            elec = list(zip(
+                df_gares["gare"].astype(str).tolist(),
+                df_gares["electrification"].astype(str).tolist(),
+            ))
     payload = {
         "params": energy_params,
         "types": [m.get("type_materiel") for m in missions],
-        "n_trains": len(chronologie or {}),
-        "n_seg": sum(len(v) for v in (chronologie or {}).values()),
+        "skeleton": skeleton,
+        "elec": elec,
     }
     return json.dumps(payload, sort_keys=True, default=str)
 
