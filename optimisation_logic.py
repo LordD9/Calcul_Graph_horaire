@@ -212,6 +212,16 @@ class SolutionCache:
 
 _solution_cache = SolutionCache()
 
+_eval_cache = {}
+_EVAL_CACHE_MAX = 512
+_durees_cache = {}
+
+
+def reset_eval_cache():
+    """Vide les caches d'evaluation (un run d'optimisation)."""
+    _eval_cache.clear()
+    _durees_cache.clear()
+
 
 class GenomeCache:
     """Cache process-master persistant sur toutes les générations d'un run."""
@@ -857,6 +867,10 @@ def _construire_durees_theoriques(missions, df_gares):
     cadencements/offsets (qui ne changent que les heures de départ, pas les temps
     de marche), donc calculable une fois sur les missions d'origine.
     """
+    key = (id(missions), id(df_gares))
+    hit = _durees_cache.get(key)
+    if hit is not None:
+        return hit
     from core_logic import construire_horaire_mission
     durees = {}
     for m in missions:
@@ -868,12 +882,37 @@ def _construire_durees_theoriques(missions, df_gares):
         h_retour = construire_horaire_mission(m, 'retour', df_gares)
         if h_retour:
             durees[f"{m['terminus']} → {m['origine']}"] = h_retour[-1].get('time_offset_min', 0)
+    _durees_cache[key] = durees
     return durees
+
+
+def _eval_cache_key(params, missions, df_gares, heure_debut, heure_fin, allow_sharing, config):
+    max_arret = (config.crossing_optimization.max_delay_minutes
+                 if config and config.crossing_optimization and config.crossing_optimization.enabled
+                 else 5)
+    return (
+        id(missions),
+        id(df_gares),
+        json.dumps(params.cadencements, sort_keys=True, default=str),
+        json.dumps(params.turnaround_buffers, sort_keys=True, default=str),
+        json.dumps(params.crossing_stop_durations, sort_keys=True, default=str),
+        json.dumps(params.crossing_pair_assignments or {}, sort_keys=True, default=str),
+        json.dumps(params.retour_offsets or {}, sort_keys=True, default=str),
+        str(heure_debut),
+        str(heure_fin),
+        allow_sharing,
+        max_arret,
+    )
 
 
 def evaluer_params_simulation(params, missions, df_gares, heure_debut, heure_fin, allow_sharing=True, config=None):
     from core_logic import executer_simulation_evenementielle, _calculer_stats_homogeneite, _score_chronologie_bruit
     from datetime import time as dt_time
+
+    key = _eval_cache_key(params, missions, df_gares, heure_debut, heure_fin, allow_sharing, config)
+    hit = _eval_cache.get(key)
+    if hit is not None:
+        return hit
 
     adjusted_ref = params.get_adjusted_reference_minutes(missions)
     modified_missions = []
@@ -912,7 +951,11 @@ def evaluer_params_simulation(params, missions, df_gares, heure_debut, heure_fin
         durees_theoriques=durees_theoriques,
     )
 
-    return score, chronologie, warnings, stats
+    result = (score, chronologie, warnings, stats)
+    if len(_eval_cache) >= _EVAL_CACHE_MAX:
+        _eval_cache.clear()
+    _eval_cache[key] = result
+    return result
 
 
 def _baseline_simulation_params():
@@ -1268,6 +1311,7 @@ def optimize_exhaustive(missions, df_gares, heure_debut, heure_fin, config,
 def optimiser_graphique_horaire(missions, df_gares, heure_debut, heure_fin,
                                config, allow_sharing=True, progress_callback=None):
     """Point d'entrée principal de l'optimisation — tous les modes utilisent le moteur événementiel."""
+    reset_eval_cache()
     
     if config.mode == "genetic":
         optimizer = GeneticOptimizer(missions, df_gares, heure_debut, heure_fin,
