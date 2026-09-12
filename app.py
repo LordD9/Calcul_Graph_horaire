@@ -28,7 +28,6 @@ import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
 import json
-import re # Import re, bien que les helpers soient supprimés
 from collections import defaultdict
 import time
 
@@ -44,7 +43,11 @@ from core_logic import (
     construire_horaire_mission
 )
 from plotting import creer_graphique_horaire, creer_graphique_batterie
-from energy_logic import get_default_energy_params, calculer_consommation_trajet
+from energy_logic import (
+    get_default_energy_params,
+    calculer_energie_flotte,
+    fingerprint_energie,
+)
 
 from optimisation_logic import (
     OptimizationConfig,
@@ -386,6 +389,7 @@ if "mode_calcul_selector" not in st.session_state: st.session_state.mode_calcul_
 if "mode_generation" not in st.session_state: st.session_state.mode_generation = "Rotation optimisée"
 if "chronologie_calculee" not in st.session_state: st.session_state.chronologie_calculee = None
 if "stats_homogeneite" not in st.session_state: st.session_state.stats_homogeneite = {}
+if "warnings_calcul" not in st.session_state: st.session_state.warnings_calcul = {}
 if "run_calculation" not in st.session_state: st.session_state.run_calculation = False
 
 # Initialise avec les paramètres par défaut si nécessaire
@@ -398,9 +402,11 @@ if "energy_params" not in st.session_state: st.session_state.energy_params = {
 }
 
 
-if "chronologie_calculee" not in st.session_state: st.session_state.chronologie_calculee = None
-if "warnings_calcul" not in st.session_state: st.session_state.warnings_calcul = {}
 if "energy_errors" not in st.session_state: st.session_state.energy_errors = []
+if "resultats_energie_par_train" not in st.session_state: st.session_state.resultats_energie_par_train = {}
+if "missions_par_train" not in st.session_state: st.session_state.missions_par_train = {}
+if "energy_cache_key" not in st.session_state: st.session_state.energy_cache_key = None
+if "run_energy_only" not in st.session_state: st.session_state.run_energy_only = False
 
 # Heures de service (centralisées dans session_state pour permettre le chargement
 # d'un scénario qui les redéfinit).
@@ -1706,8 +1712,14 @@ if st.session_state.gares is not None and st.session_state.missions:
         if "run_calculation" not in st.session_state:
             st.session_state.run_calculation = False
 
-        if st.button("🚀 Générer le graphique horaire", type="primary"):
+        if st.button("Generer le graphique horaire", type="primary"):
             st.session_state.run_calculation = True
+            st.session_state.energy_cache_key = None
+
+        if st.session_state.get("chronologie_calculee") and mode_calcul == "Calcul Energie":
+            if st.button("Recalculer l energie uniquement", help="Garde la grille horaire, recalcule conso / batterie avec le materiel actuel."):
+                st.session_state.run_energy_only = True
+                st.session_state.energy_cache_key = None
 
         if st.session_state.run_calculation:
             st.session_state.run_calculation = False
@@ -1984,16 +1996,7 @@ if st.session_state.gares is not None and st.session_state.missions:
             if chronologie:
                 nb_rames_total = len(set(chronologie.keys()))
 
-                # Comptage par type de matériel
-                rames_par_type = defaultdict(set)
-                for train_id in chronologie.keys():
-                    # Trouver le type de matériel de ce train
-                    for mission in st.session_state.missions:
-                        # Chercher dans les trajets pour identifier la mission
-                        # (cette partie nécessite d'enrichir les données retournées)
-                        pass
-
-                st.subheader("📊 Statistiques d'utilisation des rames")
+                st.subheader("Statistiques d'utilisation des rames")
 
                 # Préparation des données pour les stats
                 gare_dist_map = {row['gare']: row['distance'] for _, row in st.session_state.gares.iterrows()}
@@ -2041,55 +2044,42 @@ if st.session_state.gares is not None and st.session_state.missions:
 
             # --- Calcul énergétique (fait ici pour pouvoir remonter les erreurs) ---
             all_energy_errors = []
-            resultats_energie_par_train = {}
-
-            # Doit être calculé ici pour être passé au plotting ET au bilan
-            missions_par_train = {}
-            if mode_calcul == "Calcul Energie":
-                for id_train, trajets in chronologie.items():
-                    if not trajets: continue
-                    premier_trajet = trajets[0]
-                    # Associer ce train à la première mission correspondante
-                    for mission in st.session_state.missions:
-                        if mission["origine"] == premier_trajet["origine"]:
-                             missions_par_train[id_train] = mission
-                             break
+            resultats_energie_par_train = st.session_state.get("resultats_energie_par_train") or {}
+            missions_par_train = st.session_state.get("missions_par_train") or {}
 
             if mode_calcul == "Calcul Energie":
-                with st.spinner("Calcul de la consommation énergétique..."):
-                    for id_train, trajets in chronologie.items():
-                        mission = missions_par_train.get(id_train)
-                        if not mission:
-                            # Essayer de trouver une mission retour si le premier trajet n'est pas un aller
-                            # (peut arriver si le train commence en milieu de journée)
-                            found_mission = False
-                            premier_trajet = trajets[0] # Assurer que premier_trajet est défini
-                            for m_ret in st.session_state.missions:
-                                if m_ret["terminus"] == premier_trajet["origine"]:
-                                    missions_par_train[id_train] = m_ret
-                                    mission = m_ret
-                                    found_mission = True
-                                    break
-                            if not found_mission:
-                                st.warning(f"Impossible de trouver la mission pour le Train {id_train} (démarrant à {premier_trajet['origine']}). Calcul énergétique ignoré.")
-                                continue
-
-                        type_mat = mission.get("type_materiel", "diesel")
-                        params_mat = st.session_state.energy_params.get(type_mat)
-
-                        if not params_mat:
-                             st.error(f"Paramètres matériels non trouvés pour le type '{type_mat}'. Utilisation des valeurs par défaut.")
-                             params_mat = get_default_energy_params()
-
-                        resultat_train = calculer_consommation_trajet(trajets, mission, dataframe_gares, params_mat)
-                        resultats_energie_par_train[id_train] = (resultat_train, type_mat)
-
-                        if resultat_train["erreurs"]:
-                            for err in resultat_train["erreurs"]:
-                                all_energy_errors.append(f"Train {id_train}: {err}")
-
-                st.session_state.energy_errors = all_energy_errors
-
+                energy_key = fingerprint_energie(
+                    st.session_state.energy_params,
+                    st.session_state.missions,
+                    chronologie,
+                )
+                must_recompute = (
+                    st.session_state.get("run_energy_only")
+                    or st.session_state.get("energy_cache_key") != energy_key
+                    or not resultats_energie_par_train
+                )
+                if must_recompute:
+                    with st.spinner("Calcul de la consommation energetique..."):
+                        resultats_energie_par_train, missions_par_train, all_energy_errors = (
+                            calculer_energie_flotte(
+                                chronologie,
+                                st.session_state.missions,
+                                dataframe_gares,
+                                st.session_state.energy_params,
+                            )
+                        )
+                    st.session_state.resultats_energie_par_train = resultats_energie_par_train
+                    st.session_state.missions_par_train = missions_par_train
+                    st.session_state.energy_errors = all_energy_errors
+                    st.session_state.energy_cache_key = energy_key
+                    st.session_state.run_energy_only = False
+                    for msg in all_energy_errors:
+                        if "Impossible de trouver la mission" in msg:
+                            st.warning(msg)
+                else:
+                    all_energy_errors = st.session_state.get("energy_errors") or []
+                    resultats_energie_par_train = st.session_state.resultats_energie_par_train
+                    missions_par_train = st.session_state.missions_par_train
 
             # --- Affichage des Avertissements (y compris les erreurs d'énergie) ---
             infra_violations = warnings.get("infra_violations", [])
