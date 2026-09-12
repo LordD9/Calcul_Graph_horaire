@@ -21,10 +21,11 @@ Fonctions principales :
 - `get_physical_profile` : Génère les courbes de vitesse/position/énergie.
 """
 
+import json
+import math
+import numpy as np
 import pandas as pd
 from datetime import timedelta
-import numpy as np
-import math # Importer math pour isclose
 
 # Constantes physiques
 JOULES_PER_KWH = 3_600_000
@@ -705,3 +706,89 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
         "batterie_log": log_batterie,
         "erreurs": erreurs
     }
+
+
+def associer_mission_au_train(trajets, missions):
+    """Trouve la mission correspondant au premier trajet d'une rame."""
+    if not trajets:
+        return None
+    premier = trajets[0]
+    orig = premier.get("origine")
+    for mission in missions:
+        if mission.get("origine") == orig:
+            return mission
+    for mission in missions:
+        if mission.get("terminus") == orig:
+            return mission
+    return None
+
+
+def fingerprint_energie(energy_params, missions, chronologie, df_gares=None):
+    """Cle de cache : materiel + missions + horaires + infra gares."""
+    skeleton = []
+    for tid, trajets in sorted((chronologie or {}).items(), key=lambda x: str(x[0])):
+        for t in trajets or []:
+            skeleton.append((
+                str(tid),
+                str(t.get("start")),
+                str(t.get("end")),
+                t.get("origine"),
+                t.get("terminus"),
+            ))
+    gares_hash = []
+    if df_gares is not None and hasattr(df_gares, "columns"):
+        cols = [c for c in ("gare", "distance", "rampe", "rampe_section_a_venir", "electrification") if c in df_gares.columns]
+        if cols:
+            gares_hash = df_gares[cols].astype(str).values.tolist()
+    payload = {
+        "params": energy_params,
+        "missions": [
+            {
+                "origine": m.get("origine"),
+                "terminus": m.get("terminus"),
+                "type_materiel": m.get("type_materiel"),
+            }
+            for m in (missions or [])
+        ],
+        "skeleton": skeleton,
+        "gares": gares_hash,
+    }
+    return json.dumps(payload, sort_keys=True, default=str)
+
+
+def calculer_energie_flotte(chronologie, missions, df_gares, energy_params):
+    """Calcule l'energie de toutes les rames sans retoucher la grille horaire.
+
+    Returns:
+        (resultats_par_train, missions_par_train, erreurs)
+        resultats_par_train[id] = (dict_conso, type_materiel)
+    """
+    resultats = {}
+    missions_par_train = {}
+    erreurs = []
+    if not chronologie:
+        return resultats, missions_par_train, erreurs
+    for id_train, trajets in chronologie.items():
+        if not trajets:
+            continue
+        mission = associer_mission_au_train(trajets, missions)
+        if not mission:
+            orig = trajets[0].get("origine", "?")
+            erreurs.append(
+                f"Impossible de trouver la mission pour le Train {id_train} "
+                f"(demarrant a {orig}). Calcul energetique ignore."
+            )
+            continue
+        missions_par_train[id_train] = mission
+        type_mat = mission.get("type_materiel", "diesel")
+        params_mat = (energy_params or {}).get(type_mat)
+        if not params_mat:
+            erreurs.append(
+                f"Train {id_train}: parametres materiel '{type_mat}' absents, valeurs par defaut."
+            )
+            params_mat = get_default_energy_params()
+        resultat = calculer_consommation_trajet(trajets, mission, df_gares, params_mat)
+        resultats[id_train] = (resultat, type_mat)
+        for err in resultat.get("erreurs") or []:
+            erreurs.append(f"Train {id_train}: {err}")
+    return resultats, missions_par_train, erreurs
