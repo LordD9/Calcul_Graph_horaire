@@ -79,6 +79,30 @@ Le fichier doit contenir les colonnes suivantes :
 *   `Origine` : Nom de la gare de départ.
 *   `Terminus` : Nom de la gare d'arrivée.
 
+### 7. Robustesse du graphique
+
+Après génération d'un graphique, ouvrez l'onglet **Robustesse** et cliquez sur
+**Calculer la robustesse**. Ce calcul indépendant ne relance pas l'optimisation.
+Il teste un retard unique de **5, 10 et 20 minutes** à chaque départ et à chaque
+point de croisement. Le point critique est choisi séparément pour chaque durée,
+selon la somme des retards d'arrivée des missions complètes.
+
+Le rapport compare les graphiques perturbés, le retard cumulé, le temps de retour
+durable à l'horaire et les conséquences énergétiques pour les rames batterie.
+« Non rétabli sur la période » signifie que le retour à la normale n'a pas pu être
+constaté sur les services fournis. En cas de retard, le retournement minimal est
+de **5 minutes**, sans départ anticipé.
+
+La réserve est facultative : sélectionnez un terminus, l'autre ou les deux.
+Une rame physique par gare sélectionnée peut reprendre les rotations suivantes
+au départ planifié, uniquement si elle réduit le retard cumulé et respecte les
+contraintes d'infrastructure, de matériel et d'énergie. Sa batterie est pleine
+au sens du SoC maximal opérationnel configuré lors de sa mobilisation. Les
+activations et les refus sont explicités dans le rapport.
+
+Les résultats deviennent périmés lorsque les entrées changent. Le recalcul reste
+manuel, via le même bouton.
+
 ## Auteurs & Licence
 
 Projet développé par le Cerema.
