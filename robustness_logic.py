@@ -235,10 +235,24 @@ def _compiler_services(chronologie, df_gares, missions):
                 if previous["terminus"] != following["origine"]:
                     raise ValueError(f"Itinéraire discontinu dans la rame {train_id!r}")
             travel = [row for row in rows if row["origine"] != row["terminus"]]
-            if not travel or travel[0]["origine"] != origine or travel[-1]["terminus"] != terminus:
+            if not travel or travel[0]["origine"] != origine:
                 raise ValueError(f"Mission incomplète ou label incohérent : {label!r}")
             if any(row["origine"] not in gares_map or row["terminus"] not in gares_map for row in rows):
                 raise ValueError(f"Gare absente de df_gares dans {label!r}")
+            tronquee = False
+            if travel[-1]["terminus"] != terminus:
+                # La génération coupe la dernière mission d'une rame à la fin de
+                # service : on l'évalue jusqu'à la dernière gare réellement
+                # atteinte, à condition qu'elle se trouve sur le trajet du label.
+                atteinte = travel[-1]["terminus"]
+                derniere = ordinal == len(groups)
+                if (not derniere or origine not in gares_map or terminus not in gares_map):
+                    raise ValueError(f"Mission incomplète ou label incohérent : {label!r}")
+                lo, hi = sorted((gares_map[origine], gares_map[terminus]))
+                if not lo < gares_map[atteinte] < hi:
+                    raise ValueError(f"Mission incomplète ou label incohérent : {label!r}")
+                terminus = atteinte
+                tronquee = True
             service_id = f"{type(train_id).__name__}:{train_id}#{ordinal}"
             clean_rows = []
             for row in rows:
@@ -252,6 +266,7 @@ def _compiler_services(chronologie, df_gares, missions):
                 "direction": direction,
                 "origine": origine,
                 "terminus": terminus,
+                "tronquee": tronquee,
                 "material": mission.get("type_materiel", "diesel"),
                 "segments": clean_rows,
                 "ordered_gare_names": gare_names,

@@ -1,7 +1,9 @@
 from copy import deepcopy
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from energy_logic import get_default_energy_params
 from robustness_logic import (
@@ -466,3 +468,67 @@ def test_fingerprint_robustesse_est_stable_et_sensible_aux_reserves():
         chronologie, _infrastructure(), missions, reserve_gares=("B",)
     )
 
+
+def _chronologie_derniere_mission_tronquee():
+    """A → B complète, puis B → A coupée à X par la fin de service."""
+    return {
+        "T1": [
+            {"start": _time(8, 0), "end": _time(8, 10), "origine": "A", "terminus": "X",
+             "mission": "A → B", "is_mission_start": True},
+            {"start": _time(8, 10), "end": _time(8, 20), "origine": "X", "terminus": "B",
+             "mission": "A → B", "is_mission_start": False},
+            {"start": _time(8, 30), "end": _time(8, 40), "origine": "B", "terminus": "X",
+             "mission": "B → A", "is_mission_start": True},
+            {"start": _time(8, 40), "end": _time(8, 42), "origine": "X", "terminus": "X",
+             "mission": "B → A", "is_mission_start": False},
+        ]
+    }
+
+
+def test_derniere_mission_tronquee_par_la_fin_de_service_est_evaluee():
+    chronologie = _chronologie_derniere_mission_tronquee()
+    services, _, _ = _compiler_services(chronologie, _infrastructure(), [_mission()])
+
+    assert [(s["mission"], s["terminus"], s["tronquee"]) for s in services] == [
+        ("A → B", "B", False),
+        ("B → A", "X", True),
+    ]
+    assert services[1]["planned_arrival"] == _time(8, 40)
+
+    resultat = evaluer_robustesse(chronologie, _infrastructure(), [_mission()])
+    assert len(resultat["scenarios"]) == 3
+    assert all(s["sans_reserve"]["retard_cumule_min"] > 0 for s in resultat["scenarios"])
+
+
+def test_mission_tronquee_hors_fin_de_rame_reste_refusee():
+    chronologie = _chronologie_derniere_mission_tronquee()
+    rows = chronologie["T1"]
+    # La mission B → A s'arrête à X puis la rame repart pour un A → B : incohérent.
+    chronologie["T1"] = [rows[0], rows[1], rows[2], {
+        "start": _time(9, 0), "end": _time(9, 20), "origine": "X", "terminus": "B",
+        "mission": "A → B", "is_mission_start": True,
+    }]
+    with pytest.raises(ValueError):
+        _compiler_services(chronologie, _infrastructure(), [_mission()])
+
+
+def test_robustesse_sur_chronologie_reelle_avec_missions_tronquees():
+    from core_logic import generer_tous_trajets_optimises
+    from scenarios_manager import load_scenario
+
+    chemin = Path(__file__).parent / "scenarios" / "bayonne_sjpp_2032+_croisement_itxassou.json"
+    scenario = load_scenario(chemin)
+    gares = pd.DataFrame(scenario["infrastructure"]["gares"])
+    debut = datetime.strptime(scenario["service"]["heure_debut"], "%H:%M").time()
+    fin = datetime.strptime(scenario["service"]["heure_fin"], "%H:%M").time()
+    chronologie, _, _ = generer_tous_trajets_optimises(
+        scenario["missions"], gares, debut, fin, allow_sharing=True, search_strategy="simple",
+    )
+    services, _, _ = _compiler_services(chronologie, gares, scenario["missions"])
+    assert any(s["tronquee"] for s in services)
+
+    resultat = evaluer_robustesse(
+        chronologie, gares, scenario["missions"], energy_params=scenario.get("energy_params"),
+    )
+    assert [s["delay_min"] for s in resultat["scenarios"]] == [5, 10, 20]
+    assert all(s["point"] is not None for s in resultat["scenarios"])
