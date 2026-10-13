@@ -55,6 +55,366 @@ from optimisation_logic import (
     optimiser_graphique_horaire)
 
 import scenarios_manager
+from robustness_logic import evaluer_robustesse, fingerprint_robustesse
+
+
+def _rendre_onglet_robustesse(
+    chronologie,
+    df_gares,
+    missions,
+    energy_params,
+    heure_debut_service,
+    params_affichage,
+    mode_calcul,
+    missions_par_train,
+):
+    """Affiche et calcule explicitement les scénarios de robustesse du graphe courant."""
+    import matplotlib.pyplot as plt
+
+    st.subheader("Analyse de robustesse")
+    st.caption(
+        "Le retard cumulé est la somme des retards d'arrivée des missions. "
+        "L'analyse rejoue le graphe existant, sans relancer l'optimisation."
+    )
+
+    terminus_options = []
+    for mission in missions or []:
+        for gare in (mission.get("origine"), mission.get("terminus")):
+            if gare and gare not in terminus_options:
+                terminus_options.append(gare)
+
+    reserve_active = st.checkbox(
+        "Activer les rames de réserve",
+        key="robustesse_reserve_active",
+        help="Une rame de réserve est créée pour chaque gare terminus sélectionnée.",
+    )
+    reserve_gares = []
+    if reserve_active:
+        selection = st.multiselect(
+            "Gares terminus de réserve (A, B ou les deux)",
+            options=terminus_options,
+            key="robustesse_reserve_gares",
+            help="Pour plusieurs missions, les terminus concrets de toutes les missions sont proposés.",
+        )
+        reserve_gares = [gare for gare in terminus_options if gare in selection]
+        params_batterie = (energy_params or {}).get("batterie", {})
+        soc_max = float(params_batterie.get("soc_max_pct", 95) or 95)
+        st.caption(
+            "Une rame par gare sélectionnée. La rame reprend le matériel du service remplacé "
+            "et ne peut couvrir qu'un matériel compatible. Pour une rame batterie, le SoC initial "
+            f"est le SoC maximal opérationnel configuré ({soc_max:g} %)."
+        )
+
+    try:
+        empreinte = fingerprint_robustesse(
+            chronologie,
+            df_gares,
+            missions,
+            energy_params=energy_params,
+            reserve_gares=reserve_gares,
+        )
+    except Exception as exc:
+        st.session_state["robustesse_resultats"] = None
+        st.session_state["robustesse_fingerprint"] = None
+        st.error(f"Empreinte de robustesse impossible : {type(exc).__name__} — {exc}")
+        return
+
+    if "robustesse_resultats" not in st.session_state:
+        st.session_state["robustesse_resultats"] = None
+    if "robustesse_fingerprint" not in st.session_state:
+        st.session_state["robustesse_fingerprint"] = None
+
+    resultats_enregistres = st.session_state.get("robustesse_resultats")
+    empreinte_enregistree = st.session_state.get("robustesse_fingerprint")
+    if resultats_enregistres is not None and empreinte_enregistree != empreinte:
+        st.session_state["robustesse_resultats"] = None
+        st.session_state["robustesse_fingerprint"] = None
+        resultats_enregistres = None
+        st.info("Les résultats de robustesse ont été invalidés : les entrées ont changé. Relancez le calcul.")
+
+    if st.button("Calculer la robustesse", key="btn_calc_robustesse", type="primary"):
+        st.session_state["robustesse_resultats"] = None
+        st.session_state["robustesse_fingerprint"] = None
+        resultats_enregistres = None
+        try:
+            resultats = evaluer_robustesse(
+                chronologie,
+                df_gares,
+                missions,
+                energy_params=energy_params,
+                reserve_gares=reserve_gares,
+            )
+        except Exception as exc:
+            st.error(f"Calcul de robustesse impossible : {type(exc).__name__} — {exc}")
+        else:
+            st.session_state["robustesse_resultats"] = resultats
+            st.session_state["robustesse_fingerprint"] = empreinte
+            resultats_enregistres = resultats
+
+    if resultats_enregistres is None:
+        st.caption("Aucun résultat à jour. Le calcul ne démarre qu'au clic sur le bouton dédié.")
+        return
+
+    scenarios = resultats_enregistres.get("scenarios") or []
+    if not scenarios:
+        st.warning("Le moteur n'a retourné aucun scénario exploitable.")
+        return
+
+    def _heure(value):
+        if value is None:
+            return "—"
+        if isinstance(value, datetime):
+            return value.strftime("%d/%m %H:%M")
+        if hasattr(value, "strftime"):
+            return value.strftime("%H:%M")
+        return str(value)
+
+    def _minutes(value):
+        return "—" if value is None else f"{float(value):.1f} min"
+
+    def _kwh(value):
+        return "—" if value is None else f"{float(value):.1f} kWh"
+
+    def _soc(value):
+        return "—" if value is None else f"{float(value):.1f} %"
+
+    def _retour_normal(resultat):
+        if resultat is None:
+            return "Indisponible"
+        retour = resultat.get("retour_normal_min")
+        return _minutes(retour) if retour is not None else "Non rétabli sur la période"
+
+    def _etat_reserve_absente():
+        if not reserve_active:
+            return "Réserve non activée"
+        if not reserve_gares:
+            return "Aucune gare de réserve sélectionnée"
+        return "Résultat avec réserve indisponible"
+
+    def _diagnostics(resultat, label):
+        if resultat is None:
+            st.caption(f"{label} : aucun résultat.")
+            return
+        batterie = resultat.get("battery") or {}
+        diagnostics = (
+            ("infra_violations", "Violations d'infrastructure"),
+            ("physical_violations", "Violations physiques"),
+        )
+        for champ, titre in diagnostics:
+            valeurs = resultat.get(champ) or []
+            if valeurs:
+                st.error(f"{titre} — {label}")
+                for valeur in valeurs:
+                    st.write(valeur)
+            else:
+                st.caption(f"{titre} — {label} : aucune signalée.")
+        for champ, titre in (
+            ("erreurs", "Erreurs énergétiques"),
+            ("erreurs_reserve", "Erreurs énergétiques de réserve"),
+        ):
+            valeurs = batterie.get(champ) or []
+            if valeurs:
+                st.error(f"{titre} — {label}")
+                for valeur in valeurs:
+                    st.write(valeur)
+
+    def _resume_diagnostics(resultat):
+        if resultat is None:
+            return "Indisponible"
+        compteurs = []
+        for champ, nom in (
+            ("infra_violations", "infra"),
+            ("physical_violations", "physique"),
+        ):
+            nombre = len(resultat.get(champ) or [])
+            if nombre:
+                compteurs.append(f"{nom} : {nombre}")
+        batterie = resultat.get("battery") or {}
+        erreurs_energie = len(batterie.get("erreurs") or [])
+        erreurs_reserve = len(batterie.get("erreurs_reserve") or [])
+        refus = len(resultat.get("reserve_refus") or [])
+        if erreurs_energie:
+            compteurs.append(f"énergie : {erreurs_energie}")
+        if erreurs_reserve:
+            compteurs.append(f"énergie réserve : {erreurs_reserve}")
+        if refus:
+            compteurs.append(f"refus réserve : {refus}")
+        return " ; ".join(compteurs) if compteurs else "Aucune violation signalée"
+
+    def _graphiques(resultat, label):
+        if resultat is None:
+            return
+        chronologie_perturbee = resultat.get("chronologie") or {}
+        figure = None
+        try:
+            figure = creer_graphique_horaire(
+                chronologie_perturbee,
+                df_gares,
+                heure_debut_service,
+                params_affichage,
+                mode_calcul=mode_calcul,
+                missions_par_train=missions_par_train,
+                all_energy_params=energy_params,
+            )
+            st.pyplot(figure)
+        except Exception as exc:
+            st.error(f"Graphique horaire indisponible ({label}) : {type(exc).__name__} — {exc}")
+        finally:
+            if figure is not None:
+                plt.close(figure)
+
+        energie_scenario = ((resultat.get("battery") or {}).get("scenario") or {})
+        params_par_train = energie_scenario.get("par_train") or {}
+        terminus_valides = set(terminus_options)
+        for train_id, bilan in params_par_train.items():
+            log = bilan.get("batterie_log") or bilan.get("battery_log")
+            if not log:
+                continue
+            type_materiel = bilan.get("type_materiel", "batterie")
+            params = (energy_params or {}).get(type_materiel, {})
+            fig_batterie = None
+            try:
+                fig_batterie = creer_graphique_batterie(
+                    log,
+                    train_id,
+                    soc_min_pct=params.get("soc_min_pct", 20),
+                    soc_max_pct=params.get("soc_max_pct", 95),
+                    terminaux_valides=terminus_valides,
+                    max_c_rate=params.get("facteur_charge_C", 4.0),
+                    df_gares=df_gares,
+                )
+                if fig_batterie is not None:
+                    st.pyplot(fig_batterie)
+            except Exception as exc:
+                st.error(f"Graphique batterie indisponible ({label}, {train_id}) : {exc}")
+            finally:
+                if fig_batterie is not None:
+                    plt.close(fig_batterie)
+
+    lignes_comparaison = []
+    for scenario in scenarios:
+        point = scenario.get("point") or {}
+        sans_reserve = scenario.get("sans_reserve")
+        avec_reserve = scenario.get("avec_reserve")
+        if point:
+            kind = str(point.get("kind") or "incident")
+            type_point = {"depart": "départ", "croisement": "croisement"}.get(
+                kind, kind
+            )
+            point_critique = (
+                f"{point.get('train_id', '—')} — {point.get('gare', '—')} "
+                f"({_heure(point.get('time'))}, {type_point})"
+            )
+        else:
+            point_critique = "Non déterminé"
+        batterie_sans = (sans_reserve or {}).get("battery") or {}
+        batterie_avec = (avec_reserve or {}).get("battery") or {}
+        lignes_comparaison.append(
+            {
+                "Retard injecté": f"{scenario.get('delay_min', '—')} min",
+                "Point critique": point_critique,
+                "Retard cumulé sans réserve": _minutes((sans_reserve or {}).get("retard_cumule_min")),
+                "Retour normal sans réserve": _retour_normal(sans_reserve),
+                "SoC min. sans réserve": _soc(batterie_sans.get("min_soc_pct")),
+                "Δ batterie sans réserve": _kwh(batterie_sans.get("delta_kwh")),
+                "Diagnostics sans réserve": _resume_diagnostics(sans_reserve),
+                "Retard cumulé avec réserve": (
+                    _minutes(avec_reserve.get("retard_cumule_min"))
+                    if avec_reserve is not None
+                    else _etat_reserve_absente()
+                ),
+                "Retour normal avec réserve": _retour_normal(avec_reserve)
+                if avec_reserve is not None
+                else _etat_reserve_absente(),
+                "SoC min. avec réserve": _soc(batterie_avec.get("min_soc_pct")),
+                "Δ batterie avec réserve": _kwh(batterie_avec.get("delta_kwh")),
+                "Diagnostics avec réserve": _resume_diagnostics(avec_reserve),
+            }
+        )
+
+    st.caption(
+        f"Points candidats évalués : {resultats_enregistres.get('candidates_count', 0)}. "
+        "Un retour normal absent signifie que l'horaire n'est pas rétabli sur la période analysée."
+    )
+    st.dataframe(pd.DataFrame(lignes_comparaison), hide_index=True, width="stretch")
+
+    for scenario in scenarios:
+        point = scenario.get("point") or {}
+        delay = scenario.get("delay_min", "—")
+        description_point = (
+            f"{point.get('train_id', '—')} à {point.get('gare', '—')} — {_heure(point.get('time'))}"
+            if point
+            else "point critique non déterminé"
+        )
+        with st.expander(f"Incident +{delay} min — {description_point}", expanded=False):
+            sans_reserve = scenario.get("sans_reserve")
+            avec_reserve = scenario.get("avec_reserve")
+            colonnes = st.columns(2)
+            for colonne, resultat, label in (
+                (colonnes[0], sans_reserve, "Sans réserve"),
+                (colonnes[1], avec_reserve, "Avec réserve"),
+            ):
+                with colonne:
+                    st.markdown(f"**{label}**")
+                    if resultat is None:
+                        st.caption(_etat_reserve_absente())
+                        continue
+                    batterie = resultat.get("battery") or {}
+                    st.write(f"Retard cumulé : {_minutes(resultat.get('retard_cumule_min'))}")
+                    retour = resultat.get("retour_normal_min")
+                    st.write(
+                        "Retour normal : "
+                        + (_minutes(retour) if retour is not None else "Non rétabli sur la période")
+                    )
+                    st.write(f"SoC minimal : {_soc(batterie.get('min_soc_pct'))}")
+                    st.write(f"Variation batterie : {_kwh(batterie.get('delta_kwh'))}")
+                    _diagnostics(resultat, label)
+                    _graphiques(resultat, f"{delay} min — {label}")
+
+            if avec_reserve is not None:
+                activations = avec_reserve.get("reserve_activations") or []
+                st.markdown("**Activations de réserve**")
+                if activations:
+                    st.dataframe(
+                        pd.DataFrame(
+                            [
+                                {
+                                    "Gare": item.get("gare", "—"),
+                                    "Départ planifié": _heure(item.get("depart_planifie")),
+                                    "Départ réel": _heure(item.get("depart_reel")),
+                                    "Rame remplacée": item.get("train_id", "—"),
+                                    "Rame de réserve": item.get("reserve_train_id", "—"),
+                                    "Mission": item.get("mission", "—"),
+                                    "Gain cumulé": _minutes(item.get("gain_cumule_min")),
+                                }
+                                for item in activations
+                            ]
+                        ),
+                        hide_index=True,
+                        width="stretch",
+                    )
+                else:
+                    st.caption("Aucune activation de réserve.")
+
+                refus = avec_reserve.get("reserve_refus") or []
+                st.markdown("**Refus de réserve**")
+                if refus:
+                    st.dataframe(
+                        pd.DataFrame(
+                            [
+                                {
+                                    "Gare": item.get("gare", "—"),
+                                    "Service": item.get("service_id", "—"),
+                                    "Raisons": "; ".join(map(str, item.get("raisons") or [])),
+                                }
+                                for item in refus
+                            ]
+                        ),
+                        hide_index=True,
+                        width="stretch",
+                    )
+                else:
+                    st.caption("Aucun refus de réserve signalé.")
 
 
 def _library_scenarios():
@@ -2171,23 +2531,42 @@ if st.session_state.gares is not None and st.session_state.missions:
                                 )
                         st.markdown("---")
             # --- Affichage du Graphique ---
-            st.subheader("Graphique horaire")
-            if not chronologie or all(not t for t in chronologie.values()):
-                st.warning("Aucun train à afficher.")
-            else:
-                params_affichage = {'duree_fenetre': fenetre_heures, 'decalage_heure': decalage_heures}
+            tab_horaire, tab_robustesse = st.tabs(["Graphique horaire", "Robustesse"])
+            with tab_horaire:
+                st.subheader("Graphique horaire")
+                if not chronologie or all(not t for t in chronologie.values()):
+                    st.warning("Aucun train à afficher.")
+                else:
+                    params_affichage = {'duree_fenetre': fenetre_heures, 'decalage_heure': decalage_heures}
 
-                # Passe les infos de calcul au module de plotting
-                figure = creer_graphique_horaire(
-                    chronologie,
-                    dataframe_gares,
-                    heure_debut_service,
-                    params_affichage,
-                    mode_calcul=mode_calcul,
-                    missions_par_train=missions_par_train,
-                    all_energy_params=st.session_state.energy_params
-                )
-                st.pyplot(figure)
+                    # Passe les infos de calcul au module de plotting
+                    figure = creer_graphique_horaire(
+                        chronologie,
+                        dataframe_gares,
+                        heure_debut_service,
+                        params_affichage,
+                        mode_calcul=mode_calcul,
+                        missions_par_train=missions_par_train,
+                        all_energy_params=st.session_state.energy_params
+                    )
+                    st.pyplot(figure)
+
+            with tab_robustesse:
+                if not chronologie or all(not t for t in chronologie.values()):
+                    st.info("Générez d'abord un graphique horaire pour analyser sa robustesse.")
+                else:
+                    _rendre_onglet_robustesse(
+                        chronologie,
+                        dataframe_gares,
+                        st.session_state.missions,
+                        st.session_state.energy_params,
+                        heure_debut_service,
+                        params_affichage,
+                        mode_calcul,
+                        missions_par_train,
+                    )
+
+            if chronologie and any(chronologie.values()):
 
                 # Pré-construction des figures batterie pour l'export PDF
                 figures_batterie_pdf = []
