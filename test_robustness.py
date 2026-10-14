@@ -235,14 +235,14 @@ def test_nouvelle_alerte_batterie_est_corrigee_par_le_retournement():
 
     assert batterie["baseline"]["par_train"]["T1"]["autonomie_insuffisante"] is False
     assert batterie["autonomie_insuffisante"] is False
-    assert mission_suivante["depart_reel"] == _time(9, 10)
+    assert mission_suivante["depart_reel"] == _time(8, 56)
     assert recharge == [{
         "service_id": "str:T1#1",
         "train_id": "T1",
         "gare": "B",
         "retournement_initial_min": 5.0,
-        "retournement_retenu_min": 20.0,
-        "prolongation_min": 15.0,
+        "retournement_retenu_min": 6.0,
+        "prolongation_min": 1.0,
         "motif": "suppression d'une nouvelle alerte batterie",
     }]
     assert "retour_normal_sans_recharge_min" in scenario
@@ -251,6 +251,63 @@ def test_nouvelle_alerte_batterie_est_corrigee_par_le_retournement():
         replay_initial["infra_violations"],
     )
     assert "_deficit_batterie_kwh" not in batterie["scenario"]["par_train"]["T1"]
+
+
+def test_recharge_est_bornee_par_horizon_sous_le_retournement_nominal():
+    chronologie = _chronologie_batterie_retournement()
+    chronologie["T1"][2]["end"] = _time(8, 57)
+    chronologie["T1"][3]["start"] = _time(8, 57)
+    chronologie["T1"][3]["end"] = _time(9, 5)
+    energy_params = _parametres_batterie_retournement(23)
+    services, gares, infra = _compiler_services(
+        chronologie, _infrastructure_batterie(), [_mission_batterie()]
+    )
+    service = next(item for item in services if item["service_id"] == "str:T1#1")
+    incident = next(
+        point for point in _enumerer_points(services, infra)
+        if point["service_id"] == service["service_id"] and point["kind"] == "depart"
+    )
+    nominal = _analyser_energie(chronologie, services, gares, energy_params)
+    raw = _rejouer(services, gares, incident, 20)
+    raw_energy = _analyser_energie(raw["chronologie"], services, gares, energy_params)
+
+    assert service["turnaround_min"] == 20
+    assert robustness_module._retournement_effectif(service, raw) == 5.0
+    assert robustness_module._limite_charge_retournement(
+        service, raw, services, gares, energy_params
+    ) == 15
+    assert nominal["autonomie_insuffisante"] is False
+    assert raw_energy["autonomie_insuffisante"] is True
+    replay_15 = _rejouer(
+        services, gares, incident, 20,
+        turnaround_overrides={service["service_id"]: 15},
+    )
+    energy_15 = _analyser_energie(
+        replay_15["chronologie"], services, gares, energy_params
+    )
+    assert energy_15["autonomie_insuffisante"] is False
+    replay_12 = _rejouer(
+        services, gares, incident, 20,
+        turnaround_overrides={service["service_id"]: 12},
+    )
+    energy_12 = _analyser_energie(
+        replay_12["chronologie"], services, gares, energy_params
+    )
+    assert energy_12["autonomie_insuffisante"] is True
+
+    corrected, corrected_energy, recharges, _ = robustness_module._corriger_retournements(
+        raw, services, gares, incident, 20, nominal, energy_params,
+        energy_cache={},
+    )
+
+    assert corrected_energy["autonomie_insuffisante"] is False
+    assert corrected["physical_violations"] == []
+    assert corrected["infra_violations"] == []
+    assert [
+        (row["retournement_initial_min"], row["retournement_retenu_min"],
+         row["prolongation_min"])
+        for row in recharges
+    ] == [(5.0, 13.0, 8.0)]
 
 
 def test_parametres_batterie_absents_ne_declenchent_pas_de_recharge():
@@ -306,7 +363,7 @@ def test_alerte_avant_le_terminus_reste_si_aucune_solution_de_recharge():
     assert scenario["recharges_prolongees"] == []
 
 
-def test_plusieurs_retournements_sont_prolonges_si_un_seul_ne_suffit_pas():
+def test_recherche_minimise_le_retournement_sous_le_minimum_nominal():
     chronologie = _chronologie_batterie_rotations()
     energy_params = _parametres_batterie_retournement(40, facteur_aux_kwh_h=10)
     services, gares, infra = _compiler_services(
@@ -338,14 +395,12 @@ def test_plusieurs_retournements_sont_prolonges_si_un_seul_ne_suffit_pas():
     assert corrected_energy["autonomie_insuffisante"] is False
     assert corrected["physical_violations"] == []
     assert corrected["infra_violations"] == []
-    assert [row["service_id"] for row in recharges] == [
-        "str:T1#1", "str:T1#3",
-    ]
+    assert [row["service_id"] for row in recharges] == ["str:T1#1"]
     assert [
         (row["retournement_initial_min"], row["retournement_retenu_min"],
          row["prolongation_min"])
         for row in recharges
-    ] == [(5.0, 20.0, 15.0), (5.0, 20.0, 15.0)]
+    ] == [(5.0, 13.0, 8.0)]
 
     resultat = evaluer_robustesse(
         chronologie, _infrastructure_batterie(), [_mission_batterie()], energy_params

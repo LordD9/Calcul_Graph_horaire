@@ -1553,7 +1553,7 @@ def _corriger_retournements(replay, services, df_gares, incident, delay_min,
             effective = _retournement_effectif(service, current_replay)
             if effective is None:
                 continue
-            lower = max(effective, service["turnaround_min"])
+            lower = effective
             current_target = overrides.get(service["service_id"])
             if current_target is not None:
                 lower = max(lower, current_target)
