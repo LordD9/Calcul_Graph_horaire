@@ -58,7 +58,7 @@ import scenarios_manager
 from robustness_logic import evaluer_robustesse, fingerprint_robustesse
 
 
-def _rendre_onglet_robustesse(
+def _rendre_robustesse(
     chronologie,
     df_gares,
     missions,
@@ -178,6 +178,60 @@ def _rendre_onglet_robustesse(
     def _soc(value):
         return "—" if value is None else f"{float(value):.1f} %"
 
+    def _liste_valeurs(value):
+        if value is None:
+            return []
+        return list(value) if isinstance(value, (list, tuple)) else [value]
+
+    def _texte_alerte_autonomie(alerte):
+        if isinstance(alerte, dict):
+            for champ in ("raison", "reason", "message", "motif", "details", "texte"):
+                if alerte.get(champ) is not None:
+                    return str(alerte[champ])
+            return ""
+        return "" if alerte is None else str(alerte)
+
+    def _train_id_alerte(alerte):
+        if isinstance(alerte, dict):
+            train_id = next(
+                (alerte.get(champ) for champ in ("train_id", "train")
+                 if alerte.get(champ) is not None),
+                None,
+            )
+            if train_id is not None:
+                return train_id
+        texte = _texte_alerte_autonomie(alerte)
+        return texte[6:].split(":", 1)[0] if texte.startswith("Train ") else None
+
+    def _alerte_autonomie_non_verifiable(alerte):
+        if isinstance(alerte, dict) and alerte.get("autonomie_non_verifiable"):
+            return True
+        texte = _texte_alerte_autonomie(alerte).casefold().replace("-", " ")
+        return any(marqueur in texte for marqueur in (
+            "non vérifiable", "non verifiable", "unverifiable", "unverified",
+        ))
+
+    def _autonomie_reellement_insuffisante(batterie):
+        alertes = _liste_valeurs(batterie.get("alertes_autonomie"))
+        if any(not _alerte_autonomie_non_verifiable(alerte) for alerte in alertes):
+            return True
+        scenario = batterie.get("scenario") or {}
+        par_train = scenario.get("par_train") or {}
+        statuts = [statut for statut in par_train.values() if isinstance(statut, dict)]
+        if any(
+            statut.get("autonomie_insuffisante")
+            and not statut.get("autonomie_non_verifiable")
+            for statut in statuts
+        ):
+            return True
+        donnees_non_verifiables = (
+            batterie.get("autonomie_non_verifiable")
+            or batterie.get("alertes_autonomie_non_verifiable")
+            or any(_alerte_autonomie_non_verifiable(alerte) for alerte in alertes)
+            or any(statut.get("autonomie_non_verifiable") for statut in statuts)
+        )
+        return bool(batterie.get("autonomie_insuffisante")) and not donnees_non_verifiables
+
     def _retour_normal(resultat):
         if resultat is None:
             return "Indisponible"
@@ -239,9 +293,405 @@ def _rendre_onglet_robustesse(
             compteurs.append(f"énergie réserve : {erreurs_reserve}")
         if refus:
             compteurs.append(f"refus réserve : {refus}")
+        if _autonomie_reellement_insuffisante(batterie):
+            compteurs.append("autonomie insuffisante")
         return " ; ".join(compteurs) if compteurs else "Aucune violation signalée"
 
-    def _graphiques(resultat, label):
+    def _afficher_suppressions(resultat, label):
+        suppressions = resultat.get("suppressions") or []
+        nombre = resultat.get("suppressions_count")
+        nombre = len(suppressions) if nombre is None else int(nombre)
+        if nombre == 0:
+            st.caption(f"Aucune suppression de service — {label}.")
+            return
+        st.markdown(f"**Services supprimés — {label} ({nombre})**")
+        if not suppressions:
+            st.error(f"{nombre} suppression(s) signalée(s), mais les détails sont absents.")
+            return
+
+        def _detail_hypothese(suppression):
+            service_suivant = suppression.get("service_suivant_assure")
+            hypothese = suppression.get("hypothese")
+            if service_suivant is not None:
+                return f"Départ observé du service {service_suivant}"
+            if hypothese:
+                return (
+                    f"{hypothese} ; prochain départ hors horizon, non observé ; + 10 min"
+                )
+            return "Aucun prochain départ observé ni hypothèse renseignée"
+
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Service": suppression.get("service_id", "—"),
+                        "Motif": suppression.get("motif", "Non précisé"),
+                        "Attente du prochain train": _minutes(suppression.get("attente_min")),
+                        "Pénalité de suppression": _minutes(suppression.get("penalite_min")),
+                        "Hypothèse de pénalité": suppression.get("hypothese", "—"),
+                        "Origine": (
+                            "Observée"
+                            if suppression.get("service_suivant_assure") is not None
+                            else "Extrapolée"
+                            if suppression.get("hypothese")
+                            else "Non précisée"
+                        ),
+                        "Détail de l'hypothèse": _detail_hypothese(suppression),
+                    }
+                    for suppression in suppressions
+                ]
+            ),
+            hide_index=True,
+            width="stretch",
+        )
+
+    def _afficher_recharges_prolongees(resultat, label):
+        recharges = resultat.get("recharges_prolongees") or []
+        if not recharges:
+            return
+        st.caption(
+            f"{label} — La sécurité de charge est prioritaire sur le délai de récupération : "
+            "le retournement est prolongé quand une recharge l'exige."
+        )
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Service": recharge.get("service_id", "—"),
+                        "Train": recharge.get("train_id", "—"),
+                        "Gare": recharge.get("gare", "—"),
+                        "Retournement initial": _minutes(
+                            recharge.get("retournement_initial_min")
+                        ),
+                        "Retournement retenu": _minutes(
+                            recharge.get("retournement_retenu_min")
+                        ),
+                        "Prolongation pour recharge": _minutes(
+                            recharge.get("prolongation_min")
+                        ),
+                        "Motif": recharge.get("motif", "Non précisé"),
+                    }
+                    for recharge in recharges
+                ]
+            ),
+            hide_index=True,
+            width="stretch",
+        )
+
+    def _nombre_suppressions(resultat):
+        if resultat is None:
+            return "Indisponible"
+        nombre = resultat.get("suppressions_count")
+        return len(resultat.get("suppressions") or []) if nombre is None else int(nombre)
+
+    def _retard_trains(resultat):
+        if resultat is None:
+            return "Indisponible"
+        retard = resultat.get("retard_trains_min")
+        if retard is None and _nombre_suppressions(resultat) == 0:
+            retard = resultat.get("retard_cumule_min")
+        return _minutes(retard)
+
+    def _afficher_alerte_autonomie(resultat, label):
+        batterie = resultat.get("battery") or {}
+        alertes = _liste_valeurs(batterie.get("alertes_autonomie"))
+        alertes_non_verifiables = _liste_valeurs(
+            batterie.get("alertes_autonomie_non_verifiable")
+        )
+        alertes_non_verifiables.extend(
+            alerte for alerte in alertes
+            if _alerte_autonomie_non_verifiable(alerte)
+        )
+
+        scenario = batterie.get("scenario") or {}
+        nominal = batterie.get("baseline") or {}
+        scenario_par_train = scenario.get("par_train") or {}
+        nominal_par_train = nominal.get("par_train") or {}
+
+        def _ligne_par_train(source, train_id):
+            if not isinstance(source, dict) or train_id is None:
+                return {}
+            ligne = source.get(train_id)
+            if ligne is None:
+                ligne = next(
+                    (valeur for identifiant, valeur in source.items()
+                     if str(identifiant) == str(train_id)),
+                    None,
+                )
+            return ligne if isinstance(ligne, dict) else {}
+
+        def _raison_statut(statut):
+            raison = _texte_alerte_autonomie(statut)
+            if raison:
+                return raison
+            erreurs = _liste_valeurs(statut.get("erreurs")) if isinstance(statut, dict) else []
+            return str(erreurs[0]) if erreurs else (
+                "Les données énergétiques ne permettent pas de vérifier l'autonomie."
+            )
+
+        alertes_uniques = []
+        cles_alertes = set()
+        for alerte in alertes_non_verifiables:
+            train_id = _train_id_alerte(alerte)
+            raison = _texte_alerte_autonomie(alerte) or (
+                "Les données énergétiques ne permettent pas de vérifier l'autonomie."
+            )
+            cle = (str(train_id), raison)
+            if cle not in cles_alertes:
+                cles_alertes.add(cle)
+                alertes_uniques.append({"train_id": train_id, "raison": raison})
+
+        statuts_non_verifiables = [
+            (train_id, statut)
+            for train_id, statut in scenario_par_train.items()
+            if isinstance(statut, dict) and statut.get("autonomie_non_verifiable")
+        ]
+        for train_id, statut in statuts_non_verifiables:
+            cle_train = str(train_id)
+            if not any(str(alerte.get("train_id")) == cle_train for alerte in alertes_uniques):
+                alertes_uniques.append({
+                    "train_id": train_id,
+                    "raison": _raison_statut(statut),
+                })
+
+        if batterie.get("autonomie_non_verifiable") and not alertes_uniques:
+            alertes_uniques.append({
+                "train_id": None,
+                "raison": "Les données énergétiques ne permettent pas de vérifier l'autonomie.",
+            })
+        for alerte in alertes_uniques:
+            train_id = alerte["train_id"]
+            prefixe = f"Train {train_id} : " if train_id is not None else ""
+            st.warning(
+                f"Autonomie non vérifiable — {label} — {prefixe}{alerte['raison']}."
+            )
+
+        alertes_reelles = [
+            alerte for alerte in alertes
+            if not _alerte_autonomie_non_verifiable(alerte)
+        ]
+        for train_id, statut in scenario_par_train.items():
+            if (
+                not isinstance(statut, dict)
+                or not statut.get("autonomie_insuffisante")
+                or statut.get("autonomie_non_verifiable")
+            ):
+                continue
+            if not any(str(_train_id_alerte(alerte)) == str(train_id) for alerte in alertes_reelles):
+                alerte_statut = dict(statut)
+                alerte_statut["train_id"] = train_id
+                alertes_reelles.append(alerte_statut)
+
+        if not alertes_reelles and _autonomie_reellement_insuffisante(batterie):
+            alertes_reelles = [None]
+        if not alertes_uniques and not alertes_reelles:
+            return
+
+        def _premiere_valeur(source, champs):
+            if not isinstance(source, dict):
+                return None
+            return next((source.get(champ) for champ in champs if source.get(champ) is not None), None)
+
+        for alerte in alertes_reelles:
+            texte = _texte_alerte_autonomie(alerte)
+            train_id = _train_id_alerte(alerte)
+            ligne_scenario = _ligne_par_train(scenario_par_train, train_id)
+            ligne_nominale = _ligne_par_train(nominal_par_train, train_id)
+            soc = _premiere_valeur(
+                alerte,
+                ("min_soc_pct", "soc_min_pct", "soc_pct", "soc_reel_pct"),
+            )
+            if soc is None:
+                soc = ligne_scenario.get("min_soc_pct")
+            seuil = _premiere_valeur(
+                alerte,
+                ("seuil_soc_min_pct", "seuil_soc_pct", "threshold_soc_pct", "seuil_pct"),
+            )
+            if seuil is None:
+                seuil = ligne_scenario.get("seuil_soc_min_pct")
+            delta_nominal = _premiere_valeur(
+                alerte,
+                ("delta_soc_nominal_pct", "delta_vs_nominal_pct", "ecart_nominal_pct"),
+            )
+            if delta_nominal is None and soc is not None:
+                soc_nominal = ligne_nominale.get("min_soc_pct")
+                if soc_nominal is not None:
+                    delta_nominal = float(soc) - float(soc_nominal)
+
+            details = f"Train {train_id} : " if train_id else ""
+            if soc is not None and seuil is not None:
+                details += f"SoC minimal {float(soc):.1f} %, seuil {float(seuil):.1f} %"
+                if delta_nominal is not None:
+                    details += f"; écart vs nominal {float(delta_nominal):+.1f} points"
+            else:
+                details += texte or "SoC minimal et seuil indisponibles"
+            st.error(f"Autonomie insuffisante — {label} — {details}.")
+
+    def _fenetre_incident(point):
+        params_scenario = dict(params_affichage or {})
+        incident_time = (point or {}).get("time")
+        if incident_time is None:
+            return params_scenario
+
+        try:
+            if isinstance(incident_time, datetime):
+                evenement = incident_time
+                debut_service = datetime.combine(evenement.date(), heure_debut_service)
+                if evenement < debut_service:
+                    debut_service -= timedelta(days=1)
+            elif hasattr(incident_time, "hour"):
+                debut_service = datetime.combine(datetime.today().date(), heure_debut_service)
+                evenement = datetime.combine(debut_service.date(), incident_time)
+                if evenement < debut_service:
+                    evenement += timedelta(days=1)
+            else:
+                return params_scenario
+            decalage_incident = (evenement - debut_service).total_seconds() / 3600
+            duree_fenetre = float(params_scenario.get("duree_fenetre") or 0)
+            duree_service = float(params_scenario.get("duree_service") or 24)
+            decalage_max = max(0.0, duree_service - duree_fenetre)
+            params_scenario["decalage_heure"] = min(
+                decalage_max,
+                max(0.0, decalage_incident - duree_fenetre / 2),
+            )
+        except (TypeError, ValueError):
+            return params_scenario
+        return params_scenario
+
+    def _trajets_nominal_service(point):
+        train_id = (point or {}).get("train_id")
+        service_id = (point or {}).get("service_id")
+        if train_id is None or service_id is None:
+            return []
+        trajets_train = (chronologie or {}).get(train_id)
+        if trajets_train is None:
+            trajets_train = next(
+                (
+                    trajets
+                    for identifiant, trajets in (chronologie or {}).items()
+                    if str(identifiant) == str(train_id)
+                ),
+                [],
+            )
+        if any(str(trajet.get("service_id")) == str(service_id) for trajet in trajets_train):
+            return [
+                trajet
+                for trajet in trajets_train
+                if str(trajet.get("service_id")) == str(service_id)
+            ]
+
+        prefixe = f"{type(train_id).__name__}:{train_id}#"
+        service_id_texte = str(service_id)
+        if not service_id_texte.startswith(prefixe):
+            return []
+        try:
+            ordinal = int(service_id_texte[len(prefixe):])
+        except ValueError:
+            return []
+        if ordinal < 1:
+            return []
+
+        entrees = sorted(
+            enumerate(trajets_train or []),
+            key=lambda item: (
+                item[1].get("start"),
+                item[1].get("end"),
+                item[0],
+            ),
+        )
+        services = []
+        service_courant = None
+        attente_prefixe = []
+        for _, trajet in entrees:
+            if trajet.get("is_mission_start", False):
+                if service_courant is not None:
+                    services.append(service_courant)
+                service_courant = attente_prefixe + [trajet]
+                attente_prefixe = []
+            elif service_courant is None:
+                if trajet.get("origine") == trajet.get("terminus"):
+                    attente_prefixe.append(trajet)
+            else:
+                service_courant.append(trajet)
+        if service_courant is not None:
+            services.append(service_courant)
+        return services[ordinal - 1] if ordinal <= len(services) else []
+
+    def _surligner_service_incident(figure, chronologie_perturbee, point, resultat):
+        service_id = (point or {}).get("service_id")
+        if service_id is None or len(figure.axes) < 2:
+            return
+        distances = df_gares.set_index("gare")["distance"].to_dict()
+        axe_horaire = figure.axes[1]
+        trajets_reels = [
+            trajet
+            for trajets in chronologie_perturbee.values()
+            for trajet in trajets
+            if str(trajet.get("service_id")) == str(service_id)
+        ]
+        segments_reels = set()
+        for trajet in trajets_reels:
+            origine = trajet.get("origine")
+            terminus = trajet.get("terminus")
+            if origine not in distances or terminus not in distances:
+                continue
+            if origine != terminus:
+                segments_reels.add((origine, terminus))
+            axe_horaire.plot(
+                [trajet.get("start"), trajet.get("end")],
+                [distances[origine], distances[terminus]],
+                color="#d62728",
+                linewidth=3.0,
+                zorder=10,
+                solid_capstyle="round",
+            )
+
+        suppressions = (resultat or {}).get("suppressions") or []
+        service_supprime = any(
+            str(suppression.get("service_id")) == str(service_id)
+            for suppression in suppressions
+        )
+        if not service_supprime:
+            return
+
+        legende_ajoutee = False
+        for trajet in _trajets_nominal_service(point):
+            origine = trajet.get("origine")
+            terminus = trajet.get("terminus")
+            if (
+                origine == terminus
+                or (origine, terminus) in segments_reels
+                or origine not in distances
+                or terminus not in distances
+            ):
+                continue
+            axe_horaire.plot(
+                [trajet.get("start"), trajet.get("end")],
+                [distances[origine], distances[terminus]],
+                color="#d62728",
+                linestyle="--",
+                linewidth=3.0,
+                zorder=10,
+                label=("Service supprimé — tracé prévu" if not legende_ajoutee else None),
+            )
+            legende_ajoutee = True
+
+        if legende_ajoutee:
+            handles, labels = axe_horaire.get_legend_handles_labels()
+            labels_uniques = {}
+            for handle, label in zip(handles, labels):
+                if label and label not in labels_uniques:
+                    labels_uniques[label] = handle
+            if labels_uniques:
+                axe_horaire.legend(
+                    labels_uniques.values(),
+                    labels_uniques.keys(),
+                    loc="upper left",
+                    bbox_to_anchor=(1.01, 1),
+                    title="Trains",
+                )
+
+    def _graphiques(resultat, label, point):
         if resultat is None:
             return
         chronologie_perturbee = resultat.get("chronologie") or {}
@@ -251,11 +701,12 @@ def _rendre_onglet_robustesse(
                 chronologie_perturbee,
                 df_gares,
                 heure_debut_service,
-                params_affichage,
+                _fenetre_incident(point),
                 mode_calcul=mode_calcul,
                 missions_par_train=missions_par_train,
                 all_energy_params=energy_params,
             )
+            _surligner_service_incident(figure, chronologie_perturbee, point, resultat)
             st.pyplot(figure)
         except Exception as exc:
             st.error(f"Graphique horaire indisponible ({label}) : {type(exc).__name__} — {exc}")
@@ -313,11 +764,21 @@ def _rendre_onglet_robustesse(
             {
                 "Retard injecté": f"{scenario.get('delay_min', '—')} min",
                 "Point critique": point_critique,
+                "Retards des trains sans réserve": _retard_trains(sans_reserve),
+                "Suppressions sans réserve": _nombre_suppressions(sans_reserve),
+                "Pénalités suppressions sans réserve": _minutes(
+                    (sans_reserve or {}).get("penalite_suppressions_min")
+                ),
                 "Retard cumulé sans réserve": _minutes((sans_reserve or {}).get("retard_cumule_min")),
                 "Retour normal sans réserve": _retour_normal(sans_reserve),
                 "SoC min. sans réserve": _soc(batterie_sans.get("min_soc_pct")),
                 "Δ batterie sans réserve": _kwh(batterie_sans.get("delta_kwh")),
                 "Diagnostics sans réserve": _resume_diagnostics(sans_reserve),
+                "Retards des trains avec réserve": _retard_trains(avec_reserve),
+                "Suppressions avec réserve": _nombre_suppressions(avec_reserve),
+                "Pénalités suppressions avec réserve": _minutes(
+                    (avec_reserve or {}).get("penalite_suppressions_min")
+                ),
                 "Retard cumulé avec réserve": (
                     _minutes(avec_reserve.get("retard_cumule_min"))
                     if avec_reserve is not None
@@ -333,7 +794,9 @@ def _rendre_onglet_robustesse(
         )
 
     st.caption(
-        f"Points candidats évalués : {resultats_enregistres.get('candidates_count', 0)}. "
+        "Score = retards des trains + attente du prochain train + 10 min par suppression. "
+        f"Points candidats évalués : {resultats_enregistres.get('candidates_count', 0)} "
+        "(tous les départs et points de croisement recensés sur toute la journée). "
         "Un retour normal absent signifie que l'horaire n'est pas rétabli sur la période analysée."
     )
     st.dataframe(pd.DataFrame(lignes_comparaison), hide_index=True, width="stretch")
@@ -361,15 +824,35 @@ def _rendre_onglet_robustesse(
                         continue
                     batterie = resultat.get("battery") or {}
                     st.write(f"Retard cumulé : {_minutes(resultat.get('retard_cumule_min'))}")
+                    st.write(f"Retards des trains : {_retard_trains(resultat)}")
+                    st.write(f"Pénalités de suppressions : {_minutes(resultat.get('penalite_suppressions_min'))}")
+                    _afficher_suppressions(resultat, label)
+                    _afficher_recharges_prolongees(resultat, label)
+                    _afficher_alerte_autonomie(resultat, label)
                     retour = resultat.get("retour_normal_min")
+                    libelle_retour = (
+                        "Retour normal avec prolongation de recharge"
+                        if resultat.get("recharges_prolongees")
+                        else "Retour normal"
+                    )
                     st.write(
-                        "Retour normal : "
+                        f"{libelle_retour} : "
                         + (_minutes(retour) if retour is not None else "Non rétabli sur la période")
                     )
+                    if "retour_normal_sans_recharge_min" in resultat:
+                        retour_sans_recharge = resultat.get("retour_normal_sans_recharge_min")
+                        st.write(
+                            "Retour normal sans recharge : "
+                            + (
+                                _minutes(retour_sans_recharge)
+                                if retour_sans_recharge is not None
+                                else "Non rétabli sur la période"
+                            )
+                        )
                     st.write(f"SoC minimal : {_soc(batterie.get('min_soc_pct'))}")
                     st.write(f"Variation batterie : {_kwh(batterie.get('delta_kwh'))}")
                     _diagnostics(resultat, label)
-                    _graphiques(resultat, f"{delay} min — {label}")
+                    _graphiques(resultat, f"{delay} min — {label}", point)
 
             if avec_reserve is not None:
                 activations = avec_reserve.get("reserve_activations") or []
@@ -2043,6 +2526,11 @@ if st.session_state.gares is not None and st.session_state.missions:
         if duree_heures_s <= 0: duree_heures_s += 24
         fenetre_heures = st.number_input("Durée de la fenêtre (h)", 1.0, duree_heures_s, min(5.0, duree_heures_s))
         decalage_heures = st.slider("Début de la fenêtre (h)", 0.0, max(0.0, duree_heures_s - fenetre_heures), 0.0, 0.5)
+        params_affichage = {
+            "duree_fenetre": fenetre_heures,
+            "decalage_heure": decalage_heures,
+            "duree_service": duree_heures_s,
+        }
 
         allow_sharing = st.session_state.get("allow_sharing_checkbox", True)
         if mode_generation == "Manuel":
@@ -2531,40 +3019,21 @@ if st.session_state.gares is not None and st.session_state.missions:
                                 )
                         st.markdown("---")
             # --- Affichage du Graphique ---
-            tab_horaire, tab_robustesse = st.tabs(["Graphique horaire", "Robustesse"])
-            with tab_horaire:
-                st.subheader("Graphique horaire")
-                if not chronologie or all(not t for t in chronologie.values()):
-                    st.warning("Aucun train à afficher.")
-                else:
-                    params_affichage = {'duree_fenetre': fenetre_heures, 'decalage_heure': decalage_heures}
-
-                    # Passe les infos de calcul au module de plotting
-                    figure = creer_graphique_horaire(
-                        chronologie,
-                        dataframe_gares,
-                        heure_debut_service,
-                        params_affichage,
-                        mode_calcul=mode_calcul,
-                        missions_par_train=missions_par_train,
-                        all_energy_params=st.session_state.energy_params
-                    )
-                    st.pyplot(figure)
-
-            with tab_robustesse:
-                if not chronologie or all(not t for t in chronologie.values()):
-                    st.info("Générez d'abord un graphique horaire pour analyser sa robustesse.")
-                else:
-                    _rendre_onglet_robustesse(
-                        chronologie,
-                        dataframe_gares,
-                        st.session_state.missions,
-                        st.session_state.energy_params,
-                        heure_debut_service,
-                        params_affichage,
-                        mode_calcul,
-                        missions_par_train,
-                    )
+            st.subheader("Graphique horaire")
+            if not chronologie or all(not t for t in chronologie.values()):
+                st.warning("Aucun train à afficher.")
+            else:
+                # Passe les infos de calcul au module de plotting
+                figure = creer_graphique_horaire(
+                    chronologie,
+                    dataframe_gares,
+                    heure_debut_service,
+                    params_affichage,
+                    mode_calcul=mode_calcul,
+                    missions_par_train=missions_par_train,
+                    all_energy_params=st.session_state.energy_params
+                )
+                st.pyplot(figure)
 
             if chronologie and any(chronologie.values()):
 
@@ -2675,7 +3144,7 @@ if st.session_state.gares is not None and st.session_state.missions:
 
             # --- Affichage des Résultats Énergétiques (si mode Energie) ---
             if mode_calcul == "Calcul Energie":
-                with st.expander("7. Résultats de la simulation énergétique", expanded=True):
+                with st.expander("Résultats de la simulation énergétique", expanded=True):
 
                     resultats_globaux = []
                     has_diesel = False
@@ -2782,6 +3251,22 @@ if st.session_state.gares is not None and st.session_state.missions:
                         st.dataframe(df_bilan[cols_to_display])
                     else:
                         st.warning("Aucun résultat énergétique à afficher.")
+
+    with st.expander("7. Évaluation de la robustesse", expanded=False):
+        chronologie_robustesse = st.session_state.get("chronologie_calculee") or {}
+        if not chronologie_robustesse or all(not train for train in chronologie_robustesse.values()):
+            st.info("Générez d'abord un graphique horaire pour analyser sa robustesse.")
+        else:
+            _rendre_robustesse(
+                chronologie_robustesse,
+                dataframe_gares,
+                st.session_state.missions,
+                st.session_state.energy_params,
+                heure_debut_service,
+                params_affichage,
+                mode_calcul,
+                st.session_state.get("missions_par_train") or {},
+            )
 
 else:
     if st.session_state.get('gares') is None:
