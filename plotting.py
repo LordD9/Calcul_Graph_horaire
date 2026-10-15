@@ -185,8 +185,15 @@ def creer_graphique_horaire(
         all_energy_params is not None
     )
 
-    # Boucle par train
-    for i, (id_train, trajets) in enumerate(sorted(chronologie_trajets.items())):
+    # Boucle par train : séparer les types garde l'ordre naturel des IDs tout en
+    # évitant la comparaison directe entre entiers et chaînes. Le tri Python est
+    # stable et les clés d'origine restent utilisées dans la boucle.
+    for i, (id_train, trajets) in enumerate(
+        sorted(
+            chronologie_trajets.items(),
+            key=lambda item: (type(item[0]).__name__, item[0]),
+        )
+    ):
         trajets_tries = sorted(trajets, key=lambda t: t["start"])
         if not trajets_tries:
             continue

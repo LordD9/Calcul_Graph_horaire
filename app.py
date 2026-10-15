@@ -73,7 +73,8 @@ def _rendre_robustesse(
 
     st.subheader("Analyse de robustesse")
     st.caption(
-        "Le retard cumulé est la somme des retards d'arrivée des missions. "
+        "Retard cumulé = retards des services opérés + attente du prochain service assuré "
+        "+ 10 min par suppression. "
         "L'analyse rejoue le graphe existant, sans relancer l'optimisation."
     )
 
@@ -86,10 +87,16 @@ def _rendre_robustesse(
     reserve_active = st.checkbox(
         "Activer les rames de réserve",
         key="robustesse_reserve_active",
-        help="Une rame de réserve est créée pour chaque gare terminus sélectionnée.",
+        help="Les gares sont des lieux disponibles, dans la limite du plafond global de rames supplémentaires.",
     )
     reserve_gares = []
+    max_reserve_rames = 0
     if reserve_active:
+        max_reserve_rames = st.number_input(
+            "Maximum global de rames de réserve supplémentaires",
+            min_value=0, value=1, step=1, key="robustesse_max_reserve_rames",
+            help="Identités physiques distinctes sur tout le scénario. 0 autorise uniquement les redéploiements de rotation.",
+        )
         selection = st.multiselect(
             "Gares terminus de réserve (A, B ou les deux)",
             options=terminus_options,
@@ -100,7 +107,8 @@ def _rendre_robustesse(
         params_batterie = (energy_params or {}).get("batterie", {})
         soc_max = float(params_batterie.get("soc_max_pct", 95) or 95)
         st.caption(
-            "Une rame par gare sélectionnée. La rame reprend le matériel du service remplacé "
+            "Le plafond est global, pas par gare. Une rame réutilisée ne compte qu'une fois. "
+            "Une rame de rotation disponible est privilégiée. La réserve reprend le matériel du service remplacé "
             "et ne peut couvrir qu'un matériel compatible. Pour une rame batterie, le SoC initial "
             f"est le SoC maximal opérationnel configuré ({soc_max:g} %)."
         )
@@ -112,6 +120,8 @@ def _rendre_robustesse(
             missions,
             energy_params=energy_params,
             reserve_gares=reserve_gares,
+            max_reserve_rames=max_reserve_rames,
+            activer_renforts=reserve_active,
         )
     except Exception as exc:
         st.session_state["robustesse_resultats"] = None
@@ -143,6 +153,8 @@ def _rendre_robustesse(
                 missions,
                 energy_params=energy_params,
                 reserve_gares=reserve_gares,
+                max_reserve_rames=max_reserve_rames,
+                activer_renforts=reserve_active,
             )
         except Exception as exc:
             st.error(f"Calcul de robustesse impossible : {type(exc).__name__} — {exc}")
@@ -168,6 +180,27 @@ def _rendre_robustesse(
         if hasattr(value, "strftime"):
             return value.strftime("%H:%M")
         return str(value)
+
+    services_labels = {}
+    for scenario in scenarios:
+        for mode in ("sans_reserve", "avec_reserve"):
+            for row in (scenario.get(mode) or {}).get("arrivals", []):
+                departure = row.get("depart_planifie")
+                if row.get("service_id") and departure is not None:
+                    services_labels[row["service_id"]] = (
+                        f"{departure:%H:%M} {row.get('mission', '')}"
+                    )
+        for row in scenario.get("candidates_evaluated", []):
+            if row.get("kind") == "depart":
+                services_labels[row["service_id"]] = f"{row['time']:%H:%M} {row.get('mission', '')}"
+
+    def _service_humain(value):
+        if value is None:
+            return "—"
+        texte = str(value)
+        for identifiant in sorted(services_labels, key=lambda key: -len(str(key))):
+            texte = texte.replace(str(identifiant), services_labels[identifiant])
+        return texte
 
     def _minutes(value):
         return "—" if value is None else f"{float(value):.1f} min"
@@ -259,7 +292,7 @@ def _rendre_robustesse(
             if valeurs:
                 st.error(f"{titre} — {label}")
                 for valeur in valeurs:
-                    st.write(valeur)
+                    st.write(_service_humain(valeur))
             else:
                 st.caption(f"{titre} — {label} : aucune signalée.")
         for champ, titre in (
@@ -313,7 +346,7 @@ def _rendre_robustesse(
             service_suivant = suppression.get("service_suivant_assure")
             hypothese = suppression.get("hypothese")
             if service_suivant is not None:
-                return f"Départ observé du service {service_suivant}"
+                return f"Départ observé du service {_service_humain(service_suivant)}"
             if hypothese:
                 return (
                     f"{hypothese} ; prochain départ hors horizon, non observé ; + 10 min"
@@ -324,8 +357,8 @@ def _rendre_robustesse(
             pd.DataFrame(
                 [
                     {
-                        "Service": suppression.get("service_id", "—"),
-                        "Motif": suppression.get("motif", "Non précisé"),
+                        "Service": _service_humain(suppression.get("service_id")),
+                        "Motif": _service_humain(suppression.get("motif", "Non précisé")),
                         "Attente du prochain train": _minutes(suppression.get("attente_min")),
                         "Pénalité de suppression": _minutes(suppression.get("penalite_min")),
                         "Hypothèse de pénalité": suppression.get("hypothese", "—"),
@@ -357,7 +390,7 @@ def _rendre_robustesse(
             pd.DataFrame(
                 [
                     {
-                        "Service": recharge.get("service_id", "—"),
+                        "Service": _service_humain(recharge.get("service_id")),
                         "Train": recharge.get("train_id", "—"),
                         "Gare": recharge.get("gare", "—"),
                         "Retournement initial": _minutes(
@@ -369,7 +402,7 @@ def _rendre_robustesse(
                         "Prolongation pour recharge": _minutes(
                             recharge.get("prolongation_min")
                         ),
-                        "Motif": recharge.get("motif", "Non précisé"),
+                        "Motif": _service_humain(recharge.get("motif", "Non précisé")),
                     }
                     for recharge in recharges
                 ]
@@ -764,12 +797,13 @@ def _rendre_robustesse(
             {
                 "Retard injecté": f"{scenario.get('delay_min', '—')} min",
                 "Point critique": point_critique,
+                "Points ex æquo au maximum": scenario.get("tie_count", 1),
                 "Retards des trains sans réserve": _retard_trains(sans_reserve),
                 "Suppressions sans réserve": _nombre_suppressions(sans_reserve),
                 "Pénalités suppressions sans réserve": _minutes(
                     (sans_reserve or {}).get("penalite_suppressions_min")
                 ),
-                "Retard cumulé sans réserve": _minutes((sans_reserve or {}).get("retard_cumule_min")),
+                "Retard cumulé — Sans réserve": _minutes((sans_reserve or {}).get("retard_cumule_min")),
                 "Retour normal sans réserve": _retour_normal(sans_reserve),
                 "SoC min. sans réserve": _soc(batterie_sans.get("min_soc_pct")),
                 "Δ batterie sans réserve": _kwh(batterie_sans.get("delta_kwh")),
@@ -779,7 +813,7 @@ def _rendre_robustesse(
                 "Pénalités suppressions avec réserve": _minutes(
                     (avec_reserve or {}).get("penalite_suppressions_min")
                 ),
-                "Retard cumulé avec réserve": (
+                "Retard cumulé — Avec réserve": (
                     _minutes(avec_reserve.get("retard_cumule_min"))
                     if avec_reserve is not None
                     else _etat_reserve_absente()
@@ -794,7 +828,8 @@ def _rendre_robustesse(
         )
 
     st.caption(
-        "Score = retards des trains + attente du prochain train + 10 min par suppression. "
+        "Score = retards des trains (services opérés) + attente du prochain service assuré "
+        "+ 10 min par suppression. "
         f"Points candidats évalués : {resultats_enregistres.get('candidates_count', 0)} "
         "(tous les départs et points de croisement recensés sur toute la journée). "
         "Un retour normal absent signifie que l'horaire n'est pas rétabli sur la période analysée."
@@ -810,6 +845,24 @@ def _rendre_robustesse(
             else "point critique non déterminé"
         )
         with st.expander(f"Incident +{delay} min — {description_point}", expanded=False):
+            if point.get("service_id") in services_labels:
+                st.caption(f"Service : {_service_humain(point['service_id'])}")
+            if scenario.get("tie_count", 1) > 1:
+                st.caption(
+                    f"{scenario['tie_count']} points ex æquo au score maximal ; "
+                    "le premier dans l'ordre déterministe est présenté, pas un pire point unique."
+                )
+            candidats = scenario.get("candidates_evaluated") or []
+            if candidats:
+                with st.expander("Audit des départs et croisements de la journée"):
+                    st.dataframe(pd.DataFrame([
+                        {"Service": _service_humain(item.get("service_id")),
+                         "Point": item.get("gare", "—"),
+                         "Type": item.get("kind", "—"),
+                         "Heure incident": _heure(item.get("time")),
+                         "Retard cumulé — Sans réserve": _minutes(item.get("score_min"))}
+                        for item in candidats
+                    ]), hide_index=True, width="stretch")
             sans_reserve = scenario.get("sans_reserve")
             avec_reserve = scenario.get("avec_reserve")
             colonnes = st.columns(2)
@@ -823,7 +876,7 @@ def _rendre_robustesse(
                         st.caption(_etat_reserve_absente())
                         continue
                     batterie = resultat.get("battery") or {}
-                    st.write(f"Retard cumulé : {_minutes(resultat.get('retard_cumule_min'))}")
+                    st.write(f"Retard cumulé — {label} : {_minutes(resultat.get('retard_cumule_min'))}")
                     st.write(f"Retards des trains : {_retard_trains(resultat)}")
                     st.write(f"Pénalités de suppressions : {_minutes(resultat.get('penalite_suppressions_min'))}")
                     _afficher_suppressions(resultat, label)
@@ -855,6 +908,18 @@ def _rendre_robustesse(
                     _graphiques(resultat, f"{delay} min — {label}", point)
 
             if avec_reserve is not None:
+                st.caption(
+                    f"Rames supplémentaires utilisées : {avec_reserve.get('reserve_rames_utilisees', 0)} "
+                    f"/ {max_reserve_rames}."
+                )
+                redeploiements = avec_reserve.get("redeploiements_rotation") or []
+                if redeploiements:
+                    st.markdown("**Redéploiements de rotation**")
+                    st.dataframe(pd.DataFrame([
+                        {"Service": item.get("service_label") or _service_humain(item.get("service_id")),
+                         "Rame": item.get("train_id", "—")}
+                        for item in redeploiements
+                    ]), hide_index=True, width="stretch")
                 activations = avec_reserve.get("reserve_activations") or []
                 st.markdown("**Activations de réserve**")
                 if activations:
@@ -864,6 +929,7 @@ def _rendre_robustesse(
                                 {
                                     "Gare": item.get("gare", "—"),
                                     "Départ planifié": _heure(item.get("depart_planifie")),
+                                    "Service": item.get("service_label") or _service_humain(item.get("service_id")),
                                     "Départ réel": _heure(item.get("depart_reel")),
                                     "Rame remplacée": item.get("train_id", "—"),
                                     "Rame de réserve": item.get("reserve_train_id", "—"),
@@ -879,7 +945,7 @@ def _rendre_robustesse(
                 else:
                     st.caption("Aucune activation de réserve.")
 
-                refus = avec_reserve.get("reserve_refus") or []
+                refus = (avec_reserve.get("reserve_refus") or []) + (avec_reserve.get("rotation_refus") or [])
                 st.markdown("**Refus de réserve**")
                 if refus:
                     st.dataframe(
@@ -887,8 +953,13 @@ def _rendre_robustesse(
                             [
                                 {
                                     "Gare": item.get("gare", "—"),
-                                    "Service": item.get("service_id", "—"),
-                                    "Raisons": "; ".join(map(str, item.get("raisons") or [])),
+                                    "Service": item.get("service_label") or _service_humain(item.get("service_id")),
+                                    "Rame": item.get("train_id", "Réserve supplémentaire"),
+                                    "Localisation": item.get("localisation", item.get("gare", "—")),
+                                    "Disponible à": _heure(item.get("disponible_a")),
+                                    "Minimum de préparation": _minutes(item.get("retournement_minimum_min")),
+                                    "Marge avant départ": _minutes(item.get("marge_disponibilite_min")),
+                                    "Raisons": "; ".join(_service_humain(reason) for reason in item.get("raisons") or []),
                                 }
                                 for item in refus
                             ]
