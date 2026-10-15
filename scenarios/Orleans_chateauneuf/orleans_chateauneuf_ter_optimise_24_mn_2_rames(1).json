@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "nom": "Orléans - Châteauneuf TER optimisé 24 mn 2 rames",
+    "description": "Orléans-Châteauneuf, TER optimisé (V70 entre Orléans et la fin de la bifurcation, V100 jusqu'à Mardié, V120 jusqu'à Châteauneuf. 5 arrêts intermédiaires à 30s. \nRésultat 24mn aller simple (inclus croisement), 2 rames et un croisement central à Chécy pour une fréquence aux 30mn.\nScénario \"optimiste\", un peu serré pour être mis en pratique sans heurts (que ce soit à l'investissement pour tenir les hypothèses de Vmax, ou à l'exploitation).\nUn second croisement à Mardié rendrait le schéma plus robuste en cas de retard d'un train.",
+    "auteur": "",
+    "date_creation": "2026-10-13",
+    "date_modification": "2026-10-13",
+    "tags": [
+      "Orléans",
+      "Châteauneuf",
+      "TER",
+      "optimisé",
+      "tendu"
+    ],
+    "region": "Centre-Val-de-Loire",
+    "ligne": "Orléans-Châteauneuf"
+  },
+  "service": {
+    "heure_debut": "06:00",
+    "heure_fin": "22:00"
+  },
+  "infrastructure": {
+    "gares": [
+      {
+        "gare": "Orléans",
+        "distance": 0.0,
+        "infra": "VE",
+        "electrification": "C1500",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "Ambert",
+        "distance": 3.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "Léon Blum",
+        "distance": 6.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "Chécy centre",
+        "distance": 11.0,
+        "infra": "VE",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "Mardié",
+        "distance": 13.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "St-Denis de l'Hôtel",
+        "distance": 18.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "Châteauneuf gare",
+        "distance": 26.0,
+        "infra": "VE",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      }
+    ]
+  },
+  "missions": [
+    {
+      "origine": "Orléans",
+      "terminus": "Châteauneuf gare",
+      "frequence": 2.0,
+      "temps_trajet": 24,
+      "temps_retournement_A": 7,
+      "temps_retournement_B": 5,
+      "reference_minutes": "0",
+      "passing_points": [
+        {
+          "gare": "Ambert",
+          "time_offset_min": 3,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Léon Blum",
+          "time_offset_min": 5,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Chécy centre",
+          "time_offset_min": 10,
+          "arret_commercial": true,
+          "duree_arret_min": 2
+        },
+        {
+          "gare": "Mardié",
+          "time_offset_min": 14,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "St-Denis de l'Hôtel",
+          "time_offset_min": 18,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        }
+      ],
+      "trajet_asymetrique": false,
+      "temps_trajet_retour": 24,
+      "passing_points_retour": [],
+      "pp_raw_text": "Orléans;0;0\nAmbert;3;1\nLéon Blum;5;1\nChécy centre;10;2\nMardié;14;1\nSt-Denis de l'Hôtel;18;1\nChâteauneuf gare;24;0",
+      "type_materiel": "batterie",
+      "inject_from_terminus_2": true
+    }
+  ],
+  "energy_params": {
+    "batterie": {
+      "masse_tonne": 50,
+      "capacite_batterie_kwh": 800,
+      "facteur_charge_C": 1.0,
+      "recuperation_pct": 75,
+      "soc_min_pct": 20,
+      "soc_max_pct": 95,
+      "capacite_eol_pct": 70,
+      "simuler_fin_de_vie": false,
+      "davis_A_N_t": 15.0,
+      "davis_B_N_t_kph": 0.1,
+      "davis_C_N_t_kph2": 0.0041,
+      "accel_ms2": 1.0,
+      "decel_ms2": 0.6,
+      "facteur_aux_kwh_h": 43.0,
+      "taux_aux_terminus_pct": 100,
+      "rendement_thermique_pct": 38,
+      "rendement_electrique_pct": 88,
+      "kwh_per_liter_diesel": 10.0
+    }
+  }
+}

@@ -1,0 +1,244 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "nom": "Orléans - Châteauneuf tram-train - 37mn - alternat Lycée/PEM - Mardié - 3+2 rames",
+    "description": "",
+    "auteur": "",
+    "date_creation": "2026-10-13",
+    "date_modification": "2026-10-13",
+    "tags": [
+      "Orléans",
+      "Châteauneuf",
+      "tram-train"
+    ],
+    "region": "Centre Val-de-Loire",
+    "ligne": "Orléans - Châteauneuf"
+  },
+  "service": {
+    "heure_debut": "06:00",
+    "heure_fin": "22:00"
+  },
+  "infrastructure": {
+    "gares": [
+      {
+        "gare": "Tram Gare d'Orléans",
+        "distance": 0.0,
+        "infra": "D",
+        "electrification": "C1500",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "Ambert",
+        "distance": 3.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "Léon Blum",
+        "distance": 5.0,
+        "infra": "VE",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "Roche",
+        "distance": 6.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "Chécy 1",
+        "distance": 9.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "Chécy centre",
+        "distance": 11.0,
+        "infra": "VE",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "Mardié",
+        "distance": 12.0,
+        "infra": "VE",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "St-Denis de l'Hôtel",
+        "distance": 18.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "Châteauneuf D11",
+        "distance": 24.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "Châteauneuf gare",
+        "distance": 26.0,
+        "infra": "F",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      },
+      {
+        "gare": "Lycée - pôle d'échanges",
+        "distance": 28.0,
+        "infra": "VE",
+        "electrification": "F",
+        "rampe_section_a_venir": 0.0
+      }
+    ]
+  },
+  "missions": [
+    {
+      "origine": "Tram Gare d'Orléans",
+      "terminus": "Lycée - pôle d'échanges",
+      "frequence": 2.0,
+      "temps_trajet": 37,
+      "temps_retournement_A": 5,
+      "temps_retournement_B": 7,
+      "reference_minutes": "0",
+      "passing_points": [
+        {
+          "gare": "Ambert",
+          "time_offset_min": 6,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Léon Blum",
+          "time_offset_min": 10,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Roche",
+          "time_offset_min": 13,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Chécy 1",
+          "time_offset_min": 15,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Chécy centre",
+          "time_offset_min": 18,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Mardié",
+          "time_offset_min": 20,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "St-Denis de l'Hôtel",
+          "time_offset_min": 25,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Châteauneuf D11",
+          "time_offset_min": 30,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Châteauneuf gare",
+          "time_offset_min": 33,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        }
+      ],
+      "trajet_asymetrique": false,
+      "temps_trajet_retour": 37,
+      "passing_points_retour": [],
+      "pp_raw_text": "Tram Gare d'Orléans;0;0\nAmbert;6;1\nLéon Blum;10;1\nRoche;13;1\nChécy 1;15;1\nChécy centre;18;1\nMardié;20;1\nSt-Denis de l'Hôtel;25;1\nChâteauneuf D11;30;1\nChâteauneuf gare;33;1\nLycée - pôle d'échanges;37;0",
+      "type_materiel": "batterie",
+      "inject_from_terminus_2": true
+    },
+    {
+      "origine": "Tram Gare d'Orléans",
+      "terminus": "Mardié",
+      "frequence": 2.0,
+      "temps_trajet": 20,
+      "temps_retournement_A": 5,
+      "temps_retournement_B": 11,
+      "reference_minutes": "15",
+      "passing_points": [
+        {
+          "gare": "Ambert",
+          "time_offset_min": 6,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Léon Blum",
+          "time_offset_min": 10,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Roche",
+          "time_offset_min": 13,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Chécy 1",
+          "time_offset_min": 15,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        },
+        {
+          "gare": "Chécy centre",
+          "time_offset_min": 18,
+          "arret_commercial": true,
+          "duree_arret_min": 1
+        }
+      ],
+      "trajet_asymetrique": false,
+      "temps_trajet_retour": 20,
+      "passing_points_retour": [],
+      "pp_raw_text": "Tram Gare d'Orléans;0;0\nAmbert;6;1\nLéon Blum;10;1\nRoche;13;1\nChécy 1;15;1\nChécy centre;18;1\nMardié;20;1",
+      "type_materiel": "batterie",
+      "inject_from_terminus_2": true
+    }
+  ],
+  "energy_params": {
+    "batterie": {
+      "masse_tonne": 50,
+      "capacite_batterie_kwh": 800,
+      "facteur_charge_C": 1.0,
+      "recuperation_pct": 75,
+      "soc_min_pct": 20,
+      "soc_max_pct": 95,
+      "capacite_eol_pct": 70,
+      "simuler_fin_de_vie": false,
+      "davis_A_N_t": 15.0,
+      "davis_B_N_t_kph": 0.1,
+      "davis_C_N_t_kph2": 0.0041,
+      "accel_ms2": 1.0,
+      "decel_ms2": 0.6,
+      "facteur_aux_kwh_h": 43.0,
+      "taux_aux_terminus_pct": 100,
+      "rendement_thermique_pct": 38,
+      "rendement_electrique_pct": 88,
+      "kwh_per_liter_diesel": 10.0
+    }
+  }
+}
