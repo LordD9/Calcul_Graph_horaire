@@ -11,6 +11,7 @@ import re
 from collections import Counter
 from copy import deepcopy
 from datetime import datetime, time, timedelta
+from numbers import Integral
 
 import pandas as pd
 
@@ -26,6 +27,17 @@ AMPLITUDES_RETARD_MIN = (5, 10, 20)
 _EPSILON_MIN = 1e-7
 _UNFOURNI = object()
 _CLE_CHRONOLOGIE_NOMINALE = ("__chronologie_nominale__",)
+
+
+def _valider_max_reserve_rames(value):
+    if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
+        raise ValueError("max_reserve_rames doit être un entier positif ou nul")
+    return int(value)
+
+
+def _gare_reserve(identite):
+    """Une identité porte son lieu initial, pas sa position après circulation."""
+    return identite[0] if isinstance(identite, tuple) else identite
 
 
 def _point_croisement(infra_code):
@@ -367,10 +379,15 @@ def _attente(service, gare, debut, fin, extension=None, perturbation=None):
 
 
 def _rejouer(services, df_gares, incident=None, delay_min=0, reserve_map=None,
-             reserve_stations=(), turnaround_overrides=None):
+             reserve_stations=(), turnaround_overrides=None, rotation_map=None):
     """Rejoue les blocs fixes dans une file dynamique, sans ajouter de missions."""
     reserve_map = dict(reserve_map or {})
     turnaround_overrides = dict(turnaround_overrides or {})
+    rotation_map = dict(rotation_map or {})
+    active_reserve_stations = set(reserve_map.values())
+    reserve_stations = tuple(sorted(
+        active_reserve_stations, key=lambda identity: (_gare_reserve(identity), str(identity))
+    ))
     engine = SimulationEngine(df_gares, time(0, 0), time(23, 59))
     services_by_id = {service["service_id"]: service for service in services}
     source_first = {}
@@ -393,13 +410,15 @@ def _rejouer(services, df_gares, incident=None, delay_min=0, reserve_map=None,
         operations[key] = []
     reserve_keys = {}
     used_display_ids = {str(train_id) for train_id in source_first}
-    for index, gare in enumerate(reserve_stations, start=1):
+    for index, identite in enumerate(reserve_stations, start=1):
+        gare = _gare_reserve(identite)
         key = ("reserve", index)
-        display_id = f"Réserve {gare} #{index}"
+        number = identite[1] if isinstance(identite, tuple) else index
+        display_id = f"Réserve {gare} #{number}"
         while display_id in used_display_ids:
             display_id += "*"
         used_display_ids.add(display_id)
-        reserve_keys[gare] = key
+        reserve_keys[identite] = key
         units[key] = {
             "display_id": display_id,
             "kind": "reserve",
@@ -423,8 +442,19 @@ def _rejouer(services, df_gares, incident=None, delay_min=0, reserve_map=None,
         unit["material"] = service["material"]
         operations[reserve_key].append(service)
     for service in services:
-        if service["service_id"] not in reserve_map:
-            operations[("train", service["train_id"])].append(service)
+        service_id = service["service_id"]
+        if service_id in reserve_map:
+            continue
+        if service_id in rotation_map:
+            unit_key = ("train", rotation_map[service_id])
+            if unit_key not in units:
+                assignment_errors.append(
+                    f"Rame physique inconnue pour le redéploiement de {service_id}"
+                )
+                continue
+        else:
+            unit_key = ("train", service["train_id"])
+        operations[unit_key].append(service)
 
     for key in operations:
         operations[key].sort(key=lambda service: (service["planned_start"], service["service_id"]))
@@ -470,6 +500,8 @@ def _rejouer(services, df_gares, incident=None, delay_min=0, reserve_map=None,
                 if row.get("service_id") != service_id
             ]
         unit["available_at"] = max(unit["available_at"], event_time)
+        state["suppression_location"] = unit["location"]
+        state["suppression_available_at"] = unit["available_at"] + timedelta(minutes=5)
         next_operation[unit_key] += 1
         schedule_next_operation(unit_key)
 
@@ -486,10 +518,11 @@ def _rejouer(services, df_gares, incident=None, delay_min=0, reserve_map=None,
             if unit["location"] != service["origine"]:
                 motif = (
                     f"Trajectoire impossible : rame à {unit['location']!r}, "
-                    f"départ prévu à {service['origine']!r}"
+                    f"départ prévu à {service['origine']!r} à {service['planned_start']:%H:%M}. "
+                    "Aucun parcours de retour prévu vers ce départ ; préparation minimale 5 min"
                 )
                 if unit["kind"] == "reserve":
-                    physical_violations.append(f"{unit['display_id']} ({service['service_id']}) : {motif}")
+                    physical_violations.append(f"{unit['display_id']} ({_service_label(service)}) : {motif}")
                 supprimer_service(service, unit_key, motif, event_time)
                 continue
 
@@ -674,6 +707,8 @@ def _rejouer(services, df_gares, incident=None, delay_min=0, reserve_map=None,
                 "prolongation_retournement": True,
             })
         unit["available_at"] = release + timedelta(minutes=turnaround)
+        state["available_at"] = unit["available_at"]
+        state["location_after"] = unit["location"]
         next_operation[unit_key] += 1
         schedule_next_operation(unit_key)
 
@@ -1419,7 +1454,8 @@ def _liste_recharges_prolongees(services, overrides, initial_turnarounds, replay
 def _minimiser_retournements(replay, energy, services, df_gares, incident,
                              delay_min, baseline_energy, energy_params,
                              reserve_map, reserve_stations, energy_cache,
-                             overrides, initial_turnarounds, original_replay):
+                             overrides, initial_turnarounds, original_replay,
+                             rotation_map=None):
     overrides = dict(overrides)
     current_replay = replay
     current_energy = energy
@@ -1439,6 +1475,7 @@ def _minimiser_retournements(replay, energy, services, df_gares, incident,
                 trial = _rejouer(
                     services, df_gares, incident, delay_min, reserve_map,
                     reserve_stations, turnaround_overrides=trial_overrides,
+                    rotation_map=rotation_map,
                 )
                 if not _replay_correction_admissible(original_replay, trial):
                     continue
@@ -1464,13 +1501,15 @@ def _minimiser_retournements(replay, energy, services, df_gares, incident,
 
 def _corriger_retournements(replay, services, df_gares, incident, delay_min,
                             baseline_energy, energy_params, reserve_map=None,
-                            reserve_stations=(), energy_cache=None):
+                            reserve_stations=(), energy_cache=None,
+                            rotation_map=None):
     """Ajoute le minimum de recharge de retournement corrigeant les alertes neuves."""
     initial_return = _retour_normal(
         services, replay["services"], incident, delay_min, replay["infra_violations"]
     )
     energy_cache = energy_cache if energy_cache is not None else {}
     reserve_map = dict(reserve_map or {})
+    rotation_map = dict(rotation_map or {})
     if not _energies_suffisantes_nominales(baseline_energy, services, df_gares):
         return replay, None, [], initial_return
     nominal_key = energy_cache.get(_CLE_CHRONOLOGIE_NOMINALE)
@@ -1479,7 +1518,7 @@ def _corriger_retournements(replay, services, df_gares, incident, delay_min,
         if train.get("type_materiel") == "batterie"
     ]
     replay_key = _cle_chronologie_energie(replay["chronologie"])
-    if (not reserve_map and nominal_key is not None and battery_train_ids
+    if (not reserve_map and not rotation_map and nominal_key is not None and battery_train_ids
             and all(
                 _cle_train_dans_cle_energie(replay_key, train_id)
                 == _cle_train_dans_cle_energie(nominal_key, train_id)
@@ -1513,7 +1552,7 @@ def _corriger_retournements(replay, services, df_gares, incident, delay_min,
                     current_replay, current_energy, services, df_gares, incident,
                     delay_min, baseline_energy, energy_params, reserve_map,
                     reserve_stations, energy_cache, overrides,
-                    initial_turnarounds, original_replay,
+                    initial_turnarounds, original_replay, rotation_map,
                 )
             return current_replay, current_energy, _liste_recharges_prolongees(
                 services, overrides, initial_turnarounds, current_replay
@@ -1579,6 +1618,7 @@ def _corriger_retournements(replay, services, df_gares, incident, delay_min,
                 trial = _rejouer(
                     services, df_gares, incident, delay_min, reserve_map,
                     reserve_stations, turnaround_overrides=trial_overrides,
+                    rotation_map=rotation_map,
                 )
                 if not _replay_correction_admissible(original_replay, trial):
                     continue
@@ -1676,6 +1716,7 @@ def _corriger_retournements(replay, services, df_gares, incident, delay_min,
                     incident, delay_min, baseline_energy, energy_params,
                     reserve_map, reserve_stations, energy_cache,
                     complete_overrides, complete_initials, original_replay,
+                    rotation_map,
                 )
             )
             return complete_replay, complete_energy, _liste_recharges_prolongees(
@@ -1694,10 +1735,16 @@ def _energie_publique(energy):
     return result
 
 
+def _service_label(service):
+    return f"{service['planned_start']:%H:%M} {service['mission']}"
+
+
 def _format_result(replay, services, incident, delay_min, reserve_map,
                    baseline_energy, df_gares, energy_params, energy=None,
                    recharges_prolongees=(),
-                   retour_normal_sans_recharge_min=_UNFOURNI):
+                   retour_normal_sans_recharge_min=_UNFOURNI,
+                   rotation_map=None, rotation_refus=()):
+    rotation_map = dict(rotation_map or {})
     energy = _energie_publique(
         energy if energy is not None else _analyser_energie(
             replay["chronologie"], services, df_gares, energy_params
@@ -1757,15 +1804,31 @@ def _format_result(replay, services, incident, delay_min, reserve_map,
         row = by_id[service_id]
         reserve_activations.append({
             "service_id": service_id,
+            "service_label": _service_label(service),
             "train_id": service["train_id"],
             "reserve_train_id": row["train_reel_id"],
-            "gare": gare,
+            "gare": _gare_reserve(gare),
             "mission": service["mission"],
             "depart_planifie": service["planned_start"],
             "depart_reel": row["depart_reel"],
             "gain_cumule_min": None,
         })
     reserve_activations.sort(key=lambda item: (item["depart_planifie"], item["service_id"]))
+    redeploiements_rotation = []
+    for service_id, train_id in rotation_map.items():
+        service = next(service for service in services if service["service_id"] == service_id)
+        redeploiements_rotation.append({
+            "service_id": service_id,
+            "service_label": _service_label(service),
+            "train_id": train_id,
+            "depart_planifie": service["planned_start"],
+        })
+    redeploiements_rotation.sort(
+        key=lambda item: (item["depart_planifie"], item["service_id"])
+    )
+    reserve_rames_utilisees = len({
+        item["reserve_train_id"] for item in reserve_activations
+    })
     return {
         "chronologie": replay["chronologie"],
         "retard_cumule_min": replay["retard_cumule_min"],
@@ -1786,7 +1849,10 @@ def _format_result(replay, services, incident, delay_min, reserve_map,
         ),
         "recharges_prolongees": list(recharges_prolongees),
         "reserve_activations": reserve_activations,
+        "reserve_rames_utilisees": reserve_rames_utilisees,
         "reserve_refus": [],
+        "redeploiements_rotation": redeploiements_rotation,
+        "rotation_refus": list(rotation_refus),
         "battery": battery,
         "infra_violations": replay["infra_violations"],
         "physical_violations": replay["physical_violations"],
@@ -1794,8 +1860,10 @@ def _format_result(replay, services, incident, delay_min, reserve_map,
     }
 
 
-def _etendre_rotation_reserve(services, reserve_map, service, gare):
+def _etendre_rotation_reserve(services, reserve_map, service, gare,
+                              rotation_map=None):
     """Transfère les rotations nécessaires jusqu'au retour du train d'origine."""
+    rotation_map = dict(rotation_map or {})
     trial_map = dict(reserve_map)
     trial_map[service["service_id"]] = gare
     sequence = sorted(
@@ -1805,7 +1873,8 @@ def _etendre_rotation_reserve(services, reserve_map, service, gare):
     position = next(i for i, item in enumerate(sequence) if item["service_id"] == service["service_id"])
     source_location = sequence[0]["origine"]
     for previous in sequence[:position]:
-        if previous["service_id"] not in reserve_map:
+        if (previous["service_id"] not in reserve_map
+                and previous["service_id"] not in rotation_map):
             source_location = previous["terminus"]
 
     reserve_location = service["terminus"]
@@ -1813,6 +1882,8 @@ def _etendre_rotation_reserve(services, reserve_map, service, gare):
         if following["origine"] == source_location:
             break
         existing_station = trial_map.get(following["service_id"])
+        if following["service_id"] in rotation_map:
+            break
         if existing_station is not None:
             if existing_station == gare and following["origine"] == reserve_location:
                 reserve_location = following["terminus"]
@@ -1824,18 +1895,138 @@ def _etendre_rotation_reserve(services, reserve_map, service, gare):
     return trial_map
 
 
+def _etendre_rotation_existante(services, rotation_map, reserve_map,
+                                service, train_id):
+    """Transfère une rotation existante jusqu'au retour de la rame initiale."""
+    trial_map = dict(rotation_map)
+    trial_map[service["service_id"]] = train_id
+    sequence = sorted(
+        (item for item in services if item["train_id"] == service["train_id"]),
+        key=lambda item: (item["planned_start"], item["service_id"]),
+    )
+    position = next(i for i, item in enumerate(sequence)
+                    if item["service_id"] == service["service_id"])
+    source_location = sequence[0]["origine"]
+    for previous in sequence[:position]:
+        if (previous["service_id"] not in reserve_map
+                and previous["service_id"] not in rotation_map):
+            source_location = previous["terminus"]
+
+    rotation_location = service["terminus"]
+    for following in sequence[position + 1:]:
+        if following["origine"] == source_location:
+            break
+        service_id = following["service_id"]
+        if service_id in reserve_map:
+            break
+        existing_train = trial_map.get(service_id)
+        if existing_train is not None:
+            if existing_train != train_id or following["origine"] != rotation_location:
+                break
+            rotation_location = following["terminus"]
+            continue
+        if following["origine"] != rotation_location:
+            break
+        trial_map[service_id] = train_id
+        rotation_location = following["terminus"]
+    return trial_map
+
+
+def _disponibilite_rame_rotation(replay, services, train_id, depart):
+    rows = sorted(
+        (row for row in replay["services"]
+         if row["train_reel_id"] == train_id
+         and row["depart_planifie"] < depart),
+        key=lambda row: (row["depart_planifie"], row["service_id"]),
+    )
+    service_by_id = {service["service_id"]: service for service in services}
+    if not rows:
+        source = min(
+            (service for service in services if service["train_id"] == train_id),
+            key=lambda item: (item["planned_start"], item["service_id"]),
+            default=None,
+        )
+        return {
+            "localisation": source["origine"] if source else None,
+            "disponible_a": None,
+            "mission_precedente_terminee": True,
+            "marge_disponibilite_min": None,
+        }
+
+    previous_row = rows[-1]
+    previous = service_by_id[previous_row["service_id"]]
+    state = replay["actual"].get(previous["service_id"], {})
+    if not previous_row["complete"]:
+        if state.get("suppressed") and state.get("suppression_available_at") is not None:
+            available_at = state["suppression_available_at"]
+            return {
+                "localisation": state["suppression_location"],
+                "disponible_a": available_at,
+                "mission_precedente_terminee": True,
+                "marge_disponibilite_min": _minutes(depart - available_at),
+            }
+        completed_blocks = state.get("blocks", {})
+        if completed_blocks:
+            last_index = max(completed_blocks)
+            location = previous["blocks"][last_index]["end_station"]
+        else:
+            location = previous["origine"]
+        return {
+            "localisation": location,
+            "disponible_a": None,
+            "mission_precedente_terminee": False,
+            "marge_disponibilite_min": None,
+        }
+
+    available_at = state.get("available_at")
+    return {
+        "localisation": state.get("location_after", previous["terminus"]),
+        "disponible_a": available_at,
+        "mission_precedente_terminee": True,
+        "marge_disponibilite_min": (
+            _minutes(depart - available_at) if available_at is not None else None
+        ),
+    }
+
+
+def _rotation_preserve_services(reference, trial, services, assigned_ids, from_time):
+    before_rows = {row["service_id"]: row for row in reference["services"]}
+    after_rows = {row["service_id"]: row for row in trial["services"]}
+    service_by_id = {service["service_id"]: service for service in services}
+    for service_id, before in before_rows.items():
+        service = service_by_id[service_id]
+        if service_id in assigned_ids:
+            continue
+        after = after_rows.get(service_id)
+        if after is None:
+            return False, f"La mission suivante {service_id} n'est plus planifiée"
+        if before["complete"] and not after["complete"]:
+            return False, f"La mission suivante {service_id} serait supprimée"
+        for key in ("depart_reel", "arrivee_reelle"):
+            before_time = before.get(key)
+            after_time = after.get(key)
+            if (before_time is not None and after_time is not None
+                    and _minutes(after_time - before_time) > _EPSILON_MIN):
+                return False, f"La mission suivante {service_id} serait retardée"
+    return True, None
+
+
 def _evaluuer_avec_reserves(services, df_gares, incident, delay_min, stations,
                             no_reserve, baseline_energy, energy_params,
                             current_energy=None, current_recharges=(),
                             current_return_normal_sans_recharge=_UNFOURNI,
-                            energy_cache=None):
+                            energy_cache=None, max_reserve_rames=1):
     current_map = {}
+    current_rotation_map = {}
     current_replay = no_reserve
     reserve_refus = []
+    rotation_refus = []
     activation_gains = {}
-    if not stations:
-        return None
     energy_cache = energy_cache if energy_cache is not None else {}
+    train_materials = {}
+    for service in services:
+        train_materials.setdefault(service["train_id"], service["material"])
+    train_ids = sorted(train_materials, key=str)
     if current_energy is None:
         current_energy = _analyser_energie_cache(
             current_replay["chronologie"], services, df_gares,
@@ -1850,7 +2041,9 @@ def _evaluuer_avec_reserves(services, df_gares, incident, delay_min, stations,
 
     sorted_services = sorted(services, key=lambda service: (service["planned_start"], service["service_id"]))
     for service in sorted_services:
-        if service["service_id"] == incident["service_id"] or service["service_id"] in current_map:
+        if (service["service_id"] == incident["service_id"]
+                or service["service_id"] in current_map
+                or service["service_id"] in current_rotation_map):
             continue
         if service["planned_start"] < incident["time"]:
             continue
@@ -1868,18 +2061,164 @@ def _evaluuer_avec_reserves(services, df_gares, incident, delay_min, stations,
         ):
             continue
 
+        rotation_best = None
+        for train_id in train_ids:
+            if train_id == service["train_id"]:
+                continue
+            availability = _disponibilite_rame_rotation(
+                current_replay, services, train_id, service["planned_start"]
+            )
+            refusal = {
+                "service_id": service["service_id"],
+                "service_label": _service_label(service),
+                "train_id": train_id,
+                "localisation": availability["localisation"],
+                "disponible_a": availability["disponible_a"],
+                "depart_planifie": service["planned_start"],
+                "retour_minimum_min": 5,
+                "retournement_minimum_min": 5,
+                "marge_disponibilite_min": availability["marge_disponibilite_min"],
+                "materiel": train_materials[train_id],
+                "materiel_mission": service["material"],
+                "raisons": [],
+            }
+            if train_materials[train_id] != service["material"]:
+                refusal["raisons"].append(
+                    f"Matériel incompatible : {train_materials[train_id]!r} au lieu de "
+                    f"{service['material']!r} pour la mission"
+                )
+            if not availability["mission_precedente_terminee"]:
+                refusal["raisons"].append(
+                    "La mission précédente n'est pas terminée; la rame n'est pas disponible"
+                )
+            elif availability["localisation"] != service["origine"]:
+                refusal["raisons"].append(
+                    f"Rame localisée à {availability['localisation']!r}, "
+                    f"départ requis à {service['origine']!r}"
+                )
+            elif (availability["disponible_a"] is not None
+                  and availability["marge_disponibilite_min"] < 5 - _EPSILON_MIN):
+                refusal["raisons"].append(
+                    "Marge de disponibilité inférieure au retournement minimum de 5 min"
+                )
+            if refusal["raisons"]:
+                rotation_refus.append(refusal)
+                continue
+
+            trial_rotation_map = _etendre_rotation_existante(
+                services, current_rotation_map, current_map, service, train_id
+            )
+            newly_assigned = set(trial_rotation_map) - set(current_rotation_map)
+            trial = _rejouer(
+                services, df_gares, incident, delay_min, current_map, stations,
+                rotation_map=trial_rotation_map,
+            )
+            reasons = [str(item) for item in trial["infra_violations"]]
+            reasons.extend(str(item) for item in trial["physical_violations"])
+            if reasons:
+                refusal["raisons"].extend(reasons)
+                rotation_refus.append(refusal)
+                continue
+            trial, trial_energy, trial_recharges, trial_return_normal = (
+                _corriger_retournements(
+                    trial, services, df_gares, incident, delay_min,
+                    baseline_energy, energy_params, current_map, stations,
+                    energy_cache, rotation_map=trial_rotation_map,
+                )
+            )
+            if trial_energy is None:
+                trial_energy = _analyser_energie_cache(
+                    trial["chronologie"], services, df_gares, energy_params,
+                    energy_cache,
+                )
+            by_id = {row["service_id"]: row for row in trial["services"]}
+            if any(
+                not by_id.get(service_id, {}).get("complete")
+                or by_id[service_id]["depart_reel"] != next(
+                    item["planned_start"] for item in services
+                    if item["service_id"] == service_id
+                )
+                for service_id in newly_assigned
+            ):
+                refusal["raisons"].append(
+                    "La rotation ne peut pas assurer toute la séquence au départ planifié"
+                )
+            preserved, reason = _rotation_preserve_services(
+                current_replay, trial, services, newly_assigned,
+                service["planned_start"],
+            )
+            if not preserved:
+                refusal["raisons"].append(reason)
+            if trial["infra_violations"]:
+                refusal["raisons"].extend(str(item) for item in trial["infra_violations"])
+            if trial["physical_violations"]:
+                refusal["raisons"].extend(str(item) for item in trial["physical_violations"])
+            if (trial_energy["erreurs"] or trial_energy["autonomie_insuffisante"]
+                    or trial_energy["autonomie_non_verifiable"]):
+                refusal["raisons"].append(
+                    f"Autonomie de la rame {train_id} non validée pour {_service_label(service)} "
+                    "ou défaut sur une autre rame (détails ci-dessous)"
+                )
+                refusal["raisons"].extend(trial_energy["erreurs"])
+                refusal["raisons"].extend(trial_energy["alertes_autonomie"])
+                refusal["raisons"].extend(
+                    trial_energy["alertes_autonomie_non_verifiable"]
+                )
+            if refusal["raisons"]:
+                rotation_refus.append(refusal)
+                continue
+            gain = current_replay["retard_cumule_min"] - trial["retard_cumule_min"]
+            if gain <= _EPSILON_MIN:
+                refusal["raisons"].append("Aucun gain strict sur les retards cumulés")
+                rotation_refus.append(refusal)
+                continue
+            candidate = (
+                gain, str(train_id), train_id, trial, trial_rotation_map,
+                trial_energy, trial_recharges, trial_return_normal,
+            )
+            if (rotation_best is None
+                    or candidate[0] > rotation_best[0] + _EPSILON_MIN
+                    or (abs(candidate[0] - rotation_best[0]) <= _EPSILON_MIN
+                        and candidate[1] < rotation_best[1])):
+                rotation_best = candidate
+
+        if rotation_best is not None:
+            (_, _, _, current_replay, current_rotation_map, current_energy,
+             current_recharges, current_return_normal_sans_recharge) = rotation_best
+            continue
+
         best = None
-        for gare in stations:
+        # Essayer d'abord chaque identité déjà déployée, même si elle a changé
+        # de gare. Les lieux sélectionnés ne servent qu'au déploiement initial.
+        identites = list(dict.fromkeys(current_map.values()))
+        prochain_numero = len(identites) + 1
+        identites.extend((gare, prochain_numero) for gare in stations)
+        for gare in identites:
             if service["service_id"] in current_map:
                 continue
-            trial_map = _etendre_rotation_reserve(services, current_map, service, gare)
-            trial = _rejouer(services, df_gares, incident, delay_min, trial_map, stations)
+            trial_map = _etendre_rotation_reserve(
+                services, current_map, service, gare, current_rotation_map
+            )
+            if len(set(trial_map.values())) > max_reserve_rames:
+                reserve_refus.append({
+                    "service_id": service["service_id"], "gare": gare,
+                    "raisons": [
+                        f"Plafond de {max_reserve_rames} rame(s) supplémentaire(s) atteint"
+                    ],
+                })
+                continue
+            trial = _rejouer(
+                services, df_gares, incident, delay_min, trial_map, stations,
+                rotation_map=current_rotation_map,
+            )
             if trial["infra_violations"] or trial["physical_violations"]:
                 reasons = []
                 if trial["infra_violations"]:
                     reasons.append("Conflit d'infrastructure non résolu")
+                    reasons.extend(str(item) for item in trial["infra_violations"])
                 if trial["physical_violations"]:
-                    reasons.append("Réserve indisponible physiquement ou matériel incompatible")
+                    reasons.append("Réserve indisponible physiquement")
+                    reasons.extend(str(item) for item in trial["physical_violations"])
                 reserve_refus.append({
                     "service_id": service["service_id"], "gare": gare,
                     "raisons": reasons,
@@ -1889,7 +2228,7 @@ def _evaluuer_avec_reserves(services, df_gares, incident, delay_min, stations,
                 _corriger_retournements(
                     trial, services, df_gares, incident, delay_min,
                     baseline_energy, energy_params, trial_map, stations,
-                    energy_cache,
+                    energy_cache, rotation_map=current_rotation_map,
                 )
             )
             if trial_energy is None:
@@ -1900,8 +2239,10 @@ def _evaluuer_avec_reserves(services, df_gares, incident, delay_min, stations,
             raisons = []
             if trial["infra_violations"]:
                 raisons.append("Conflit d'infrastructure non résolu")
+                raisons.extend(str(item) for item in trial["infra_violations"])
             if trial["physical_violations"]:
-                raisons.append("Réserve indisponible physiquement ou matériel incompatible")
+                raisons.append("Réserve indisponible physiquement")
+                raisons.extend(str(item) for item in trial["physical_violations"])
             if raisons:
                 reserve_refus.append({"service_id": service["service_id"], "gare": gare, "raisons": raisons})
                 continue
@@ -1917,12 +2258,26 @@ def _evaluuer_avec_reserves(services, df_gares, incident, delay_min, stations,
             ):
                 reserve_refus.append({
                     "service_id": service["service_id"], "gare": gare,
-                    "raisons": ["Une rotation de réserve ne peut pas prendre son départ planifié"],
+                    "raisons": [
+                        f"Service {_service_label(next(item for item in services if item['service_id'] == service_id))} : "
+                        f"départ physique à {departures[service_id]:%H:%M}, "
+                        "après le départ prévu (retournement minimum 5 min)"
+                        if departures.get(service_id) is not None else
+                        f"Service {_service_label(next(item for item in services if item['service_id'] == service_id))} : "
+                        "départ impossible depuis la localisation atteinte"
+                        for service_id in sorted(newly_assigned)
+                        if departures.get(service_id) != next(
+                            item["planned_start"] for item in services if item["service_id"] == service_id
+                        )
+                    ] or ["Le service de réserve n'atteint pas son terminus"],
                 })
                 continue
             if (trial_energy["erreurs"] or trial_energy["autonomie_insuffisante"]
                     or trial_energy["autonomie_non_verifiable"]):
-                raisons_energie = list(trial_energy["erreurs"])
+                raisons_energie = [
+                    f"Autonomie non validée pour {_service_label(service)} "
+                    "ou défaut sur une autre rame"
+                ] + list(trial_energy["erreurs"])
                 raisons_energie.extend(
                     alert for alert in trial_energy["alertes_autonomie"]
                     if alert not in raisons_energie
@@ -1941,6 +2296,14 @@ def _evaluuer_avec_reserves(services, df_gares, incident, delay_min, stations,
                 reserve_refus.append({
                     "service_id": service["service_id"], "gare": gare,
                     "raisons": ["Aucun gain strict sur les retards cumulés"],
+                })
+                continue
+            preserve, reason = _rotation_preserve_services(
+                current_replay, trial, services, newly_assigned, service["planned_start"]
+            )
+            if not preserve:
+                reserve_refus.append({
+                    "service_id": service["service_id"], "gare": gare, "raisons": [reason],
                 })
                 continue
             candidate = (
@@ -1976,12 +2339,19 @@ def _evaluuer_avec_reserves(services, df_gares, incident, delay_min, stations,
             current_recharges = trial_recharges
             current_return_normal_sans_recharge = trial_return_normal
 
+    if not stations and not current_rotation_map and not rotation_refus:
+        return None
     formatted = _format_result(
         current_replay, services, incident, delay_min, current_map,
         baseline_energy, df_gares, energy_params, current_energy,
         current_recharges, current_return_normal_sans_recharge,
+        current_rotation_map, rotation_refus,
     )
     formatted["reserve_refus"] = reserve_refus
+    labels = {service["service_id"]: _service_label(service) for service in services}
+    for refusal in reserve_refus:
+        refusal.setdefault("service_label", labels.get(refusal["service_id"]))
+        refusal["gare"] = _gare_reserve(refusal["gare"])
     for activation in formatted["reserve_activations"]:
         activation.update(activation_gains.get(activation["service_id"], {}))
     return formatted
@@ -1999,13 +2369,20 @@ def _resultat_sans_reserve(replay, services, incident, delay_min,
 
 
 def evaluer_robustesse(chronologie, df_gares, missions, energy_params=None,
-                       reserve_gares=()):
+                       reserve_gares=(), max_reserve_rames=1, activer_renforts=True):
     """Évalue 5/10/20 min de retard sur le graphe fourni, sans le réoptimiser.
 
     Chaque scénario applique un incident unique au départ d'une mission ou à
     l'arrivée sur un point de croisement. Le point retenu maximise la somme des
-    retards d'arrivée, comptée une seule fois par mission complète.
+    retards des services opérés et des pénalités (attente du prochain service
+    assuré + 10 min par suppression), après correction de la recharge.
+
+    max_reserve_rames borne les identités physiques supplémentaires sur tout
+    le scénario, indépendamment du nombre de courses et de lieux possibles.
+    Les rotations disponibles sont essayées avant toute nouvelle réserve,
+    même avec max_reserve_rames=0. Aucun départ voyageur n'est avancé.
     """
+    max_reserve_rames = _valider_max_reserve_rames(max_reserve_rames)
     services, gares, infra_map = _compiler_services(chronologie or {}, df_gares, missions or [])
     if not services:
         return {"scenarios": [
@@ -2015,6 +2392,8 @@ def evaluer_robustesse(chronologie, df_gares, missions, energy_params=None,
                               "penalite_suppressions_min": 0.0,
                               "suppressions_count": 0, "suppressions": [],
                               "retour_normal_min": None, "reserve_activations": [],
+                              "reserve_rames_utilisees": 0,
+                              "redeploiements_rotation": [],
                               "retour_normal_sans_recharge_min": None,
                               "recharges_prolongees": [],
                               "battery": {"baseline": {}, "scenario": {},
@@ -2062,6 +2441,7 @@ def evaluer_robustesse(chronologie, df_gares, missions, energy_params=None,
         best_recharges = []
         best_return_normal = None
         best_score = -math.inf
+        candidates_evaluated = []
         for point in points:
             candidate_replay = _rejouer(services, gares, point, amplitude)
             (candidate_replay, candidate_energy, candidate_recharges,
@@ -2070,6 +2450,13 @@ def evaluer_robustesse(chronologie, df_gares, missions, energy_params=None,
                 baseline_energy, energy_params, energy_cache=energy_cache,
             )
             score = candidate_replay["retard_cumule_min"]
+            candidates_evaluated.append({
+                **{key: value for key, value in point.items() if key != "block_index"},
+                "score_min": score,
+                "retard_trains_min": candidate_replay["retard_trains_min"],
+                "penalite_suppressions_min": candidate_replay["penalite_suppressions_min"],
+                "suppressions_count": len(candidate_replay["suppressions"]),
+            })
             if score > best_score + _EPSILON_MIN:
                 best_score = score
                 best_point = point
@@ -2090,11 +2477,21 @@ def evaluer_robustesse(chronologie, df_gares, missions, energy_params=None,
             services, gares, best_point, amplitude, stations,
             best_replay, baseline_energy, energy_params,
             best_energy, best_recharges, best_return_normal, energy_cache,
-        )
+            max_reserve_rames=max_reserve_rames,
+        ) if activer_renforts else None
         public_point = {key: value for key, value in best_point.items() if key != "block_index"}
         scenarios.append({
             "delay_min": amplitude,
             "point": public_point,
+            "candidates_evaluated": candidates_evaluated,
+            "points_ex_aequo": [
+                row for row in candidates_evaluated
+                if abs(row["score_min"] - best_score) <= _EPSILON_MIN
+            ],
+            "tie_count": sum(
+                abs(row["score_min"] - best_score) <= _EPSILON_MIN
+                for row in candidates_evaluated
+            ),
             "sans_reserve": sans_reserve,
             "avec_reserve": avec_reserve,
         })
@@ -2102,8 +2499,9 @@ def evaluer_robustesse(chronologie, df_gares, missions, energy_params=None,
 
 
 def fingerprint_robustesse(chronologie, df_gares, missions, energy_params=None,
-                           reserve_gares=()):
+                           reserve_gares=(), max_reserve_rames=1, activer_renforts=True):
     """Empreinte SHA-256 stable des entrées de l'analyse de robustesse."""
+    max_reserve_rames = _valider_max_reserve_rames(max_reserve_rames)
     skeleton = []
     for train_id, rows in sorted((chronologie or {}).items(), key=lambda item: str(item[0])):
         for row in sorted(rows or [], key=lambda item: (str(item.get("start")), str(item.get("end")))):
@@ -2129,6 +2527,8 @@ def fingerprint_robustesse(chronologie, df_gares, missions, energy_params=None,
         "missions": missions or [],
         "energy_params": energy_params,
         "reserve_gares": list(reserve_gares or ()),
+        "max_reserve_rames": max_reserve_rames,
+        "activer_renforts": bool(activer_renforts),
     }
     encoded = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()

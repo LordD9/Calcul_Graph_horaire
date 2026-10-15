@@ -348,7 +348,8 @@ def test_suppressions_penalites_et_autonomie_insuffisante_sont_visibles(monkeypa
     assert not app.exception
     assert any(
         "Score = retards des trains" in item.value
-        and "attente du prochain train" in item.value
+        and "services opérés" in item.value
+        and "attente du prochain service assuré" in item.value
         and "10 min" in item.value
         and "Points candidats évalués : 6" in item.value
         and "tous les départs et points de croisement" in item.value
