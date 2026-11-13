@@ -1794,19 +1794,27 @@ if st.session_state.get('gares') is not None:
         while len(st.session_state.missions) > nombre_missions:
             st.session_state.missions.pop()
 
+        def _libelle_mission(i):
+            m = st.session_state.missions[i]
+            o = st.session_state.get(f"orig{i}") or m.get("origine") or "?"
+            t = st.session_state.get(f"term{i}") or m.get("terminus") or "?"
+            return f"M{i+1} · {o} → {t}"
+
+        _onglets_missions = st.tabs([_libelle_mission(i) for i in range(nombre_missions)])
         for i in range(nombre_missions):
-            with st.container(border=True):
-                st.subheader(f"Mission {i+1} (trajet Aller)")
+            with _onglets_missions[i]:
                 mission = st.session_state.missions[i]
                 if f"saisie_pp_{i}" not in st.session_state:
                     st.session_state[f"saisie_pp_{i}"] = "Saisie manuelle par lot"
 
-                cols = st.columns([2, 2, 3])
-                origine = cols[0].selectbox(f"Origine M{i+1}", gares_list, index=gares_list.index(mission.get("origine", gares_list[0])) if mission.get("origine") in gares_list else 0, key=f"orig{i}")
-                terminus = cols[0].selectbox(f"Terminus M{i+1}", gares_list, index=gares_list.index(mission.get("terminus", gares_list[-1])) if mission.get("terminus") in gares_list else len(gares_list)-1, key=f"term{i}")
+                # Ligne 1 : trajet, matériel, desserte. Ligne 2 : retournements et options.
+                cols = st.columns([3, 3, 2, 2, 2, 2])
+                cols_opt = st.columns([2, 2, 3, 3], vertical_alignment="center")
+                origine = cols[0].selectbox("Origine", gares_list, index=gares_list.index(mission.get("origine", gares_list[0])) if mission.get("origine") in gares_list else 0, key=f"orig{i}")
+                terminus = cols[1].selectbox("Terminus", gares_list, index=gares_list.index(mission.get("terminus", gares_list[-1])) if mission.get("terminus") in gares_list else len(gares_list)-1, key=f"term{i}")
 
 
-                frequence = cols[1].number_input(f"Fréquence (train/h) M{i+1}", 0.1, 10.0, mission.get("frequence", 1.0), 0.1, key=f"freq{i}")
+                frequence = cols[3].number_input("Fréquence (trains/h)", 0.1, 10.0, mission.get("frequence", 1.0), 0.1, key=f"freq{i}")
 
                 # Auto-update du temps trajet planifié si la saisie en lot contient
                 # le terminus (aller) ou l'origine (retour). On détecte un changement
@@ -1827,16 +1835,16 @@ if st.session_state.get('gares') is not None:
 
                 # Ce temps est utilisé par core_logic pour le planning
                 # energy_logic l'utilisera comme contrainte pour déduire la vitesse
-                temps_trajet = cols[1].number_input(f"Temps trajet PLANIFIÉ (min) M{i+1}", 1, 720, mission.get("temps_trajet", 45), key=f"tt{i}", help="Temps utilisé pour le planning. Le simulateur d'énergie en déduira la vitesse. En saisie en lot, ajouter une ligne au nom du terminus met cette valeur à jour automatiquement.")
+                temps_trajet = cols[4].number_input("Temps trajet planifié (min)", 1, 720, mission.get("temps_trajet", 45), key=f"tt{i}", help="Temps utilisé pour le planning. Le simulateur d'énergie en déduira la vitesse. En saisie en lot, ajouter une ligne au nom du terminus met cette valeur à jour automatiquement.")
 
-                retournement_A = cols[2].number_input(f"Retournement MINIMUM à {origine} (min)", 0, 120, mission.get("temps_retournement_A", 10), key=f"tr_a_{i}")
-                retournement_B = cols[2].number_input(f"Retournement MINIMUM à {terminus} (min)", 0, 120, mission.get("temps_retournement_B", 10), key=f"tr_b_{i}")
+                retournement_A = cols_opt[0].number_input(f"Retournement min. {origine} (min)", 0, 120, mission.get("temps_retournement_A", 10), key=f"tr_a_{i}")
+                retournement_B = cols_opt[1].number_input(f"Retournement min. {terminus} (min)", 0, 120, mission.get("temps_retournement_B", 10), key=f"tr_b_{i}")
 
                 # Ajout pour le mode Énergie
                 type_materiel = "diesel"
                 if mode_calcul == "Calcul Energie":
-                    type_materiel = cols[0].selectbox(
-                        f"Type de matériel M{i+1}",
+                    type_materiel = cols[2].selectbox(
+                        "Matériel",
                         options=options_materiel_list,
                         format_func=lambda x: options_materiel_map.get(x, x), # Affiche la version capitalisée
                         index=options_materiel_list.index(mission.get("type_materiel", "diesel")),
@@ -1845,29 +1853,31 @@ if st.session_state.get('gares') is not None:
 
                 ref_minutes = "0"
                 if mode_generation == "Rotation optimisée" or mode_calcul == "Calcul Energie":
-                    ref_minutes = cols[2].text_input(
-                        f"Minute(s) de réf. M{i+1}",
+                    ref_minutes = cols[5].text_input(
+                        "Minute(s) de réf.",
                         mission.get("reference_minutes", "0"),
                         key=f"ref_mins{i}",
                         help="Minutes de départ après le début de chaque heure (ex: '15,45'). Peut être > 59 pour décaler (ex: '75' pour un départ à H+1h15)."
                     )
 
                 # --- NOUVEAUTÉ : INJECTION TERMINUS 2 ---
-                inject_t2 = st.checkbox(
-                    f"Autoriser l'injection de nouvelles rames depuis {terminus} (Terminus 2)",
+                inject_t2 = cols_opt[2].checkbox(
+                    f"Injecter des rames depuis {terminus}",
                     value=mission.get("inject_from_terminus_2", False),
                     key=f"inj_t2_{i}",
                     help="Cochez cette case pour autoriser le système à injecter des trains au départ du terminus retour si aucune rame n'est disponible depuis l'aller."
                 )
 
-                st.markdown("**Points de passage optionnels :**")
-                trajet_asymetrique = st.checkbox("Saisir un temps/parcours différent pour le retour", mission.get("trajet_asymetrique", False), key=f"asym_{i}")
+                trajet_asymetrique = cols_opt[3].checkbox("Retour différent de l'aller", mission.get("trajet_asymetrique", False), key=f"asym_{i}")
 
-                saisie_pp_mode = st.radio(
+                _pp_titre, _pp_mode = st.columns([1, 4], vertical_alignment="center")
+                _pp_titre.markdown("**Points de passage**")
+                saisie_pp_mode = _pp_mode.radio(
                     "Méthode de saisie des points de passage",
                     ["Saisie manuelle par lot", "Interface Guidée"],
                     key=f"saisie_pp_{i}",
                     horizontal=True,
+                    label_visibility="collapsed",
                 )
 
                 passing_points = []
@@ -1969,7 +1979,7 @@ if st.session_state.get('gares') is not None:
                          placeholder_text = "Vauvert;20;2;30;2"
 
 
-                    pp_raw_text = st.text_area("Points de passage (un par ligne)", value=mission.get("pp_raw_text", ""), placeholder=placeholder_text, help=help_text, key=f"pp_raw_{i}")
+                    pp_raw_text = st.text_area("Points de passage (un par ligne)", value=mission.get("pp_raw_text", ""), placeholder=placeholder_text, help=help_text, key=f"pp_raw_{i}", height=110)
 
                     mission["pp_raw_text"] = pp_raw_text
 
@@ -2195,8 +2205,18 @@ if st.session_state.get('gares') is not None:
                         # Utiliser default_params.copy() pour éviter modification par référence
                         params = st.session_state.energy_params.setdefault(type_mat, get_default_energy_params().copy())
 
-                        st.markdown(f"**Caractéristiques Générales [{type_mat}]**")
-                        c1, c2 = st.columns(2)
+                        # Une colonne par famille de paramètres, + une pour la batterie.
+                        _familles = ["Caractéristiques", "Performance physique", "Équation de Davis (N/t)", "Rendements"]
+                        if type_mat == "batterie":
+                            _familles.append("Batterie")
+                        _cols_e = st.columns(len(_familles), border=True)
+                        for _col, _titre in zip(_cols_e, _familles):
+                            _col.markdown(f"**{_titre}**")
+                        c1 = _cols_e[0]
+                        c3 = c4 = _cols_e[1]
+                        c5 = c6 = c7 = _cols_e[2]
+                        c_rdt = _cols_e[3]
+                        c2 = cb1 = cb2 = cs1 = cs2 = _cols_e[4] if type_mat == "batterie" else None
                         params["masse_tonne"] = c1.number_input(
                             f"Masse (tonnes)", 10, 1000,
                             value=params.get("masse_tonne", 100),
@@ -2208,7 +2228,7 @@ if st.session_state.get('gares') is not None:
                             step=1.0, key=f"f_aux_{type_mat}"
                         )
                         params["taux_aux_terminus_pct"] = c1.slider(
-                            "Taux d'utilisation des auxiliaires au terminus",
+                            "Auxiliaires au terminus (%)",
                             min_value=0,
                             max_value=100,
                             value=int(params.get("taux_aux_terminus_pct", 100)),
@@ -2230,8 +2250,6 @@ if st.session_state.get('gares') is not None:
                                 help="Puissance de charge max = XC * Capacité kWh"
                             )
 
-                            st.markdown(f"**Plage d'utilisation & Vieillissement [{type_mat}]**")
-                            cb1, cb2 = st.columns(2)
                             params["simuler_fin_de_vie"] = cb1.checkbox(
                                 "Simuler batterie fin de vie",
                                 value=params.get("simuler_fin_de_vie", False),
@@ -2251,7 +2269,6 @@ if st.session_state.get('gares') is not None:
                             else:
                                 params["capacite_eol_pct"] = params.get("capacite_eol_pct", 80)
 
-                            cs1, cs2 = st.columns(2)
                             params["soc_min_pct"] = cs1.slider(
                                 "SoC minimum (%)", min_value=0, max_value=40,
                                 value=params.get("soc_min_pct", 20),
@@ -2266,8 +2283,6 @@ if st.session_state.get('gares') is not None:
                             )
 
 
-                        st.markdown(f"**Performance Physique [{type_mat}]**")
-                        c3, c4 = st.columns(2)
                         params["accel_ms2"] = c3.number_input(
                             f"Accélération (m/s²)", 0.1, 2.0,
                             value=float(params.get("accel_ms2", 0.5)),
@@ -2279,8 +2294,6 @@ if st.session_state.get('gares') is not None:
                             step=0.05, format="%.2f", key=f"decel_{type_mat}"
                         )
 
-                        st.markdown(f"**Équation de Davis (Résistance en N par tonne) [{type_mat}]**")
-                        c5, c6, c7 = st.columns(3)
                         params["davis_A_N_t"] = c5.number_input(
                             "Coeff. A (N/t)", 0.0, 200.0,
                             value=float(params.get("davis_A_N_t", 20.0)),
@@ -2300,11 +2313,10 @@ if st.session_state.get('gares') is not None:
                             help="Résistance aéro."
                         )
 
-                        st.markdown(f"**Rendements et Spécificités [{type_mat}]**")
 
                         # Ligne Thermique (Conditionnelle)
                         if type_mat in ["diesel", "bimode"]:
-                            c8_thermique, c9_thermique = st.columns(2)
+                            c8_thermique = c9_thermique = c_rdt
                             with c8_thermique:
                                 params["rendement_thermique_pct"] = st.slider(
                                     f"Rdt. Thermique (%)", 10, 60,
@@ -2320,7 +2332,7 @@ if st.session_state.get('gares') is not None:
 
                         # Ligne Électrique (Conditionnelle)
                         if type_mat in ["electrique", "bimode", "batterie"]:
-                            c8_electrique, c9_electrique = st.columns(2)
+                            c8_electrique = c9_electrique = c_rdt
                             with c8_electrique:
                                  params["rendement_electrique_pct"] = st.slider(
                                     f"Rdt. Électrique (%)", 50, 100,
@@ -2791,7 +2803,26 @@ if st.session_state.gares is not None and st.session_state.missions:
                         with col3:
                             final_score = optim_stats.get('final_score', optim_stats.get('best_score', 'N/A'))
                             if final_score != 'N/A' and final_score != float('inf'):
-                                st.metric("Score final", f"{final_score:.0f}")
+                                # Plancher = rames × 2000 − 3000 : aucune pénalité et cadencement parfait.
+                                _plancher = len(chronologie) * 2000 - 3000
+                                st.metric(
+                                    "Score final",
+                                    f"{final_score:.0f}",
+                                    delta=f"+{final_score - _plancher:.0f} au-dessus du plancher",
+                                    delta_color="off",
+                                    help=(
+                                        "Plus le score est bas, meilleur est le graphique. "
+                                        "Il additionne des pénalités : 2000 par rame, 50000 par violation "
+                                        "d'infrastructure, 3000 par train non placé, les minutes de parcours "
+                                        "perdues en attente et les arrêts au-delà du plafond. Un cadencement "
+                                        "régulier retire jusqu'à 3000. "
+                                        "Le plancher (rames × 2000 − 3000) est le meilleur score possible "
+                                        "avec ce nombre de rames. Plus l'écart est faible, mieux c'est. "
+                                        "Le score sert à comparer des variantes d'un même scénario, "
+                                        "pas des scénarios différents."
+                                    ),
+                                )
+                                st.caption("Plus bas = meilleur. Écart au plancher proche de 0 = graphique quasi optimal pour ce nombre de rames.")
 
                         # Graphique d'évolution pour génétique
                         if optimization_mode == "genetic" and 'best_score_history' in optim_stats:
