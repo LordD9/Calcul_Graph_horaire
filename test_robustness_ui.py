@@ -103,16 +103,14 @@ def _cliquer_calcul_robustesse(app):
     boutons[0].click().run(timeout=30)
 
 
-def test_robustesse_est_dans_une_rubrique_dediee_apres_le_calcul():
+def test_robustesse_est_un_onglet_dedie_apres_le_graphique():
     app = _app_test().run(timeout=30)
 
     assert not app.exception
-    libelles = [expander.label for expander in app.expander]
-    assert "6. Calcul et Affichage" in libelles
-    assert "7. Évaluation de la robustesse" in libelles
-    assert libelles.index("7. Évaluation de la robustesse") > libelles.index(
-        "6. Calcul et Affichage"
-    )
+    libelles = [tab.label for tab in app.tabs]
+    assert "📈 Graphique" in libelles
+    assert "🛡️ Robustesse" in libelles
+    assert libelles.index("🛡️ Robustesse") > libelles.index("📈 Graphique")
 
 
 def test_graphique_perturbe_surligne_le_service_incident_et_centre_sa_fenetre(monkeypatch):

@@ -1286,12 +1286,12 @@ def _afficher_tableau_temps_parcours(chronologie, temps_theoriques=None, df_gare
 # --- Configuration de la page et initialisation de l'état de session ---
 st.set_page_config(layout="wide")
 
-# --- AJOUT DU LOGO (Haut gauche dans la sidebar) ---
-logo_url = "logo.png"
-st.image(logo_url, width=500)
-
-
-st.title("Graphique horaire ferroviaire - Prototype")
+_entete_logo, _entete_titre = st.columns([1, 6], vertical_alignment="center")
+with _entete_logo:
+    st.image("logo.png", width=170)
+with _entete_titre:
+    st.title("Chronofer")
+    st.caption("Graphique horaire ferroviaire · Cerema")
 
 
 # État de session (variables globales de l'application)
@@ -1491,16 +1491,23 @@ def estimer_temps_calcul(missions, heure_debut, heure_fin, mode="simple", optimi
     return _format_duree(estimated_s)
 
 # --- SECTION 1: Définition des gares ---
-with st.expander("1. Gares et Infrastructure", expanded=True):
+with st.container(border=True):
 
     # Sélection du mode de calcul qui conditionne l'affichage
-    st.session_state.mode_calcul = st.radio(
-        "Mode de calcul",
-        ["Calcul Energie", "Standard"],
-        horizontal=True,
-        key="mode_calcul_selector",
-    )
+    _col_mode, _col_info = st.columns([2, 3], vertical_alignment="center")
+    with _col_mode:
+        st.session_state.mode_calcul = st.radio(
+            "Mode de calcul",
+            ["Calcul Energie", "Standard"],
+            horizontal=True,
+            key="mode_calcul_selector",
+        )
     mode_calcul = st.session_state.mode_calcul
+    with _col_info:
+        if mode_calcul == "Calcul Energie":
+            st.caption("Simulation de consommation, batterie et recharge sur les roulements générés ou saisis.")
+        else:
+            st.caption("Grille horaire seule, sans simulation énergétique.")
 
     # En mode Énergie, proposer de charger un scénario pré-enregistré
     if mode_calcul == "Calcul Energie":
@@ -1637,6 +1644,7 @@ with st.expander("1. Gares et Infrastructure", expanded=True):
             "Liste des gares (une par ligne)",
             key="gares_texte_input",
             help=help_text,
+            height=150,
         )
 
         if st.form_submit_button("Valider les gares et l'infrastructure"):
@@ -1739,36 +1747,34 @@ if st.session_state.get('gares') is not None:
     gares_list = dataframe_gares["gare"].tolist()
 
     # --- SECTION 2: Paramètres généraux du service ---
-    with st.expander("2. Paramètres de service", expanded=True):
-        # Les valeurs initiales sont dans session_state ; on utilise key= pour le binding.
-        heure_debut_service = st.time_input(
-            "Début de service",
-            key="heure_debut_service",
-        )
-        heure_fin_service = st.time_input(
-            "Fin de service",
-            key="heure_fin_service",
-            help="Heure limite pour le DÉPART des trains. Un train qui part juste "
-                 "avant cette heure est tracé jusqu'au bout, même si l'arrivée est après.",
-        )
-
-        # Rotation optimisée = défaut. Le mode Manuel est une option : les
-        # roulements sont saisis (ou importés), et l'énergie est tout de même
-        # évaluée si on est en Calcul Énergie.
-        mode_generation = st.radio(
-            "Mode de génération des trains",
-            ["Rotation optimisée", "Manuel"],
-            horizontal=True,
-            key="mode_generation",
-            help="Rotation optimisée : l'algorithme construit les roulements. "
-                 "Manuel : vous les définissez (saisie ou import Excel). "
-                 "En Calcul Énergie, la consommation est évaluée dans les deux cas.",
-        )
-        if mode_calcul == "Calcul Energie":
-            if mode_generation == "Manuel":
-                st.info("Les roulements saisis manuellement seront simulés énergétiquement (consommation, batterie, etc.).")
-            else:
-                st.info("Le moteur événementiel simule les trajets et la consommation énergétique.")
+    # Rotation optimisée = défaut. Le mode Manuel est une option : les
+    # roulements sont saisis (ou importés), et l'énergie est tout de même
+    # évaluée si on est en Calcul Énergie.
+    _col_debut, _col_fin, _col_gen = st.columns([1, 1, 2], vertical_alignment="bottom")
+    heure_debut_service = _col_debut.time_input(
+        "Début de service",
+        key="heure_debut_service",
+    )
+    heure_fin_service = _col_fin.time_input(
+        "Fin de service",
+        key="heure_fin_service",
+        help="Heure limite pour le DÉPART des trains. Un train qui part juste "
+             "avant cette heure est tracé jusqu'au bout, même si l'arrivée est après.",
+    )
+    mode_generation = _col_gen.radio(
+        "Mode de génération des trains",
+        ["Rotation optimisée", "Manuel"],
+        horizontal=True,
+        key="mode_generation",
+        help="Rotation optimisée : l'algorithme construit les roulements. "
+             "Manuel : vous les définissez (saisie ou import Excel). "
+             "En Calcul Énergie, la consommation est évaluée dans les deux cas.",
+    )
+    if mode_calcul == "Calcul Energie":
+        if mode_generation == "Manuel":
+            st.caption("🛠️ Roulements saisis ou importés, simulés énergétiquement.")
+        else:
+            st.caption("⚙️ Le moteur événementiel simule les trajets et la consommation énergétique.")
 
     # --- SECTION 3: Définition des missions ---
 
@@ -1781,10 +1787,13 @@ if st.session_state.get('gares') is not None:
     }
     options_materiel_list = list(options_materiel_map.keys())
 
-    with st.expander("3. Missions", expanded=True):
+    with st.container(border=True):
+        st.subheader("Missions")
+        _col_nb, _col_hint = st.columns([1, 4], vertical_alignment="bottom")
         if "nombre_missions" not in st.session_state:
             st.session_state.nombre_missions = len(st.session_state.missions) or 1
-        nombre_missions = st.number_input("Nombre de types de missions", 1, 10, key="nombre_missions")
+        nombre_missions = _col_nb.number_input("Nombre de types de missions", 1, 10, key="nombre_missions")
+        _col_hint.caption("Un type de mission = un aller-retour origine ↔ terminus, répété selon la fréquence.")
 
         while len(st.session_state.missions) < nombre_missions:
             st.session_state.missions.append({})
@@ -2032,8 +2041,8 @@ if st.session_state.get('gares') is not None:
 
     # --- SECTION 4/5: Mode Manuel (option, y compris en Calcul Énergie) ---
     if mode_generation == "Manuel":
-        _manual_num = "5" if mode_calcul == "Calcul Energie" else "4"
-        with st.expander(f"{_manual_num}. Construction manuelle des roulements", expanded=True):
+        with st.container(border=True):
+            st.subheader("Construction manuelle des roulements")
             nombre_trains = st.number_input("Nombre de trains", 1, 30, len(st.session_state.roulement_manuel) or 1)
 
             current_ids = list(st.session_state.roulement_manuel.keys())
@@ -2169,7 +2178,8 @@ if st.session_state.get('gares') is not None:
 
     # --- SECTION 4 (Alternative): Paramètres Énergétiques (uniquement en mode Energie) ---
     if mode_calcul == "Calcul Energie":
-        with st.expander("4. Paramètres Énergétiques", expanded=True):
+        with st.container(border=True):
+            st.subheader("Paramètres énergétiques")
 
             # Récupérer les types de matériel uniques utilisés dans les missions définies
             types_materiel_utilises = set(
@@ -2177,13 +2187,15 @@ if st.session_state.get('gares') is not None:
             )
 
             if not types_materiel_utilises:
-                st.info("Définissez des missions à la section 3 pour configurer les paramètres énergétiques associés.")
+                st.info("Définissez des missions pour configurer les paramètres énergétiques associés.")
             else:
-                st.info("Ajustez les caractéristiques physiques pour les types de matériel sélectionnés dans vos missions.")
+                st.caption("Caractéristiques physiques du matériel utilisé dans vos missions.")
 
                 types_materiel_tries = sorted(list(types_materiel_utilises))
                 # Utilise la map pour afficher les noms capitalisés dans les onglets
-                tabs = st.tabs([options_materiel_map.get(t, t).capitalize() for t in types_materiel_tries])
+                tabs = st.tabs(
+                    [options_materiel_map.get(t, t).capitalize() for t in types_materiel_tries],
+                )
 
                 for i, type_mat in enumerate(types_materiel_tries):
                     with tabs[i]:
@@ -2336,8 +2348,8 @@ if st.session_state.get('gares') is not None:
 
     # --- SECTION 5: Vérification de Fréquence (mode Manuel) ---
     if mode_generation == "Manuel" and any(st.session_state.roulement_manuel.values()):
-        _freq_num = "5b" if mode_calcul == "Calcul Energie" else "5"
-        with st.expander(f"{_freq_num}. Vérification de cohérence des fréquences", expanded=True):
+        with st.container(border=True):
+            st.subheader("Vérification de cohérence des fréquences")
             analyses = analyser_frequences_manuelles(st.session_state.roulement_manuel, st.session_state.missions, heure_debut_service, heure_fin_service)
             for mission_key, resultat in analyses.items():
                 st.subheader(f"Analyse pour: {mission_key}")
@@ -2353,14 +2365,10 @@ if st.session_state.get('gares') is not None:
 # =============================================================================
 
 if st.session_state.gares is not None and st.session_state.missions:
-    st.markdown("---")
     if mode_generation != "Manuel":
-      with st.expander("5. ⚙️ Configuration de l'Optimisation", expanded=True):
-
-        st.markdown("""
-        **Sélectionnez un mode d'optimisation** pour générer les horaires de manière intelligente.
-        Le choix d'un mode est maintenant **obligatoire** pour garantir des résultats optimaux.
-        """)
+      with st.container(border=True):
+        st.subheader("⚙️ Configuration de l'optimisation")
+        st.caption("L'algorithme construit les horaires. Le mode conditionne le compromis vitesse / qualité.")
 
         # Le mode d'optimisation est maintenant OBLIGATOIRE (pas de checkbox)
         use_advanced_optimization = True  # Toujours activé
@@ -2369,8 +2377,6 @@ if st.session_state.gares is not None and st.session_state.missions:
             col1, col2 = st.columns(2)
 
             with col1:
-                st.subheader("Mode d'optimisation")
-
                 optimization_mode = st.selectbox(
                     "Algorithme",
                     ["simple", "fast", "smart_progressive", "exhaustif", "genetic"],
@@ -2392,49 +2398,18 @@ if st.session_state.gares is not None and st.session_state.missions:
                     """
                 )
 
-                # Afficher des informations sur le mode sélectionné
-                if optimization_mode == "simple":
-                    st.success("""
-                    🎯 **Mode Simple** :
-
-                    - Utilise directement les temps de retournement configurés
-                    - **TRÈS EFFICACE** : Produit souvent de meilleurs graphiques que les algos complexes
-                    - Contrôle total sur les paramètres
-                    - Exécution ultra-rapide (< 1 seconde)
-
-                    **Forces du mode Simple** :
-                    - ✅ Respect strict des contraintes de retournement
-                    - ✅ Gestion intelligente des conflits
-                    - ✅ Graphiques propres et réguliers
-                    """)
-                elif optimization_mode == "smart_progressive":
-                    st.info("""
-                    🎯 **Mode Smart Progressive**  :
-
-                    1. **Phase 1** : Recherche grossière (pas de 10 min) → Identifier la zone prometteuse
-                    2. **Phase 2** : Affinement moyen (pas de 5 min) → Resserrer la recherche
-                    3. **Phase 3** : Affinement fin (pas de 2 min) → Préciser
-                    4. **Phase 4** : Recherche fine (pas de 1 min) → Optimum local
-                    """)
-                elif optimization_mode == "fast":
-                    st.warning("""
-                    ⚡ **Mode Fast** :
-                    - Pas de recherche : 10 minutes
-                    - Recommandé pour : tests rapides, grandes instances (7+ missions)
-                    """)
-                elif optimization_mode == "exhaustif":
-                    st.warning("""
-                    🔍 **Mode Exhaustif**:
-                    - Garantit la solution optimale
-                    - Intègre la logique optimisée du mode Simple
-                    - **ATTENTION** : Très lent pour > 3-4 missions
-                    - Temps de calcul exponentiel
-                    - Recommandé uniquement pour petites instances
-                    """)
+                # Une ligne sur le mode choisi, le détail reste dans l'aide du sélecteur.
+                st.caption({
+                    "simple": "Retournements configurés appliqués tels quels. Rapide (< 1 s) et souvent le plus propre.",
+                    "fast": "Recherche au pas de 10 min. Pour des tests rapides ou les grandes instances (7+ missions).",
+                    "smart_progressive": "Affinement en 4 phases (10 → 5 → 2 → 1 min) jusqu'à un optimum local.",
+                    "exhaustif": "⚠️ Optimum garanti mais temps exponentiel : à réserver aux petites instances (3-4 missions max).",
+                    "genetic": "Algorithme évolutionnaire pour les grandes instances.",
+                }[optimization_mode])
 
                 # Paramètres spécifiques au mode génétique
-                elif optimization_mode == "genetic":
-                    st.info("Paramètres de l'algorithme génétique (AMÉLIORÉS)")
+                if optimization_mode == "genetic":
+                    st.caption("Paramètres de l'algorithme génétique")
 
                     col1a, col1b = st.columns(2)
                     with col1a:
@@ -2465,7 +2440,7 @@ if st.session_state.gares is not None and st.session_state.missions:
                         )
 
             with col2:
-                st.subheader("Optimisation des croisements")
+                st.markdown("**Croisements**")
 
                 is_genetic = optimization_mode == "genetic"
                 enable_crossing_opt = st.checkbox(
@@ -2505,9 +2480,7 @@ if st.session_state.gares is not None and st.session_state.missions:
                     ⚠️ **Garantie** : Aucune violation d'infrastructure ne sera créée
                     """)
 
-            st.markdown("---")
-            st.subheader("Partage des rames")
-            col_share1, col_share2 = st.columns(2)
+            col_share1, col_share2 = st.columns(2, vertical_alignment="center")
             with col_share1:
                 allow_sharing = st.checkbox(
                     "Autoriser le partage des rames entre missions",
@@ -2534,8 +2507,7 @@ if st.session_state.gares is not None and st.session_state.missions:
                             st.warning(f"⚠️ Sans partage : environ {nb_missions * 2}+ rames nécessaires")
 
             # Récapitulatif
-            st.markdown("---")
-            st.subheader("📋 Récapitulatif de la configuration")
+            st.markdown("**📋 Récapitulatif**")
 
             col_recap1, col_recap2, col_recap3, col_recap4 = st.columns(4)
 
@@ -2590,13 +2562,17 @@ if st.session_state.gares is not None and st.session_state.missions:
     # L'optimisation est maintenant toujours active - pas besoin de "else"
 
     # --- SECTION 6: Calcul et Affichage ---
-    with st.expander("6. Calcul et Affichage", expanded=True):
+    # Barre d'action collée en bas : fenêtre d'affichage + lancement du calcul.
+    with st.container(border=True):
         dt_debut_s = datetime.combine(datetime.min, heure_debut_service)
         dt_fin_s = datetime.combine(datetime.min, heure_fin_service)
         duree_heures_s = (dt_fin_s - dt_debut_s).total_seconds() / 3600
         if duree_heures_s <= 0: duree_heures_s += 24
-        fenetre_heures = st.number_input("Durée de la fenêtre (h)", 1.0, duree_heures_s, min(5.0, duree_heures_s))
-        decalage_heures = st.slider("Début de la fenêtre (h)", 0.0, max(0.0, duree_heures_s - fenetre_heures), 0.0, 0.5)
+        _col_fenetre, _col_decalage, _col_est, _col_btn = st.columns(
+            [1.2, 1.6, 1.4, 1.3], vertical_alignment="bottom"
+        )
+        fenetre_heures = _col_fenetre.number_input("Fenêtre affichée (h)", 1.0, duree_heures_s, min(5.0, duree_heures_s))
+        decalage_heures = _col_decalage.slider("Début de la fenêtre (h)", 0.0, max(0.0, duree_heures_s - fenetre_heures), 0.0, 0.5)
         params_affichage = {
             "duree_fenetre": fenetre_heures,
             "decalage_heure": decalage_heures,
@@ -2623,7 +2599,7 @@ if st.session_state.gares is not None and st.session_state.missions:
             )
 
         if estimation != "N/A":
-            st.caption(f"⏱️ Temps de calcul estimé : **{estimation}**")
+            _col_est.caption(f"⏱️ Temps estimé : **{estimation}**")
 
         # Map pour lier les trains à leurs missions (nécessaire pour le plotting physique)
         missions_par_train = {}
@@ -2631,12 +2607,12 @@ if st.session_state.gares is not None and st.session_state.missions:
         if "run_calculation" not in st.session_state:
             st.session_state.run_calculation = False
 
-        if st.button("Generer le graphique horaire", type="primary", key="btn_gen_graph"):
+        if _col_btn.button("Generer le graphique horaire", type="primary", key="btn_gen_graph", width="stretch"):
             st.session_state.run_calculation = True
             st.session_state.energy_cache_key = None
 
         if st.session_state.get("chronologie_calculee") and mode_calcul == "Calcul Energie":
-            if st.button("Recalculer l energie uniquement", help="Garde la grille horaire, recalcule conso / batterie avec le materiel actuel.", key="btn_recalc_energie"):
+            if st.button("Recalculer l'énergie uniquement", help="Garde la grille horaire, recalcule conso / batterie avec le matériel actuel.", key="btn_recalc_energie"):
                 st.session_state.run_energy_only = True
                 st.session_state.energy_cache_key = None
 
@@ -2671,8 +2647,6 @@ if st.session_state.gares is not None and st.session_state.missions:
                 # =====================================================================
                 # MODE OPTIMISATION AVANCÉE
                 # =====================================================================
-
-                st.info(f"Mode d'optimisation : **{optimization_mode.upper()}**")
 
                 # Configuration de l'optimisation
                 crossing_params = st.session_state.get('crossing_params') or {}
@@ -2790,9 +2764,8 @@ if st.session_state.gares is not None and st.session_state.missions:
                         "elapsed_s": elapsed_time,
                     }
 
-                    progress_bar.progress(100)  # Garanti d'être dans [0, 100] grâce à get_progress_percent
-                    status_text.text(f"✅ Optimisation terminée !")
-                    eta_text.text(f"⏱️ Temps total: {elapsed_time:.1f} secondes")
+                    # La progression n'a plus d'intérêt une fois le calcul fini.
+                    progress_container.empty()
 
                     # Vérification de sécurité
                     infra_violations = warnings.get("infra_violations", [])
@@ -2803,12 +2776,13 @@ if st.session_state.gares is not None and st.session_state.missions:
                             st.write(f"  - {violation}")
                     else:
                         num_trains = sum(len(trajets) for trajets in chronologie.values())
-                        st.success(f"✨ Solution optimale trouvée ! {len(chronologie)} rames, {num_trains} trajets, SANS violation.")
+                        st.success(
+                            f"✨ Solution trouvée en {elapsed_time:.1f} s : {len(chronologie)} rames, "
+                            f"{num_trains} trajets, sans violation (mode {optimization_mode.upper()})."
+                        )
 
                     # Afficher les statistiques d'optimisation (UNE SEULE FOIS)
-                    with stats_container.container():
-                        st.subheader("📊 Statistiques d'optimisation")
-
+                    with stats_container.container(), st.expander("📊 Statistiques d'optimisation", expanded=False):
                         col1, col2, col3 = st.columns(3)
 
                         with col1:
@@ -2906,11 +2880,126 @@ if st.session_state.gares is not None and st.session_state.missions:
                         st.session_state.stats_homogeneite = {}
                         st.stop()
 
-        # Affichage des résultats si un calcul a été fait
-        if st.session_state.chronologie_calculee:
-            chronologie = st.session_state.chronologie_calculee
-            warnings = st.session_state.warnings_calcul
+    # --- SECTION 7: Résultats (onglets) ---
+    if st.session_state.chronologie_calculee:
+        chronologie = st.session_state.chronologie_calculee
+        warnings = st.session_state.warnings_calcul
 
+        # --- Calcul énergétique (fait ici pour pouvoir remonter les erreurs) ---
+        all_energy_errors = []
+        resultats_energie_par_train = st.session_state.get("resultats_energie_par_train") or {}
+        missions_par_train = st.session_state.get("missions_par_train") or {}
+
+        if mode_calcul == "Calcul Energie":
+            energy_key = fingerprint_energie(
+                st.session_state.energy_params,
+                st.session_state.missions,
+                chronologie,
+                dataframe_gares,
+            )
+            must_recompute = (
+                st.session_state.get("run_energy_only")
+                or st.session_state.get("energy_cache_key") != energy_key
+            )
+            if must_recompute:
+                with st.spinner("Calcul de la consommation energetique..."):
+                    resultats_energie_par_train, missions_par_train, all_energy_errors = (
+                        calculer_energie_flotte(
+                            chronologie,
+                            st.session_state.missions,
+                            dataframe_gares,
+                            st.session_state.energy_params,
+                        )
+                    )
+                st.session_state.resultats_energie_par_train = resultats_energie_par_train
+                st.session_state.missions_par_train = missions_par_train
+                st.session_state.energy_errors = all_energy_errors
+                st.session_state.energy_cache_key = energy_key
+                st.session_state.run_energy_only = False
+                for msg in all_energy_errors:
+                    if "Impossible de trouver la mission" in msg:
+                        st.warning(msg)
+            else:
+                all_energy_errors = st.session_state.get("energy_errors") or []
+                resultats_energie_par_train = st.session_state.resultats_energie_par_train
+                missions_par_train = st.session_state.missions_par_train
+
+        # --- Affichage des Avertissements (y compris les erreurs d'énergie) ---
+        infra_violations = warnings.get("infra_violations", [])
+        other_warns = warnings.get("other", [])
+        energy_errs = st.session_state.get("energy_errors", [])
+
+        total_warnings = len(infra_violations) + len(other_warns) + len(energy_errs)
+
+        if total_warnings > 0:
+            with st.expander(f"⚠️ {total_warnings} avertissement(s) généré(s) - Cliquez pour voir le détail"):
+                if infra_violations:
+                    st.error(f"**{len(infra_violations)} VIOLATION(S) DE CONTRAINTE D'INFRASTRUCTURE**")
+                    for w in infra_violations:
+                        st.write(f"- {w}")
+                    st.markdown("---")
+
+                if energy_errs:
+                    st.error(f"**{len(energy_errs)} ERREUR(S) DE SIMULATION ÉNERGÉTIQUE**")
+                    for err in energy_errs:
+                        st.write(f"- {err}")
+                    st.markdown("---")
+
+                if other_warns:
+                    st.warning(f"**{len(other_warns)} autre(s) avertissement(s)**")
+                    for w in other_warns:
+                        st.write(f"- {w}")
+
+        # Pré-construction des figures batterie pour l'export PDF
+        figures_batterie_pdf = []
+        bat_figs_by_train = {}
+        if mode_calcul == "Calcul Energie":
+            terminaux_valides = set()
+            for m in st.session_state.get('missions', []):
+                if "origine" in m: terminaux_valides.add(m["origine"])
+                if "terminus" in m: terminaux_valides.add(m["terminus"])
+
+            bat_params_pdf = st.session_state.energy_params.get("batterie", {})
+            max_c = bat_params_pdf.get("facteur_charge_C", 4.0)
+
+            for _tid, (_res, _tmat) in resultats_energie_par_train.items():
+                if _tmat == "batterie" and _res.get("batterie_log"):
+                    _fig_b = creer_graphique_batterie(
+                        _res["batterie_log"], _tid,
+                        soc_min_pct=bat_params_pdf.get("soc_min_pct", 20),
+                        soc_max_pct=bat_params_pdf.get("soc_max_pct", 95),
+                        terminaux_valides=terminaux_valides,
+                        max_c_rate=max_c,
+                        df_gares=dataframe_gares
+                    )
+                    if _fig_b:
+                        figures_batterie_pdf.append(_fig_b)
+                        bat_figs_by_train[_tid] = _fig_b
+
+        _onglets = ["📈 Graphique", "🚆 Rames", "📊 Cadencement"]
+        if mode_calcul == "Calcul Energie":
+            _onglets.append("🔋 Énergie")
+        _onglets += ["⏱️ Temps de parcours", "📥 Exports", "🛡️ Robustesse"]
+        _tabs = dict(zip(_onglets, st.tabs(_onglets)))
+
+        with _tabs["📈 Graphique"]:
+            if not chronologie or all(not t for t in chronologie.values()):
+                st.warning("Aucun train à afficher.")
+            else:
+                # Passe les infos de calcul au module de plotting
+                figure = creer_graphique_horaire(
+                    chronologie,
+                    dataframe_gares,
+                    heure_debut_service,
+                    params_affichage,
+                    mode_calcul=mode_calcul,
+                    missions_par_train=missions_par_train,
+                    all_energy_params=st.session_state.energy_params
+                )
+                st.pyplot(figure)
+
+
+        with _tabs["🚆 Rames"]:
             # Calcul des statistiques sur les rames utilisées
             if chronologie:
                 nb_rames_total = len(set(chronologie.keys()))
@@ -2961,72 +3050,9 @@ if st.session_state.gares is not None and st.session_state.missions:
                             help="Kilométrage moyen parcouru par rame sur la journée"
                         )
 
-            # --- Calcul énergétique (fait ici pour pouvoir remonter les erreurs) ---
-            all_energy_errors = []
-            resultats_energie_par_train = st.session_state.get("resultats_energie_par_train") or {}
-            missions_par_train = st.session_state.get("missions_par_train") or {}
-
-            if mode_calcul == "Calcul Energie":
-                energy_key = fingerprint_energie(
-                    st.session_state.energy_params,
-                    st.session_state.missions,
-                    chronologie,
-                    dataframe_gares,
-                )
-                must_recompute = (
-                    st.session_state.get("run_energy_only")
-                    or st.session_state.get("energy_cache_key") != energy_key
-                )
-                if must_recompute:
-                    with st.spinner("Calcul de la consommation energetique..."):
-                        resultats_energie_par_train, missions_par_train, all_energy_errors = (
-                            calculer_energie_flotte(
-                                chronologie,
-                                st.session_state.missions,
-                                dataframe_gares,
-                                st.session_state.energy_params,
-                            )
-                        )
-                    st.session_state.resultats_energie_par_train = resultats_energie_par_train
-                    st.session_state.missions_par_train = missions_par_train
-                    st.session_state.energy_errors = all_energy_errors
-                    st.session_state.energy_cache_key = energy_key
-                    st.session_state.run_energy_only = False
-                    for msg in all_energy_errors:
-                        if "Impossible de trouver la mission" in msg:
-                            st.warning(msg)
-                else:
-                    all_energy_errors = st.session_state.get("energy_errors") or []
-                    resultats_energie_par_train = st.session_state.resultats_energie_par_train
-                    missions_par_train = st.session_state.missions_par_train
-
-            # --- Affichage des Avertissements (y compris les erreurs d'énergie) ---
-            infra_violations = warnings.get("infra_violations", [])
-            other_warns = warnings.get("other", [])
-            energy_errs = st.session_state.get("energy_errors", [])
-
-            total_warnings = len(infra_violations) + len(other_warns) + len(energy_errs)
-
-            if total_warnings > 0:
-                with st.expander(f"⚠️ {total_warnings} avertissement(s) généré(s) - Cliquez pour voir le détail"):
-                    if infra_violations:
-                        st.error(f"**{len(infra_violations)} VIOLATION(S) DE CONTRAINTE D'INFRASTRUCTURE**")
-                        for w in infra_violations:
-                            st.write(f"- {w}")
-                        st.markdown("---")
-
-                    if energy_errs:
-                        st.error(f"**{len(energy_errs)} ERREUR(S) DE SIMULATION ÉNERGÉTIQUE**")
-                        for err in energy_errs:
-                            st.write(f"- {err}")
-                        st.markdown("---")
-
-                    if other_warns:
-                        st.warning(f"**{len(other_warns)} autre(s) avertissement(s)**")
-                        for w in other_warns:
-                            st.write(f"- {w}")
-
-
+        with _tabs["📊 Cadencement"]:
+            if not any('→' in str(k) for k in (st.session_state.stats_homogeneite or {})):
+                st.info("Aucune statistique de cadencement pour ce calcul.")
             # --- Affichage Homogénéité (PAR MISSION ET SENS) ---
             if st.session_state.stats_homogeneite:
                 # Vérifier que c'est bien un dict de stats Gini et pas les stats d'optim
@@ -3039,8 +3065,7 @@ if st.session_state.gares is not None and st.session_state.missions:
                         mission_stats[key] = val
 
                 if mission_stats:
-                    st.subheader("📈 Qualité du Cadencement (par mission et sens)")
-                    st.info("Indice d'homogénéité (Gini inverse) : 1.00 = Intervalles parfaitement réguliers.")
+                    st.caption("Indice d'homogénéité (Gini inverse) : 1.00 = Intervalles parfaitement réguliers.")
 
                     # Organiser par couple OD (Origine-Destination sans ordre)
                     missions_organisees = {}
@@ -3088,51 +3113,130 @@ if st.session_state.gares is not None and st.session_state.missions:
                                     value=f"{val:.2f}",
                                     delta=delta
                                 )
-                        st.markdown("---")
-            # --- Affichage du Graphique ---
-            st.subheader("Graphique horaire")
-            if not chronologie or all(not t for t in chronologie.values()):
-                st.warning("Aucun train à afficher.")
-            else:
-                # Passe les infos de calcul au module de plotting
-                figure = creer_graphique_horaire(
-                    chronologie,
-                    dataframe_gares,
-                    heure_debut_service,
-                    params_affichage,
-                    mode_calcul=mode_calcul,
-                    missions_par_train=missions_par_train,
-                    all_energy_params=st.session_state.energy_params
-                )
-                st.pyplot(figure)
 
+        if mode_calcul == "Calcul Energie":
+            with _tabs["🔋 Énergie"]:
+
+                resultats_globaux = []
+                has_diesel = False
+                has_elec = False
+                can_recup = False # Au moins un train peut-il récupérer ?
+
+                def _fmt_dont_aux(valeur_km, part_pct):
+                    if valeur_km is None:
+                        return "N/A"
+                    if part_pct is None:
+                        return f"{valeur_km:.2f}"
+                    return f"{valeur_km:.2f} ({part_pct:.0f}%)"
+
+                for id_train, (resultat_train, type_mat) in resultats_energie_par_train.items():
+
+                    # Vérifier si ce type de matériel peut récupérer
+                    mat_can_recup = type_mat in ["electrique", "bimode", "batterie"]
+                    if mat_can_recup: can_recup = True # Si un seul le peut, on affiche la colonne
+
+                    total_km = resultat_train.get("total_distance_km", 0)
+                    conso_elec_kwh = resultat_train.get("total_conso_electrique_kwh", 0)
+                    total_litres = resultat_train.get("total_litres_diesel", 0)
+                    recup_kwh = resultat_train.get("total_recup_kwh", 0)
+                    aux_elec_kwh = resultat_train.get("total_conso_aux_electrique_kwh", 0)
+                    aux_litres = resultat_train.get("total_aux_litres_diesel", 0)
+
+                    conso_kwh_km_str = "N/A"
+                    conso_L_km_str = "N/A"
+                    recup_kwh_km_str = "N/A"
+                    aux_kwh_km_str = "N/A"
+                    aux_L_km_str = "N/A"
+
+                    if total_km > 0:
+                        # kwh/km - Afficher si le train a un rendement elec
+                        if type_mat in ["electrique", "bimode", "batterie"]:
+                            conso_kwh_km_str = f"{conso_elec_kwh / total_km:.2f}"
+                            pct_aux_elec = (100.0 * aux_elec_kwh / conso_elec_kwh) if conso_elec_kwh > 0 else None
+                            aux_kwh_km_str = _fmt_dont_aux(aux_elec_kwh / total_km, pct_aux_elec)
+                            has_elec = True
+                        # L/km - Afficher si le train a un rendement thermique
+                        if type_mat in ["diesel", "bimode"]:
+                            conso_L_km_str = f"{total_litres / total_km:.2f}"
+                            pct_aux_diesel = (100.0 * aux_litres / total_litres) if total_litres > 0 else None
+                            aux_L_km_str = _fmt_dont_aux(aux_litres / total_km, pct_aux_diesel)
+                            has_diesel = True
+                        # recup/km - Afficher si le train peut récupérer
+                        if mat_can_recup:
+                            recup_kwh_km_str = f"{recup_kwh / total_km:.2f}" if recup_kwh > 0 else "0.00"
+
+                    resultats_globaux.append({
+                        "Train": id_train,
+                        "Type": options_materiel_map.get(type_mat, type_mat),
+                        "Dist. (km)": f"{total_km:.1f}",
+                        "Conso. Électrique (kWh/km)": conso_kwh_km_str,
+                        "Dont consommation des auxiliaires (kWh/km)": aux_kwh_km_str,
+                        "Conso. Diesel (L/km)": conso_L_km_str,
+                        "Dont consommation des auxiliaires (L/km)": aux_L_km_str,
+                        "Économie Récupération (kWh/km)": recup_kwh_km_str,
+                    })
+
+                    if type_mat == "batterie" and resultat_train["batterie_log"]:
+                        found_bat = True
+                        with st.expander(f"Train {id_train} (Batterie)"):
+                            # Tableau
+                            raw_log = resultat_train["batterie_log"]
+                            times = [x[0] for x in raw_log]
+                            heures_debut = [times[0]] + times[:-1]
+
+                            def _fmt_dur(td):
+                                total_min = int(td.total_seconds() // 60)
+                                h, m = divmod(total_min, 60)
+                                return f"{h}h{m:02d}" if h else f"{m} min"
+
+                            durees = ["—"] + [_fmt_dur(times[i] - times[i-1]) for i in range(1, len(times))]
+
+                            df_log = pd.DataFrame(raw_log, columns=["_heure_fin", "Niveau kWh", "SoC", "Événement", "P Charge (C)", "Is Stat", "Gare"])
+                            df_log.insert(0, "Heure début", [t.strftime("%H:%M") if isinstance(t, datetime) else str(t) for t in heures_debut])
+                            df_log.insert(1, "Durée", durees)
+                            df_log.drop(columns=["_heure_fin", "P Charge (C)", "Is Stat", "Gare"], inplace=True)
+                            df_log["Niveau kWh"] = df_log["Niveau kWh"].apply(lambda x: f"{x:.1f}")
+
+                            st.dataframe(df_log, width="stretch")
+
+                            # Graphique SoC (réutilise la figure déjà construite pour le PDF)
+                            fig_bat = bat_figs_by_train.get(id_train)
+                            if fig_bat:
+                                st.pyplot(fig_bat)
+
+                st.subheader("Bilan énergétique global")
+                if resultats_globaux:
+                    df_bilan = pd.DataFrame(resultats_globaux)
+
+                    # Construction dynamique des colonnes : conso puis « dont auxiliaires »
+                    cols_to_display = ["Train", "Type", "Dist. (km)"]
+                    if has_elec:
+                        cols_to_display.append("Conso. Électrique (kWh/km)")
+                        cols_to_display.append("Dont consommation des auxiliaires (kWh/km)")
+                    if has_diesel:
+                        cols_to_display.append("Conso. Diesel (L/km)")
+                        cols_to_display.append("Dont consommation des auxiliaires (L/km)")
+                    if can_recup:
+                         cols_to_display.append("Économie Récupération (kWh/km)")
+
+                    st.dataframe(df_bilan[cols_to_display])
+                else:
+                    st.warning("Aucun résultat énergétique à afficher.")
+
+        with _tabs["⏱️ Temps de parcours"]:
             if chronologie and any(chronologie.values()):
+                temps_theoriques = {}
+                for m in st.session_state.missions:
+                    orig, term = m.get('origine', ''), m.get('terminus', '')
+                    t_aller = m.get('temps_trajet') or 0
+                    t_retour = m.get('temps_trajet_retour') or t_aller if m.get('trajet_asymetrique') else t_aller
+                    if orig and term:
+                        temps_theoriques[f"{orig} → {term}"] = t_aller
+                        temps_theoriques[f"{term} → {orig}"] = t_retour
+                _afficher_tableau_temps_parcours(chronologie, temps_theoriques, df_gares=dataframe_gares)
 
-                # Pré-construction des figures batterie pour l'export PDF
-                figures_batterie_pdf = []
-                bat_figs_by_train = {}
-                if mode_calcul == "Calcul Energie":
-                    terminaux_valides = set()
-                    for m in st.session_state.get('missions', []):
-                        if "origine" in m: terminaux_valides.add(m["origine"])
-                        if "terminus" in m: terminaux_valides.add(m["terminus"])
-                        
-                    bat_params_pdf = st.session_state.energy_params.get("batterie", {})
-                    max_c = bat_params_pdf.get("facteur_charge_C", 4.0)
-
-                    for _tid, (_res, _tmat) in resultats_energie_par_train.items():
-                        if _tmat == "batterie" and _res.get("batterie_log"):
-                            _fig_b = creer_graphique_batterie(
-                                _res["batterie_log"], _tid,
-                                soc_min_pct=bat_params_pdf.get("soc_min_pct", 20),
-                                soc_max_pct=bat_params_pdf.get("soc_max_pct", 95),
-                                terminaux_valides=terminaux_valides,
-                                max_c_rate=max_c,
-                                df_gares=dataframe_gares
-                            )
-                            if _fig_b:
-                                figures_batterie_pdf.append(_fig_b)
-                                bat_figs_by_train[_tid] = _fig_b
+        with _tabs["📥 Exports"]:
+            if chronologie and any(chronologie.values()):
 
                 excel_buffer, pdf_buffer = generer_exports(
                     chronologie, figure,
@@ -3203,141 +3307,22 @@ if st.session_state.gares is not None and st.session_state.missions:
                         except Exception as e:
                             st.error(f"Impossible de préparer le scénario : {e}")
 
-                temps_theoriques = {}
-                for m in st.session_state.missions:
-                    orig, term = m.get('origine', ''), m.get('terminus', '')
-                    t_aller = m.get('temps_trajet') or 0
-                    t_retour = m.get('temps_trajet_retour') or t_aller if m.get('trajet_asymetrique') else t_aller
-                    if orig and term:
-                        temps_theoriques[f"{orig} → {term}"] = t_aller
-                        temps_theoriques[f"{term} → {orig}"] = t_retour
-                _afficher_tableau_temps_parcours(chronologie, temps_theoriques, df_gares=dataframe_gares)
 
-            # --- Affichage des Résultats Énergétiques (si mode Energie) ---
-            if mode_calcul == "Calcul Energie":
-                with st.expander("Résultats de la simulation énergétique", expanded=True):
+        with _tabs["🛡️ Robustesse"]:
+            if all(not train for train in chronologie.values()):
+                st.info("Aucun train à analyser.")
+            else:
+                _rendre_robustesse(
+                    chronologie,
+                    dataframe_gares,
+                    st.session_state.missions,
+                    st.session_state.energy_params,
+                    heure_debut_service,
+                    params_affichage,
+                    mode_calcul,
+                    st.session_state.get("missions_par_train") or {},
+                )
 
-                    resultats_globaux = []
-                    has_diesel = False
-                    has_elec = False
-                    can_recup = False # Au moins un train peut-il récupérer ?
-
-                    def _fmt_dont_aux(valeur_km, part_pct):
-                        if valeur_km is None:
-                            return "N/A"
-                        if part_pct is None:
-                            return f"{valeur_km:.2f}"
-                        return f"{valeur_km:.2f} ({part_pct:.0f}%)"
-
-                    for id_train, (resultat_train, type_mat) in resultats_energie_par_train.items():
-
-                        # Vérifier si ce type de matériel peut récupérer
-                        mat_can_recup = type_mat in ["electrique", "bimode", "batterie"]
-                        if mat_can_recup: can_recup = True # Si un seul le peut, on affiche la colonne
-
-                        total_km = resultat_train.get("total_distance_km", 0)
-                        conso_elec_kwh = resultat_train.get("total_conso_electrique_kwh", 0)
-                        total_litres = resultat_train.get("total_litres_diesel", 0)
-                        recup_kwh = resultat_train.get("total_recup_kwh", 0)
-                        aux_elec_kwh = resultat_train.get("total_conso_aux_electrique_kwh", 0)
-                        aux_litres = resultat_train.get("total_aux_litres_diesel", 0)
-
-                        conso_kwh_km_str = "N/A"
-                        conso_L_km_str = "N/A"
-                        recup_kwh_km_str = "N/A"
-                        aux_kwh_km_str = "N/A"
-                        aux_L_km_str = "N/A"
-
-                        if total_km > 0:
-                            # kwh/km - Afficher si le train a un rendement elec
-                            if type_mat in ["electrique", "bimode", "batterie"]:
-                                conso_kwh_km_str = f"{conso_elec_kwh / total_km:.2f}"
-                                pct_aux_elec = (100.0 * aux_elec_kwh / conso_elec_kwh) if conso_elec_kwh > 0 else None
-                                aux_kwh_km_str = _fmt_dont_aux(aux_elec_kwh / total_km, pct_aux_elec)
-                                has_elec = True
-                            # L/km - Afficher si le train a un rendement thermique
-                            if type_mat in ["diesel", "bimode"]:
-                                conso_L_km_str = f"{total_litres / total_km:.2f}"
-                                pct_aux_diesel = (100.0 * aux_litres / total_litres) if total_litres > 0 else None
-                                aux_L_km_str = _fmt_dont_aux(aux_litres / total_km, pct_aux_diesel)
-                                has_diesel = True
-                            # recup/km - Afficher si le train peut récupérer
-                            if mat_can_recup:
-                                recup_kwh_km_str = f"{recup_kwh / total_km:.2f}" if recup_kwh > 0 else "0.00"
-
-                        resultats_globaux.append({
-                            "Train": id_train,
-                            "Type": options_materiel_map.get(type_mat, type_mat),
-                            "Dist. (km)": f"{total_km:.1f}",
-                            "Conso. Électrique (kWh/km)": conso_kwh_km_str,
-                            "Dont consommation des auxiliaires (kWh/km)": aux_kwh_km_str,
-                            "Conso. Diesel (L/km)": conso_L_km_str,
-                            "Dont consommation des auxiliaires (L/km)": aux_L_km_str,
-                            "Économie Récupération (kWh/km)": recup_kwh_km_str,
-                        })
-
-                        if type_mat == "batterie" and resultat_train["batterie_log"]:
-                            found_bat = True
-                            with st.expander(f"Train {id_train} (Batterie)"):
-                                # Tableau
-                                raw_log = resultat_train["batterie_log"]
-                                times = [x[0] for x in raw_log]
-                                heures_debut = [times[0]] + times[:-1]
-
-                                def _fmt_dur(td):
-                                    total_min = int(td.total_seconds() // 60)
-                                    h, m = divmod(total_min, 60)
-                                    return f"{h}h{m:02d}" if h else f"{m} min"
-
-                                durees = ["—"] + [_fmt_dur(times[i] - times[i-1]) for i in range(1, len(times))]
-
-                                df_log = pd.DataFrame(raw_log, columns=["_heure_fin", "Niveau kWh", "SoC", "Événement", "P Charge (C)", "Is Stat", "Gare"])
-                                df_log.insert(0, "Heure début", [t.strftime("%H:%M") if isinstance(t, datetime) else str(t) for t in heures_debut])
-                                df_log.insert(1, "Durée", durees)
-                                df_log.drop(columns=["_heure_fin", "P Charge (C)", "Is Stat", "Gare"], inplace=True)
-                                df_log["Niveau kWh"] = df_log["Niveau kWh"].apply(lambda x: f"{x:.1f}")
-
-                                st.dataframe(df_log, width="stretch")
-
-                                # Graphique SoC (réutilise la figure déjà construite pour le PDF)
-                                fig_bat = bat_figs_by_train.get(id_train)
-                                if fig_bat:
-                                    st.pyplot(fig_bat)
-
-                    st.subheader("Bilan énergétique global")
-                    if resultats_globaux:
-                        df_bilan = pd.DataFrame(resultats_globaux)
-
-                        # Construction dynamique des colonnes : conso puis « dont auxiliaires »
-                        cols_to_display = ["Train", "Type", "Dist. (km)"]
-                        if has_elec:
-                            cols_to_display.append("Conso. Électrique (kWh/km)")
-                            cols_to_display.append("Dont consommation des auxiliaires (kWh/km)")
-                        if has_diesel:
-                            cols_to_display.append("Conso. Diesel (L/km)")
-                            cols_to_display.append("Dont consommation des auxiliaires (L/km)")
-                        if can_recup:
-                             cols_to_display.append("Économie Récupération (kWh/km)")
-
-                        st.dataframe(df_bilan[cols_to_display])
-                    else:
-                        st.warning("Aucun résultat énergétique à afficher.")
-
-    with st.expander("7. Évaluation de la robustesse", expanded=False):
-        chronologie_robustesse = st.session_state.get("chronologie_calculee") or {}
-        if not chronologie_robustesse or all(not train for train in chronologie_robustesse.values()):
-            st.info("Générez d'abord un graphique horaire pour analyser sa robustesse.")
-        else:
-            _rendre_robustesse(
-                chronologie_robustesse,
-                dataframe_gares,
-                st.session_state.missions,
-                st.session_state.energy_params,
-                heure_debut_service,
-                params_affichage,
-                mode_calcul,
-                st.session_state.get("missions_par_train") or {},
-            )
 
 else:
     if st.session_state.get('gares') is None:
@@ -3348,12 +3333,9 @@ else:
 # FOOTER
 # =============================================================================
 
-st.markdown("---")
-st.caption("""
-🚄 **Chronofer** - Développé par le Cerema.
-
-Modes :
-- **Calcul Énergie** (défaut) : simulation de consommation sur les roulements générés ou saisis.
-- **Rotation optimisée** : algorithmes Simple / Fast / Smart / Exhaustif / Génétique.
-- **Manuel** (option) : roulements saisis ou importés Excel, avec évaluation énergétique.
-""")
+st.divider()
+st.caption(
+    "🚄 **Chronofer** · Cerema · Calcul Énergie (simulation de consommation) · "
+    "Rotation optimisée (Simple / Fast / Smart / Exhaustif / Génétique) · "
+    "Manuel (roulements saisis ou importés Excel)."
+)
