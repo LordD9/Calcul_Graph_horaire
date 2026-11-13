@@ -1360,7 +1360,7 @@ def test_robustesse_sur_chronologie_reelle_avec_missions_tronquees():
     from core_logic import generer_tous_trajets_optimises
     from scenarios_manager import load_scenario
 
-    chemin = Path(__file__).parent / "scenarios" / "bayonne_sjpp_2032+_croisement_itxassou.json"
+    chemin = Path(__file__).parent / "scenarios" / "Nouvelle-Aquitaine" / "Bayonne-Saint-Jean-Pied-de-Port" / "bayonne_sjpp_2032_croisement_itxassou.json"
     scenario = load_scenario(chemin)
     gares = pd.DataFrame(scenario["infrastructure"]["gares"])
     debut = datetime.strptime(scenario["service"]["heure_debut"], "%H:%M").time()
