@@ -3019,7 +3019,16 @@ if st.session_state.gares is not None and st.session_state.missions:
                     missions_par_train=missions_par_train,
                     all_energy_params=st.session_state.energy_params
                 )
-                st.pyplot(figure)
+                # Hauteur bornée à l'écran (laptop 13") ; le bouton ⛶ de Streamlit passe en plein écran.
+                st.markdown(
+                    "<style>.st-key-graphique_horaire img"
+                    "{max-height:calc(100vh - 170px);width:auto!important;max-width:100%;"
+                    "object-fit:contain;margin:auto;display:block}</style>",
+                    unsafe_allow_html=True,
+                )
+                with st.container(key="graphique_horaire"):
+                    st.pyplot(figure)
+                st.caption("Plein écran : survolez le graphique puis cliquez sur l'icône en haut à droite (Échap pour sortir).")
 
 
         with _tabs["🚆 Rames"]:
