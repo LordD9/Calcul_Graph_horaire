@@ -3309,16 +3309,19 @@ if st.session_state.gares is not None and st.session_state.missions:
 
 
         with _tabs["🛡️ Robustesse"]:
-            _rendre_robustesse(
-                chronologie,
-                dataframe_gares,
-                st.session_state.missions,
-                st.session_state.energy_params,
-                heure_debut_service,
-                params_affichage,
-                mode_calcul,
-                st.session_state.get("missions_par_train") or {},
-            )
+            if all(not train for train in chronologie.values()):
+                st.info("Aucun train à analyser.")
+            else:
+                _rendre_robustesse(
+                    chronologie,
+                    dataframe_gares,
+                    st.session_state.missions,
+                    st.session_state.energy_params,
+                    heure_debut_service,
+                    params_affichage,
+                    mode_calcul,
+                    st.session_state.get("missions_par_train") or {},
+                )
 
 
 else:
