@@ -1286,12 +1286,7 @@ def _afficher_tableau_temps_parcours(chronologie, temps_theoriques=None, df_gare
 # --- Configuration de la page et initialisation de l'état de session ---
 st.set_page_config(layout="wide")
 
-_entete_logo, _entete_titre = st.columns([1, 6], vertical_alignment="center")
-with _entete_logo:
-    st.image("logo.png", width=170)
-with _entete_titre:
-    st.title("Chronofer")
-    st.caption("Graphique horaire ferroviaire · Cerema")
+st.image("logo.png", width=450)
 
 
 # État de session (variables globales de l'application)
@@ -1491,7 +1486,7 @@ def estimer_temps_calcul(missions, heure_debut, heure_fin, mode="simple", optimi
     return _format_duree(estimated_s)
 
 # --- SECTION 1: Définition des gares ---
-with st.container(border=True):
+with st.expander("🚉 Gares et infrastructure", expanded=st.session_state.gares is None):
 
     # Sélection du mode de calcul qui conditionne l'affichage
     _col_mode, _col_info = st.columns([2, 3], vertical_alignment="center")
@@ -1787,8 +1782,7 @@ if st.session_state.get('gares') is not None:
     }
     options_materiel_list = list(options_materiel_map.keys())
 
-    with st.container(border=True):
-        st.subheader("Missions")
+    with st.expander("🚆 Missions", expanded=True):
         _col_nb, _col_hint = st.columns([1, 4], vertical_alignment="bottom")
         if "nombre_missions" not in st.session_state:
             st.session_state.nombre_missions = len(st.session_state.missions) or 1
@@ -2041,8 +2035,7 @@ if st.session_state.get('gares') is not None:
 
     # --- SECTION 4/5: Mode Manuel (option, y compris en Calcul Énergie) ---
     if mode_generation == "Manuel":
-        with st.container(border=True):
-            st.subheader("Construction manuelle des roulements")
+        with st.expander("🛠️ Construction manuelle des roulements", expanded=True):
             nombre_trains = st.number_input("Nombre de trains", 1, 30, len(st.session_state.roulement_manuel) or 1)
 
             current_ids = list(st.session_state.roulement_manuel.keys())
@@ -2178,8 +2171,7 @@ if st.session_state.get('gares') is not None:
 
     # --- SECTION 4 (Alternative): Paramètres Énergétiques (uniquement en mode Energie) ---
     if mode_calcul == "Calcul Energie":
-        with st.container(border=True):
-            st.subheader("Paramètres énergétiques")
+        with st.expander("🔋 Paramètres énergétiques", expanded=False):
 
             # Récupérer les types de matériel uniques utilisés dans les missions définies
             types_materiel_utilises = set(
@@ -2348,8 +2340,7 @@ if st.session_state.get('gares') is not None:
 
     # --- SECTION 5: Vérification de Fréquence (mode Manuel) ---
     if mode_generation == "Manuel" and any(st.session_state.roulement_manuel.values()):
-        with st.container(border=True):
-            st.subheader("Vérification de cohérence des fréquences")
+        with st.expander("🔎 Vérification de cohérence des fréquences", expanded=True):
             analyses = analyser_frequences_manuelles(st.session_state.roulement_manuel, st.session_state.missions, heure_debut_service, heure_fin_service)
             for mission_key, resultat in analyses.items():
                 st.subheader(f"Analyse pour: {mission_key}")
@@ -2366,8 +2357,7 @@ if st.session_state.get('gares') is not None:
 
 if st.session_state.gares is not None and st.session_state.missions:
     if mode_generation != "Manuel":
-      with st.container(border=True):
-        st.subheader("⚙️ Configuration de l'optimisation")
+      with st.expander("⚙️ Configuration de l'optimisation", expanded=True):
         st.caption("L'algorithme construit les horaires. Le mode conditionne le compromis vitesse / qualité.")
 
         # Le mode d'optimisation est maintenant OBLIGATOIRE (pas de checkbox)
@@ -2980,7 +2970,9 @@ if st.session_state.gares is not None and st.session_state.missions:
         if mode_calcul == "Calcul Energie":
             _onglets.append("🔋 Énergie")
         _onglets += ["⏱️ Temps de parcours", "📥 Exports", "🛡️ Robustesse"]
-        _tabs = dict(zip(_onglets, st.tabs(_onglets)))
+        # Les onglets vivent dans un accordéon repliable comme les autres sections.
+        _resultats = st.expander("📊 Résultats", expanded=True)
+        _tabs = dict(zip(_onglets, _resultats.tabs(_onglets)))
 
         with _tabs["📈 Graphique"]:
             if not chronologie or all(not t for t in chronologie.values()):
