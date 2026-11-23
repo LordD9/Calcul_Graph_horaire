@@ -74,6 +74,13 @@ def _app_test():
     return app
 
 
+def _resultats_robustesse(app):
+    try:
+        return app.session_state["robustesse"].valeur
+    except KeyError:
+        return None
+
+
 def _interdire_optimisation(monkeypatch):
     appels = []
 
@@ -452,7 +459,7 @@ def test_bouton_robustesse_lance_son_calcul_sans_reoptimiser(monkeypatch):
     _cliquer_calcul_robustesse(app)
 
     assert not app.exception
-    resultat = app.session_state["robustesse_resultats"]
+    resultat = _resultats_robustesse(app)
     assert [scenario["delay_min"] for scenario in resultat["scenarios"]] == [5, 10, 20]
     assert len(appels_robustesse) == 1
     assert appels_optimisation == []
@@ -466,7 +473,7 @@ def test_chronologie_modifiee_invalide_les_resultats_sans_reoptimiser(monkeypatc
     assert appels_robustesse == []
 
     _cliquer_calcul_robustesse(app)
-    assert app.session_state["robustesse_resultats"] is not None
+    assert _resultats_robustesse(app) is not None
     assert len(appels_robustesse) == 1
 
     chronologie = deepcopy(app.session_state["chronologie_calculee"])
@@ -475,7 +482,7 @@ def test_chronologie_modifiee_invalide_les_resultats_sans_reoptimiser(monkeypatc
     app.run(timeout=30)
 
     assert not app.exception
-    assert app.session_state["robustesse_resultats"] is None
+    assert _resultats_robustesse(app) is None
     assert any("invalid" in message.value.lower() for message in app.info)
     assert len(appels_robustesse) == 1
     assert appels_optimisation == []
@@ -500,7 +507,7 @@ def test_reserve_active_propose_les_terminus_concrets(monkeypatch):
     assert not app.exception
     assert all(
         scenario["avec_reserve"] is not None
-        for scenario in app.session_state["robustesse_resultats"]["scenarios"]
+        for scenario in _resultats_robustesse(app)["scenarios"]
     )
     assert len(appels_robustesse) == 1
     assert appels_optimisation == []
@@ -509,7 +516,7 @@ def test_reserve_active_propose_les_terminus_concrets(monkeypatch):
     app.run(timeout=30)
 
     assert not app.exception
-    assert app.session_state["robustesse_resultats"] is None
+    assert _resultats_robustesse(app) is None
     assert any("invalid" in message.value.lower() for message in app.info)
     assert len(appels_robustesse) == 1
 
@@ -517,7 +524,7 @@ def test_reserve_active_propose_les_terminus_concrets(monkeypatch):
 def test_echec_recalcul_ne_reaffiche_pas_les_anciens_resultats(monkeypatch):
     app = _app_test().run(timeout=30)
     _cliquer_calcul_robustesse(app)
-    assert app.session_state["robustesse_resultats"] is not None
+    assert _resultats_robustesse(app) is not None
 
     def echouer(*args, **kwargs):
         raise ValueError("Échec de rejeu volontaire")
@@ -525,7 +532,7 @@ def test_echec_recalcul_ne_reaffiche_pas_les_anciens_resultats(monkeypatch):
     monkeypatch.setattr(robustness_logic, "evaluer_robustesse", echouer)
     _cliquer_calcul_robustesse(app)
     assert not app.exception
-    assert app.session_state["robustesse_resultats"] is None
+    assert _resultats_robustesse(app) is None
     assert any("Échec de rejeu volontaire" in item.value for item in app.error)
     assert not any("Incident +" in item.label for item in app.expander)
 

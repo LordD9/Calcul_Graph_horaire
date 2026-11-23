@@ -537,8 +537,6 @@ def _reset_session_for_scenario_load(st_session) -> None:
     for k in ("chronologie_calculee", "warnings_calcul", "stats_homogeneite"):
         if k in st_session:
             st_session[k] = None if k == "chronologie_calculee" else {}
-    if "energy_errors" in st_session:
-        st_session["energy_errors"] = []
     st_session["run_calculation"] = False
     st_session["roulement_manuel"] = {}
 

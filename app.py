@@ -45,7 +45,6 @@ from plotting import creer_graphique_horaire, creer_graphique_batterie
 from energy_logic import (
     get_default_energy_params,
     calculer_energie_flotte,
-    fingerprint_energie,
 )
 
 from optimisation_logic import (
@@ -54,7 +53,8 @@ from optimisation_logic import (
     optimiser_graphique_horaire)
 
 import scenarios_manager
-from robustness_logic import evaluer_robustesse, fingerprint_robustesse
+from robustness_logic import evaluer_robustesse
+import etat_session
 
 
 def _rendre_robustesse(
@@ -112,38 +112,14 @@ def _rendre_robustesse(
             f"est le SoC maximal opérationnel configuré ({soc_max:g} %)."
         )
 
-    try:
-        empreinte = fingerprint_robustesse(
-            chronologie,
-            df_gares,
-            missions,
-            energy_params=energy_params,
-            reserve_gares=reserve_gares,
-            max_reserve_rames=max_reserve_rames,
-            activer_renforts=reserve_active,
-        )
-    except Exception as exc:
-        st.session_state["robustesse_resultats"] = None
-        st.session_state["robustesse_fingerprint"] = None
-        st.error(f"Empreinte de robustesse impossible : {type(exc).__name__} — {exc}")
-        return
-
-    if "robustesse_resultats" not in st.session_state:
-        st.session_state["robustesse_resultats"] = None
-    if "robustesse_fingerprint" not in st.session_state:
-        st.session_state["robustesse_fingerprint"] = None
-
-    resultats_enregistres = st.session_state.get("robustesse_resultats")
-    empreinte_enregistree = st.session_state.get("robustesse_fingerprint")
-    if resultats_enregistres is not None and empreinte_enregistree != empreinte:
-        st.session_state["robustesse_resultats"] = None
-        st.session_state["robustesse_fingerprint"] = None
-        resultats_enregistres = None
+    entrees = (chronologie, df_gares, missions, energy_params, reserve_gares,
+               max_reserve_rames, reserve_active)
+    resultats_enregistres, perime = etat_session.lire(st.session_state, "robustesse", entrees)
+    if perime:
         st.info("Les résultats de robustesse ont été invalidés : les entrées ont changé. Relancez le calcul.")
 
     if st.button("Calculer la robustesse", key="btn_calc_robustesse", type="primary"):
-        st.session_state["robustesse_resultats"] = None
-        st.session_state["robustesse_fingerprint"] = None
+        etat_session.oublier(st.session_state, "robustesse")
         resultats_enregistres = None
         try:
             resultats = evaluer_robustesse(
@@ -158,8 +134,7 @@ def _rendre_robustesse(
         except Exception as exc:
             st.error(f"Calcul de robustesse impossible : {type(exc).__name__} — {exc}")
         else:
-            st.session_state["robustesse_resultats"] = resultats
-            st.session_state["robustesse_fingerprint"] = empreinte
+            etat_session.enregistrer(st.session_state, "robustesse", entrees, resultats)
             resultats_enregistres = resultats
 
     if resultats_enregistres is None:
@@ -1310,11 +1285,6 @@ if "energy_params" not in st.session_state: st.session_state.energy_params = {
 }
 
 
-if "energy_errors" not in st.session_state: st.session_state.energy_errors = []
-if "resultats_energie_par_train" not in st.session_state: st.session_state.resultats_energie_par_train = {}
-if "missions_par_train" not in st.session_state: st.session_state.missions_par_train = {}
-if "energy_cache_key" not in st.session_state: st.session_state.energy_cache_key = None
-if "run_energy_only" not in st.session_state: st.session_state.run_energy_only = False
 
 # Heures de service (centralisées dans session_state pour permettre le chargement
 # d'un scénario qui les redéfinit).
@@ -2607,12 +2577,11 @@ if st.session_state.gares is not None and st.session_state.missions:
 
         if _col_btn.button("Generer le graphique horaire", type="primary", key="btn_gen_graph", width="stretch"):
             st.session_state.run_calculation = True
-            st.session_state.energy_cache_key = None
+            etat_session.oublier(st.session_state, "energie")
 
         if st.session_state.get("chronologie_calculee") and mode_calcul == "Calcul Energie":
             if st.button("Recalculer l'énergie uniquement", help="Garde la grille horaire, recalcule conso / batterie avec le matériel actuel.", key="btn_recalc_energie"):
-                st.session_state.run_energy_only = True
-                st.session_state.energy_cache_key = None
+                etat_session.oublier(st.session_state, "energie")
 
         if st.session_state.run_calculation:
             st.session_state.run_calculation = False
@@ -2904,47 +2873,31 @@ if st.session_state.gares is not None and st.session_state.missions:
 
         # --- Calcul énergétique (fait ici pour pouvoir remonter les erreurs) ---
         all_energy_errors = []
-        resultats_energie_par_train = st.session_state.get("resultats_energie_par_train") or {}
-        missions_par_train = st.session_state.get("missions_par_train") or {}
+        resultats_energie_par_train = {}
+        missions_par_train = {}
 
         if mode_calcul == "Calcul Energie":
-            energy_key = fingerprint_energie(
-                st.session_state.energy_params,
-                st.session_state.missions,
-                chronologie,
-                dataframe_gares,
-            )
-            must_recompute = (
-                st.session_state.get("run_energy_only")
-                or st.session_state.get("energy_cache_key") != energy_key
-            )
-            if must_recompute:
+            entrees_energie = (st.session_state.energy_params, st.session_state.missions,
+                               chronologie, dataframe_gares)
+            bilan, _ = etat_session.lire(st.session_state, "energie", entrees_energie)
+            if bilan is None:
                 with st.spinner("Calcul de la consommation energetique..."):
-                    resultats_energie_par_train, missions_par_train, all_energy_errors = (
-                        calculer_energie_flotte(
-                            chronologie,
-                            st.session_state.missions,
-                            dataframe_gares,
-                            st.session_state.energy_params,
-                        )
+                    bilan = calculer_energie_flotte(
+                        chronologie,
+                        st.session_state.missions,
+                        dataframe_gares,
+                        st.session_state.energy_params,
                     )
-                st.session_state.resultats_energie_par_train = resultats_energie_par_train
-                st.session_state.missions_par_train = missions_par_train
-                st.session_state.energy_errors = all_energy_errors
-                st.session_state.energy_cache_key = energy_key
-                st.session_state.run_energy_only = False
-                for msg in all_energy_errors:
+                etat_session.enregistrer(st.session_state, "energie", entrees_energie, bilan)
+                for msg in bilan[2]:
                     if "Impossible de trouver la mission" in msg:
                         st.warning(msg)
-            else:
-                all_energy_errors = st.session_state.get("energy_errors") or []
-                resultats_energie_par_train = st.session_state.resultats_energie_par_train
-                missions_par_train = st.session_state.missions_par_train
+            resultats_energie_par_train, missions_par_train, all_energy_errors = bilan
 
         # --- Affichage des Avertissements (y compris les erreurs d'énergie) ---
         infra_violations = warnings.get("infra_violations", [])
         other_warns = warnings.get("other", [])
-        energy_errs = st.session_state.get("energy_errors", [])
+        energy_errs = all_energy_errors
 
         total_warnings = len(infra_violations) + len(other_warns) + len(energy_errs)
 
@@ -3348,7 +3301,7 @@ if st.session_state.gares is not None and st.session_state.missions:
                     heure_debut_service,
                     params_affichage,
                     mode_calcul,
-                    st.session_state.get("missions_par_train") or {},
+                    missions_par_train,
                 )
 
 
