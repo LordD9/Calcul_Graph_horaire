@@ -26,10 +26,9 @@ import numpy as np
 import pandas as pd
 from datetime import timedelta
 
-# Constantes physiques
 JOULES_PER_KWH = 3_600_000
 GRAVITY_MS2 = 9.81
-DEFAULT_V_MAX_KPH = 160.0 # Vitesse max par défaut si non calculable
+DEFAULT_V_MAX_KPH = 160.0
 
 def get_default_energy_params():
     """
@@ -46,39 +45,32 @@ def get_default_energy_params():
         "capacite_batterie_kwh": 800,
         "facteur_charge_C": 1.0,
         "recuperation_pct": 75,
-        "soc_min_pct": 20,       # SoC minimum d'exploitation (%)
-        "soc_max_pct": 95,       # SoC maximum de charge (%)
-        "capacite_eol_pct": 70,  # Capacité restante en fin de vie (% du nominal)
-        "simuler_fin_de_vie": False,  # Simuler avec capacité fin de vie
+        "soc_min_pct": 20,
+        "soc_max_pct": 95,
+        "capacite_eol_pct": 70,
+        "simuler_fin_de_vie": False,
 
-        # Coeff de Davis (Force en Newtons par tonne)
-        "davis_A_N_t": 15.0,     # Résistance mécanique (N/t)
-        "davis_B_N_t_kph": 0.1,  # Résistance roulements (N/t/kph)
-        "davis_C_N_t_kph2": 0.0041, # Résistance aéro (N/t/kph^2)
+        "davis_A_N_t": 15.0,
+        "davis_B_N_t_kph": 0.1,
+        "davis_C_N_t_kph2": 0.0041,
 
-        # Performance (caractéristiques du matériel)
         "accel_ms2": 1.0,
         "decel_ms2": 0.6,
 
         "facteur_aux_kwh_h": 43.0,
-        "taux_aux_terminus_pct": 100,  # % de la puissance aux. à l'arrêt au terminus (sans voyageurs)
+        "taux_aux_terminus_pct": 100,
 
-        # Rendements (basés sur l'analyse)
         "rendement_thermique_pct": 38,
         "rendement_electrique_pct": 88,
 
         "kwh_per_liter_diesel": 10.0,
     }
 
-# =============================================================================
-# FONCTION UNIFIÉE DE CALCUL DU PROFIL PHYSIQUE (Inchangée V18)
-# =============================================================================
 def _calculate_phases(distance_m, v_start_kph, v_end_kph, v_cruise_kph, accel_ms2, decel_ms2):
     """
     Calcule le profil physique le plus RAPIDE possible pour une Vcruise donnée.
     Retourne les distances (m), temps (s) initiaux et v_moy (kph) pour chaque phase.
     """
-    # ... (code _calculate_phases V15 inchangé) ...
     v_start_ms = max(0, v_start_kph / 3.6)
     v_end_ms = max(0, v_end_kph / 3.6)
     v_cruise_kph = max(v_cruise_kph, v_start_kph, v_end_kph, 0.1)
@@ -93,7 +85,6 @@ def _calculate_phases(distance_m, v_start_kph, v_end_kph, v_cruise_kph, accel_ms
 
     dist_accel_decel = d_to_cruise + d_from_cruise
     if dist_accel_decel >= distance_m and not math.isclose(dist_accel_decel, distance_m):
-        # Profil triangulaire
         try:
             numerator = (2 * distance_m * accel_ms2 * decel_ms2 +
                          v_start_ms**2 * decel_ms2 +
@@ -120,7 +111,6 @@ def _calculate_phases(distance_m, v_start_kph, v_end_kph, v_cruise_kph, accel_ms
                      "cruise": (0, 0, 0), "decel": (0, 0, 0),
                      "total_time_sec": t_total_fallback}
     else:
-        # Profil trapézoïdal
         t_accel = t_to_cruise
         d_accel = d_to_cruise
         v_avg_accel = (v_start_kph + v_cruise_kph) / 2
@@ -158,10 +148,8 @@ def get_physical_profile(distance_m, v_start_kph, v_end_kph, v_cruise_kph, accel
     if distance_m <= 0:
         return {"accel": (0, 0, 0), "cruise": (0, 0, 0), "decel": (0, 0, 0)}
 
-    # Appeler _calculate_phases avec la v_cruise cible
     phases = _calculate_phases(distance_m, v_start_kph, v_end_kph, v_cruise_kph, accel_ms2, decel_ms2)
 
-    # Exclure 'total_time_sec' du dictionnaire retourné
     return {k: v for k, v in phases.items() if k != 'total_time_sec'}
 
 
@@ -181,13 +169,11 @@ def find_implicit_v_cruise(distance_m, v_start_kph, v_end_kph,
     if distance_m <= 0 or t_target_sec <= 0:
         return max(v_start_kph, v_end_kph, 10.0)
 
-    # Borne haute : si v_max ne suffit pas, retourner v_max (clip)
     phases_max = _calculate_phases(distance_m, v_start_kph, v_end_kph,
                                    v_max_kph, accel_ms2, decel_ms2)
     if phases_max["total_time_sec"] >= t_target_sec:
         return v_max_kph
 
-    # Borne basse : vitesse plancher physiquement plausible
     v_low = max(v_start_kph, v_end_kph, 0.1)
     phases_low = _calculate_phases(distance_m, v_start_kph, v_end_kph,
                                    v_low, accel_ms2, decel_ms2)
@@ -230,8 +216,6 @@ def find_v_cruise_no_decel(distance_m, v_start_kph, accel_ms2, t_target_sec,
     b = v_start_ms + t_target_sec * a
     discriminant = b * b - (v_start_ms * v_start_ms + 2.0 * distance_m * a)
     if discriminant < 0:
-        # Train trop lent pour couvrir la distance dans le temps imparti :
-        # on retourne v_max (le tracé se contentera de cruise constant).
         return v_max_kph
     v_c_ms = b - math.sqrt(discriminant)
     v_c_kph = v_c_ms * 3.6
@@ -242,9 +226,6 @@ def find_v_cruise_no_decel(distance_m, v_start_kph, accel_ms2, t_target_sec,
     return v_c_kph
 
 
-# =============================================================================
-# Logique de calcul de consommation
-# =============================================================================
 
 def _calculer_force_resistance_davis_N(v_kph, masse_t, params):
     """Calcule la force de résistance (en Newtons) via l'équation de Davis."""
@@ -279,7 +260,6 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
     masse_t = params.get("masse_tonne", 100)
     masse_kg = masse_t * 1000
 
-    # Accumulateurs globaux
     total_conso_brute_kwh = 0
     total_recup_kwh = 0
     total_conso_thermique_kwh = 0
@@ -290,7 +270,6 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
     total_distance_km = 0
     erreurs = []
 
-    # Gestion Batterie
     is_batterie = type_materiel == "batterie"
     capacite_nominale_kwh = params.get("capacite_batterie_kwh", 600)
     simuler_eol = params.get("simuler_fin_de_vie", False)
@@ -302,7 +281,7 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
     niveau_max_kwh = capacite_max_kwh * soc_max_pct
     facteur_charge_C = params.get("facteur_charge_C", 4.0)
     puissance_max_batterie_kw = capacite_max_kwh * facteur_charge_C
-    niveau_batterie_kwh = niveau_max_kwh  # Départ au SoC max
+    niveau_batterie_kwh = niveau_max_kwh
 
     log_batterie = []
 
@@ -321,7 +300,6 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
     except KeyError:
         return {"total_kwh": 0, "batterie_log": [], "erreurs": ["Format gares incorrect"]}
 
-    # Table triée pour calcul de pente par segments (kilométrages croissants)
     _df_gares_sorted = df_gares.sort_values('distance').reset_index(drop=True)
     _gares_dist = _df_gares_sorted['distance'].astype(float).tolist()
     _gares_rampe = (
@@ -345,13 +323,11 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
         d_low = min(dist_dep_km, dist_arr_km)
         d_high = max(dist_dep_km, dist_arr_km)
 
-        # Indices des gares dans [d_low, d_high] (bornes incluses)
         delta_h_inc = 0.0
         n = len(_gares_dist)
         for j in range(n - 1):
             d1 = _gares_dist[j]
             d2 = _gares_dist[j + 1]
-            # Intersection [d1, d2] ∩ [d_low, d_high]
             seg_lo = max(d1, d_low)
             seg_hi = min(d2, d_high)
             if seg_hi <= seg_lo:
@@ -405,14 +381,12 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
             total_conso_thermique_kwh += conso_aux
             total_conso_aux_thermique_kwh += conso_aux
 
-    # --- Helper: Comptabilise l'aux d'un arrêt dans les totaux globaux ---
     def _ajouter_aux_arret(duree_h, electrification_str, au_terminus=False):
         if duree_h <= 0:
             return
         conso_aux = _puissance_aux_kw(au_terminus) * duree_h
         _comptabiliser_aux(conso_aux, electrification_str)
 
-    # --- Helper: Gestion de l'arrêt (Recharge ou Décharge Aux) ---
     def simuler_arret(nom_gare, heure_debut, heure_fin, niveau_actuel, contexte="Arrêt", au_terminus=False):
         duree_h = (heure_fin - heure_debut).total_seconds() / 3600.0
         if duree_h <= 0: return niveau_actuel
@@ -421,29 +395,21 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
         electrification = info_gare.get("electrification", "F")
         puissance_infra_kw = _get_puissance_infra(electrification)
 
-        # Conso auxiliaires (réduite au terminus si le taux < 100 %)
         p_aux_kw = _puissance_aux_kw(au_terminus)
         conso_aux = p_aux_kw * duree_h
-        # Batterie : les auxiliaires sont toujours pris sur le système électrique
         _comptabiliser_aux(conso_aux, electrification, force_electrique=True)
 
-        # Logique de recharge
         nouveau_niveau = niveau_actuel
         log_msg = ""
 
-        # Si infrastructure de recharge disponible (Catenary ou Borne)
         if puissance_infra_kw > 0:
-            # Les auxiliaires sont pris sur l'infra
             puissance_dispo_charge = max(0, puissance_infra_kw - p_aux_kw)
 
-            # Limite de puissance (kW)
             limite_puissance = min(puissance_dispo_charge, puissance_max_batterie_kw)
             raison_limite_puissance = "Infra" if puissance_dispo_charge < puissance_max_batterie_kw else "Capacité Charge"
 
-            # Energie potentielle ajoutée
             energie_rechargee_potentielle = limite_puissance * duree_h
 
-            # Limite de capacité (kWh)
             espace_dispo = niveau_max_kwh - niveau_actuel
 
             if energie_rechargee_potentielle >= espace_dispo:
@@ -455,21 +421,17 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
 
             nouveau_niveau += energie_rechargee_reelle
 
-            # Log plus précis
             if energie_rechargee_reelle > 0.01:
                 log_msg = f"{contexte} sous {electrification} | Conso. Aux: {conso_aux:.1f} kWh | ΔBatt: +{energie_rechargee_reelle:.1f} kWh [{raison_limite}]"
             else:
                 log_msg = f"{contexte} sous {electrification} | Conso. Aux: {conso_aux:.1f} kWh | ΔBatt: 0 kWh (Batterie pleine)"
 
         else:
-            # Pas d'infra : décharge auxiliaires
             nouveau_niveau -= conso_aux
             log_msg = f"{contexte} sans infra | Conso. Aux: {conso_aux:.1f} kWh | ΔBatt: -{conso_aux:.1f} kWh"
 
-        # Bornage final dans la plage d'utilisation
         nouveau_niveau = max(niveau_min_kwh, min(nouveau_niveau, niveau_max_kwh))
 
-        # Ajouter au log
         pct = (nouveau_niveau / capacite_max_kwh) * 100
         p_charge_C = 0.0
         if duree_h > 0 and 'energie_rechargee_reelle' in locals() and energie_rechargee_reelle > 0:
@@ -479,7 +441,6 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
         return nouveau_niveau
 
 
-    # Log initial
     ajouter_log_batt = lambda h, k, m, p=0.0, is_stat=False, gare="": log_batterie.append((h, k, f"{(k/capacite_max_kwh)*100:.1f}%", m, p, is_stat, gare))
     eol_label = f" [Fin de vie {capacite_eol_pct}%]" if simuler_eol else ""
     ajouter_log_batt(trajets_train[0]["start"], niveau_batterie_kwh, f"Départ Mission{eol_label}", 0.0, True, trajets_train[0].get("origine", ""))
@@ -500,7 +461,6 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
         distance_km = abs(info_arrivee.get('distance', 0) - info_depart.get('distance', 0))
         distance_m = distance_km * 1000
 
-        # --- CAS 1 : ARRÊT EXPLICITE (Distance = 0) ---
         if distance_km == 0:
             au_terminus = _est_arret_terminus(gare_depart_nom, trajet)
             if is_batterie:
@@ -509,23 +469,18 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
                     contexte="Stationnement", au_terminus=au_terminus,
                 )
             else:
-                # Aux pendant le stationnement (réduit au terminus si taux < 100 %)
                 duree_stat_h = max(0, (trajet["end"] - trajet["start"]).total_seconds() / 3600.0)
                 elec_stat = info_depart.get("electrification", "F")
                 _ajouter_aux_arret(duree_stat_h, elec_stat, au_terminus=au_terminus)
 
-        # --- CAS 2 : MOUVEMENT ---
         else:
             duree_planifiee_h = max(0, (trajet["end"] - trajet["start"]).total_seconds() / 3600.0)
             duree_planifiee_sec = duree_planifiee_h * 3600.0
 
-            # Initialisation segment
             conso_aux_segment_kwh = facteur_aux_kwh_h * duree_planifiee_h
             total_conso_aux_kwh += conso_aux_segment_kwh
             total_distance_km += distance_km
 
-            # Analyse Infra Segment (simplifiée au départ)
-            # L'infrastructure est définie par la gare au kilométrage le plus faible
             if info_arrivee.get('distance', 0) < info_depart.get('distance', 0):
                 electrification_seg = info_arrivee.get("electrification", "F").upper()
             else:
@@ -534,28 +489,8 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
             is_catenary_segment = electrification_seg in ["C1500", "C25"]
             puissance_infra_kw = _get_puissance_infra(electrification_seg)
 
-            # -- Calcul Profil Vitesse --
             v_initiale_kph = v_precedente_kph
-            # Logique "Stop After"
-            is_stop_after = True
-            if i + 1 < len(trajets_train):
-                ts = trajets_train[i+1]
-                # Si le prochain trajet part de là où on arrive et qu'il y a continuité temporelle immédiate (pas d'arrêt long)
-                # Mais attention, ici on veut savoir si on s'arrête physiquement (v=0).
-                # Si le prochain segment est un "passage" (ex: gare non desservie ou passage direct), on ne s'arrête pas.
-                # Dans notre modèle, chaque segment "origine->terminus" implique un arrêt si ce sont des gares distinctes
-                # SAUF si explicitement modélisé autrement. Ici on assume arrêt si gares différentes.
-                if ts["origine"] == ts["terminus"] and ts["origine"] == gare_arrivee_nom:
-                     is_stop_after = True
-                else:
-                     # Est-ce un passage sans arrêt ? (Vérifier si le prochain part de notre arrivée)
-                     # Pour simplifier dans ce modèle macro : Arrêt systématique sauf indication contraire.
-                     is_stop_after = True
-
-            v_finale_target = 0 if is_stop_after else v_initiale_kph
-            # Vitesse de croisière implicite : assure que la durée physique du
-            # profil égale la durée planifiée → résistance intégrée à la vitesse
-            # réellement nécessaire pour tenir l'horaire.
+            v_finale_target = 0
             v_cruise = find_implicit_v_cruise(
                 distance_m, v_initiale_kph, v_finale_target,
                 accel_ms2, decel_ms2, duree_planifiee_sec
@@ -565,26 +500,19 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
             duree_physique_sec = sum(t for _, t, _ in profil.values())
             duree_physique_h = duree_physique_sec / 3600.0
 
-            # Vitesse finale réelle
             _, _, v_avg_decel = profil["decel"]
-            v_finale_kph_segment = 0 if is_stop_after else v_cruise
+            v_finale_kph_segment = 0
 
-            # -- Calcul Energies --
 
-            # Pente : delta d'altitude sommé sur toutes les sous-sections
-            # traversées (gestion correcte du sens aller/retour et des trajets
-            # multi-gares avec rampes hétérogènes).
             dist_dep_km = float(info_depart.get('distance', 0))
             dist_arr_km = float(info_arrivee.get('distance', 0))
             delta_h = _compute_delta_h_m(dist_dep_km, dist_arr_km)
             e_pente_J = masse_kg * GRAVITY_MS2 * delta_h
 
-            # Cinétique
             v_start_ms = v_initiale_kph / 3.6
             v_end_ms = v_finale_kph_segment / 3.6
             e_cin_J = 0.5 * masse_kg * (max(0, v_end_ms**2) - max(0, v_start_ms**2))
 
-            # Résistance
             e_resist_J = 0
             for phase in profil.values():
                 d, _, v_avg = phase
@@ -594,7 +522,6 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
 
             e_total_necessaire_J = e_resist_J + e_pente_J + e_cin_J
 
-            # Source & Rendements
             conso_traction_kwh = 0
             recup_possible_kwh = 0
             source_actuelle = "electrique" if type_materiel in ["electrique", "batterie"] or (type_materiel == "bimode" and is_catenary_segment) else "thermique"
@@ -616,12 +543,9 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
                 total_conso_aux_thermique_kwh += conso_aux_segment_kwh
             total_conso_brute_kwh += (conso_traction_kwh + conso_aux_segment_kwh)
 
-            # -- Logique Batterie (Mouvement) --
             if is_batterie:
                 conso_totale_segment = conso_traction_kwh + conso_aux_segment_kwh
                 if is_catenary_segment:
-                    # Charge dynamique (sous caténaire) : la fenêtre de charge
-                    # couvre toute la durée planifiée du segment.
                     p_conso_train = (conso_totale_segment / duree_planifiee_h) if duree_planifiee_h > 0 else 0
                     p_dispo_charge = max(0, puissance_infra_kw - p_conso_train)
 
@@ -629,12 +553,6 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
                     e_charge_potential = p_target * duree_planifiee_h
 
                     space = niveau_max_kwh - niveau_batterie_kwh
-                    # Approche bilan net :
-                    # La batterie ne se vide pas (conso prise sur caténaire).
-                    # Elle se remplit avec (Charge + Recup), bornée par l'espace dispo.
-                    # NB : on n'ajoute PAS gain_net à total_conso_* — c'est de
-                    # l'énergie stockée qui sera comptabilisée lors de son
-                    # utilisation en traction sur un segment hors caténaire.
                     gain_net = min(e_charge_potential + recup_possible_kwh, space)
                     niveau_batterie_kwh += gain_net
 
@@ -646,7 +564,6 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
                     if duree_planifiee_h > 0 and gain_net > 0:
                         p_charge_C = (gain_net / duree_planifiee_h) / capacite_max_kwh
                 else:
-                    # Décharge
                     niveau_batterie_kwh -= conso_totale_segment
                     niveau_batterie_kwh += recup_possible_kwh
                     delta_batt = conso_totale_segment - recup_possible_kwh
@@ -661,12 +578,10 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
 
             v_precedente_kph = v_finale_kph_segment
 
-        # --- GESTION DES TEMPS D'ARRÊT ENTRE SEGMENTS (Recharge implicite) ---
         if i < len(trajets_train) - 1:
             next_trajet = trajets_train[i+1]
             gap_seconds = (next_trajet["start"] - trajet["end"]).total_seconds()
 
-            # Si un trou significatif (> 1 min) existe entre l'arrivée ici et le départ suivant
             if gap_seconds > 60:
                 gare_attente = trajet["terminus"]
                 au_terminus = _est_arret_terminus(gare_attente, trajet)
@@ -680,13 +595,11 @@ def calculer_consommation_trajet(trajets_train, mission, df_gares, energy_params
                         au_terminus=au_terminus,
                     )
                 else:
-                    # Aux pendant l'attente/terminus (taux réduit si terminus sans voyageurs)
                     gap_h = gap_seconds / 3600.0
                     info_term = gares_info.get(gare_attente, {})
                     elec_term = info_term.get("electrification", "F")
                     _ajouter_aux_arret(gap_h, elec_term, au_terminus=au_terminus)
 
-    # --- Bilan final ---
     total_litres_diesel = total_conso_thermique_kwh / kwh_per_liter if kwh_per_liter > 0 else 0
     total_aux_litres_diesel = total_conso_aux_thermique_kwh / kwh_per_liter if kwh_per_liter > 0 else 0
 
