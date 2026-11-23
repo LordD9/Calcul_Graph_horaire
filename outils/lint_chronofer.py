@@ -32,6 +32,16 @@ def _cle_session_manuelle(noeud):
     return dans_session and any(mot in nom.lower() for mot in MOTS_CLE_MANUELLE)
 
 
+def _lit(noeud, cle):
+    return any(isinstance(c, ast.Constant) and c.value == cle for c in ast.walk(noeud))
+
+
+def _fonction_englobante(noeud):
+    while noeud is not None and not isinstance(noeud, ast.FunctionDef):
+        noeud = getattr(noeud, "parent", None)
+    return noeud.name if noeud is not None else None
+
+
 def _violations(chemin, source):
     arbre = ast.parse(source, filename=str(chemin))
     for parent in ast.walk(arbre):
@@ -57,6 +67,15 @@ def _violations(chemin, source):
                 "clé de cache/empreinte rangée à la main dans session_state : "
                 "utilise etat_session.enregistrer/lire, qui jettent le résultat "
                 "dès qu'une entrée change (a862025, formel/EtatSession.tla)"
+            )
+    for noeud in ast.walk(arbre):
+        if (isinstance(noeud, ast.BinOp) and isinstance(noeud.op, ast.Sub)
+                and _lit(noeud.left, "time_offset_min") and _lit(noeud.right, "time_offset_min")
+                and _fonction_englobante(noeud) != "horaire_mission"):
+            yield noeud.lineno, "CF005", (
+                "arrivée moins arrivée : la durée inclut l'arrêt de la gare de départ. "
+                "Écris point_suivant['time_offset_min'] - point['depart_offset_min'] "
+                "(a681367, de27eba, b41ce03)"
             )
     for noeud in arbre.body:
         if isinstance(noeud, ast.Assign) and isinstance(noeud.value, ast.Dict):

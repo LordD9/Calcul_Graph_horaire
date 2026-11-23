@@ -399,14 +399,7 @@ class SimulationEngine:
         for i, pt in enumerate(base_schedule):
             idx = self.gares_map.get(pt['gare'])
             if i > 0:
-                # Calcul du temps écoulé total entre les deux arrivées (selon saisie utilisateur)
-                delta_total = pt['time_offset_min'] - base_schedule[i-1]['time_offset_min']
-                
-                # On soustrait le temps d'arrêt de la gare précédente pour obtenir le temps de roulage pur
-                prev_arret = base_schedule[i-1].get('duree_arret_min', 0)
-                
-                # Le temps de marche ne peut pas être négatif (max 0)
-                duration = max(0, delta_total - prev_arret)
+                duration = max(0, pt['time_offset_min'] - base_schedule[i-1]['depart_offset_min'])
             else:
                 duration = 0
             
@@ -929,16 +922,7 @@ def executer_simulation_evenementielle(
             pt_depart_bloc = bloc_gares[0]
             pt_arrivee_bloc = bloc_gares[-1]
 
-            # L'arrêt commercial au point de départ du bloc est déjà inclus dans
-            # heure_depart_reelle (train disponible APRÈS l'arrêt). Il faut donc le
-            # soustraire pour ne pas le compter deux fois dans la durée de circulation.
-            depart_stop = pt_depart_bloc.get("duree_arret_min", 0)
-
-            duree_bloc_min = max(0,
-                pt_arrivee_bloc.get("time_offset_min", 0) -
-                pt_depart_bloc.get("time_offset_min", 0) -
-                depart_stop
-            )
+            duree_bloc_min = max(0, pt_arrivee_bloc["time_offset_min"] - pt_depart_bloc["depart_offset_min"])
 
             duree_arret_commercial = pt_arrivee_bloc.get("duree_arret_min", 0)
             duree_arret_final = duree_arret_commercial
@@ -975,11 +959,7 @@ def executer_simulation_evenementielle(
                         look_idx += 1
                     if found_preferred:
                         new_arrivee = extended[-1]
-                        new_duree = max(0,
-                            new_arrivee.get("time_offset_min", 0) -
-                            pt_depart_bloc.get("time_offset_min", 0) -
-                            depart_stop
-                        )
+                        new_duree = max(0, new_arrivee["time_offset_min"] - pt_depart_bloc["depart_offset_min"])
                         preferred_extension_applied = True
                         bloc_gares = extended
                         next_crossing_idx = look_idx - 1
@@ -1055,21 +1035,12 @@ def executer_simulation_evenementielle(
                         pt_curr = bloc_gares[i]
                         pt_next = bloc_gares[i + 1]
 
-                        delta_total = pt_next.get("time_offset_min", 0) - pt_curr.get("time_offset_min", 0)
-                        prev_arret = pt_curr.get("duree_arret_min", 0)
-                        duree_segment = max(0, delta_total - prev_arret)
+                        duree_segment = max(0, pt_next["time_offset_min"] - pt_curr["depart_offset_min"])
 
-                        # Offsets depuis heure_depart_reelle (= départ RÉEL du bloc, après
-                        # l'éventuel arrêt commercial de pt_depart_bloc déjà écoulé).
-                        # On soustrait depart_stop pour aligner les offsets sur ce départ réel.
-                        # Pour i=0 : offset = 0 car heure_depart_reelle EST déjà ce départ.
-                        base_offset = pt_depart_bloc.get("time_offset_min", 0) + depart_stop
-                        offset_arr_curr = max(0, pt_curr.get("time_offset_min", 0) - base_offset) if i > 0 else 0
-                        offset_arr_next = max(0, pt_next.get("time_offset_min", 0) - base_offset)
-
-                        # Pour i=0, heure_depart_reelle est déjà le départ du bloc (stop inclus).
-                        # Pour i>0, l'arrêt commercial de pt_curr n'est pas encore décompté.
-                        arret_inter = prev_arret if i > 0 else 0
+                        base_offset = pt_depart_bloc["depart_offset_min"]
+                        offset_arr_curr = max(0, pt_curr["time_offset_min"] - base_offset) if i > 0 else 0
+                        offset_arr_next = max(0, pt_next["time_offset_min"] - base_offset)
+                        arret_inter = pt_curr["duree_arret_min"] if i > 0 else 0
                         offset_dep_curr = offset_arr_curr + arret_inter
 
                         h_arr_curr = heure_depart_reelle + timedelta(minutes=offset_arr_curr)
@@ -1533,7 +1504,8 @@ def horaire_mission(mission, direction, gares):
             tot_d = abs(d_e - d_s)
             ratio = dist_p / tot_d if tot_d > 0 else 0
             t = s['time_offset_min'] + ((e['time_offset_min'] - s['time_offset_min']) * ratio)
-            res.append({"gare": gare, "time_offset_min": round(t, 1), "duree_arret_min": d_arret})
+            res.append({"gare": gare, "time_offset_min": round(t, 1), "duree_arret_min": d_arret,
+                        "depart_offset_min": round(t, 1) + d_arret})
     return res
 
 def preparer_roulement_manuel(roulement):
