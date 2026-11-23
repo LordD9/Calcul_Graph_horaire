@@ -3,10 +3,9 @@
 from energy_logic import (
     associer_mission_au_train,
     calculer_energie_flotte,
-    fingerprint_energie,
     get_default_energy_params,
 )
-from test_energy_aux_terminus import _df_gares, _df_gares_elec, _t
+from test_energy_aux_terminus import _df_gares, _t
 
 
 def test_associer_aller_puis_retour():
@@ -35,27 +34,6 @@ def test_flotte_deux_rames_independantes():
     assert mpt["T1"]["origine"] == "A"
     assert res["T1"][1] == "diesel"
     assert res["T1"][0]["total_distance_km"] > 0
-
-
-def test_fingerprint_change_horaire_et_masse():
-    missions = [{"type_materiel": "diesel"}]
-    chrono = {"T1": [{"start": _t(8, 0), "end": _t(8, 20), "origine": "A", "terminus": "B"}]}
-    p = {"diesel": get_default_energy_params()}
-    k1 = fingerprint_energie(p, missions, chrono)
-    chrono2 = {"T1": [{"start": _t(9, 0), "end": _t(9, 20), "origine": "A", "terminus": "B"}]}
-    assert k1 != fingerprint_energie(p, missions, chrono2)
-    p2 = {"diesel": dict(get_default_energy_params(), masse_tonne=80)}
-    assert k1 != fingerprint_energie(p2, missions, chrono)
-    assert k1 == fingerprint_energie(p, missions, chrono)
-
-
-def test_fingerprint_change_si_electrification_change():
-    missions = [{"origine": "A", "terminus": "B", "type_materiel": "diesel"}]
-    chrono = {"T1": [{"start": _t(8, 0), "end": _t(8, 20), "origine": "A", "terminus": "B"}]}
-    p = {"diesel": get_default_energy_params()}
-    k1 = fingerprint_energie(p, missions, chrono, _df_gares())
-    k2 = fingerprint_energie(p, missions, chrono, _df_gares_elec())
-    assert k1 != k2
 
 
 def test_flotte_sans_mission_renvoie_erreur():

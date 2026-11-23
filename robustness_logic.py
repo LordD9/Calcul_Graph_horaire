@@ -3,9 +3,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import heapq
-import json
 import math
 import re
 from collections import Counter
@@ -14,6 +12,8 @@ from datetime import datetime, time, timedelta
 from numbers import Integral
 
 import pandas as pd
+
+from empreinte import empreinte
 
 from core_logic import SimulationEngine, _get_infra_at_gare, _is_crossing_point
 from energy_logic import (
@@ -2500,35 +2500,7 @@ def evaluer_robustesse(chronologie, df_gares, missions, energy_params=None,
 
 def fingerprint_robustesse(chronologie, df_gares, missions, energy_params=None,
                            reserve_gares=(), max_reserve_rames=1, activer_renforts=True):
-    """Empreinte SHA-256 stable des entrées de l'analyse de robustesse."""
-    max_reserve_rames = _valider_max_reserve_rames(max_reserve_rames)
-    skeleton = []
-    for train_id, rows in sorted((chronologie or {}).items(), key=lambda item: str(item[0])):
-        for row in sorted(rows or [], key=lambda item: (str(item.get("start")), str(item.get("end")))):
-            skeleton.append({
-                "train_id": str(train_id),
-                "start": row.get("start"),
-                "end": row.get("end"),
-                "origine": row.get("origine"),
-                "terminus": row.get("terminus"),
-                "mission": row.get("mission"),
-                "is_mission_start": row.get("is_mission_start", False),
-            })
-    gares = []
-    if hasattr(df_gares, "columns"):
-        cols = [name for name in (
-            "gare", "distance", "infra", "rampe", "rampe_section_a_venir", "electrification"
-        ) if name in df_gares.columns]
-        if cols:
-            gares = df_gares[cols].sort_values("gare").to_dict(orient="records")
-    payload = {
-        "chronologie": skeleton,
-        "gares": gares,
-        "missions": missions or [],
-        "energy_params": energy_params,
-        "reserve_gares": list(reserve_gares or ()),
-        "max_reserve_rames": max_reserve_rames,
-        "activer_renforts": bool(activer_renforts),
-    }
-    encoded = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return empreinte(
+        chronologie, df_gares, missions, energy_params, list(reserve_gares or ()),
+        _valider_max_reserve_rames(max_reserve_rames), bool(activer_renforts),
+    )

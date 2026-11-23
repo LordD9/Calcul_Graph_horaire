@@ -21,11 +21,12 @@ Fonctions principales :
 - `get_physical_profile` : Génère les courbes de vitesse/position/énergie.
 """
 
-import json
 import math
 import numpy as np
 import pandas as pd
 from datetime import timedelta
+
+from empreinte import empreinte
 
 # Constantes physiques
 JOULES_PER_KWH = 3_600_000
@@ -723,37 +724,8 @@ def associer_mission_au_train(trajets, missions):
     return None
 
 
-def fingerprint_energie(energy_params, missions, chronologie, df_gares=None):
-    """Cle de cache : materiel + missions + horaires + infra gares."""
-    skeleton = []
-    for tid, trajets in sorted((chronologie or {}).items(), key=lambda x: str(x[0])):
-        for t in trajets or []:
-            skeleton.append((
-                str(tid),
-                str(t.get("start")),
-                str(t.get("end")),
-                t.get("origine"),
-                t.get("terminus"),
-            ))
-    gares_hash = []
-    if df_gares is not None and hasattr(df_gares, "columns"):
-        cols = [c for c in ("gare", "distance", "rampe", "rampe_section_a_venir", "electrification") if c in df_gares.columns]
-        if cols:
-            gares_hash = df_gares[cols].astype(str).values.tolist()
-    payload = {
-        "params": energy_params,
-        "missions": [
-            {
-                "origine": m.get("origine"),
-                "terminus": m.get("terminus"),
-                "type_materiel": m.get("type_materiel"),
-            }
-            for m in (missions or [])
-        ],
-        "skeleton": skeleton,
-        "gares": gares_hash,
-    }
-    return json.dumps(payload, sort_keys=True, default=str)
+def fingerprint_energie(energy_params, missions, chronologie, df_gares):
+    return empreinte(energy_params, missions, chronologie, df_gares)
 
 
 def calculer_energie_flotte(chronologie, missions, df_gares, energy_params):
