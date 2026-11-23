@@ -27,7 +27,6 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
-import json
 from collections import defaultdict
 import time
 
@@ -2126,11 +2125,8 @@ if st.session_state.get('gares') is not None:
 
                         if st.button(f"Ajouter étape au train {id_train}", key=f"add_e_{id_train}"):
                             mission_associee = trouver_mission_pour_od(gare_dep, gare_arr, st.session_state.missions)
-                            mission_key = json.dumps(mission_associee, sort_keys=True) if mission_associee else None
-
                             if mission_associee:
-                                df_gares_json = st.session_state.gares.to_json(orient='records')
-                                horaire_complet = construire_horaire_mission(mission_key, "aller", df_gares_json)
+                                horaire_complet = construire_horaire_mission(mission_associee, "aller", st.session_state.gares)
                             else:
                                 horaire_complet = []
 

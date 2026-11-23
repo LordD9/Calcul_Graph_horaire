@@ -24,7 +24,8 @@ import pandas as pd
 from io import BytesIO
 from collections import defaultdict
 import itertools
-import json
+
+from empreinte import memoiser
 from matplotlib.backends.backend_pdf import PdfPages
 import matplotlib.image as mpimg
 
@@ -298,6 +299,7 @@ class SimulationEngine:
             heure_fin (time): Heure de fin de service.
         """
         self.df_gares = df_gares.sort_values('distance').reset_index(drop=True)
+        self.gares_ordonnees = gares_ordonnees(self.df_gares)
         self.gares_map = {r.gare: i for i, r in self.df_gares.iterrows()}
         self.infra_map = {r.gare: _get_infra_at_gare(df_gares, r.gare) for _, r in self.df_gares.iterrows()}
 
@@ -389,7 +391,7 @@ class SimulationEngine:
         Returns:
             tuple: (datetime real_departure, list path_steps, str error_message)
         """
-        base_schedule = construire_horaire_mission(mission, direction, self.df_gares)
+        base_schedule = horaire_mission(mission, direction, self.gares_ordonnees)
         if not base_schedule:
             return None, [], "Erreur itinéraire"
     
@@ -780,6 +782,7 @@ def executer_simulation_evenementielle(
         return raw
 
     engine = SimulationEngine(df_gares, heure_debut, heure_fin)
+    gares = engine.gares_ordonnees
 
     infra_violation_warnings = []
     other_warnings = []
@@ -812,7 +815,7 @@ def executer_simulation_evenementielle(
         heure_debut_mission = engine.dt_debut
 
         if mission.get('inject_from_terminus_2', False):
-            horaire_aller = construire_horaire_mission(mission, "aller", df_gares)
+            horaire_aller = horaire_mission(mission, "aller", gares)
             if horaire_aller:
                 temps_trajet_aller = horaire_aller[-1].get("time_offset_min", 0)
                 t_ret_b = mission.get("temps_retournement_B", 10)
@@ -906,7 +909,7 @@ def executer_simulation_evenementielle(
 
             cs = crossing_strategies.get(mission_id) if crossing_strategies else None
 
-            horaire = construire_horaire_mission(mission_cfg, trajet_spec, df_gares)
+            horaire = horaire_mission(mission_cfg, trajet_spec, gares)
 
             if not horaire or index_etape >= len(horaire) - 1:
                 continue
@@ -1234,7 +1237,7 @@ def executer_simulation_evenementielle(
                 # par un autre aller entre-temps).
                 trains[id_train]["dispo_a"] = heure_depart_retour
 
-                horaire_retour = construire_horaire_mission(mission_cfg, "retour", df_gares)
+                horaire_retour = horaire_mission(mission_cfg, "retour", gares)
                 if horaire_retour and len(horaire_retour) > 1:
                     # heure_fin borne le DÉPART du retour, pas son arrivée.
                     if heure_depart_retour < engine.dt_fin:
@@ -1426,27 +1429,18 @@ def generer_tous_trajets_optimises(missions, df_gares, heure_debut, heure_fin,
 # 5. CONSTRUCTION DES HORAIRES DE MISSION
 # =============================================================================
 
-_horaire_mission_cache = {}
-_HORAIRE_CACHE_MAX = 256
+def gares_ordonnees(df_gares):
+    """(gare, distance) triées : tout ce que l'horaire théorique lit de l'infrastructure."""
+    gs = df_gares.sort_values('distance')
+    return tuple(zip(gs['gare'].tolist(), gs['distance'].astype(float).tolist()))
 
 
-def _horaire_cache_key(mission, direction, df_gares):
-    gares = tuple(df_gares["gare"].tolist()) if "gare" in df_gares.columns else ()
-    dist = tuple(df_gares["distance"].tolist()) if "distance" in df_gares.columns else ()
-    return (
-        direction,
-        json.dumps(mission, sort_keys=True, default=str),
-        gares,
-        dist,
-    )
+def construire_horaire_mission(mission, direction, df_gares):
+    return horaire_mission(mission, direction, gares_ordonnees(df_gares))
 
 
-def construire_horaire_mission_cached(mission, direction, df_gares):
-    """Alias historique : meme cache que construire_horaire_mission."""
-    return construire_horaire_mission(mission, direction, df_gares)
-
-def _construire_horaire_mission_impl(mission, direction, df_gares):
-    """Implémentation réelle de la construction d'horaire."""
+@memoiser(maxsize=256)
+def horaire_mission(mission, direction, gares):
     if direction not in ['aller', 'retour']:
         return []
     
@@ -1515,8 +1509,7 @@ def _construire_horaire_mission_impl(mission, direction, df_gares):
             seen.add(p['gare'])
 
     res = []
-    gs = df_gares.sort_values('distance').reset_index(drop=True)
-    gmap = {r.gare: (i, r.distance) for i, r in gs.iterrows()}
+    gmap = {gare: (i, distance) for i, (gare, distance) in enumerate(gares)}
 
     for i in range(len(unique) - 1):
         s, e = unique[i], unique[i+1]
@@ -1524,36 +1517,23 @@ def _construire_horaire_mission_impl(mission, direction, df_gares):
             continue
         i_s, d_s = gmap[s['gare']]
         i_e, d_e = gmap[e['gare']]
-        seg = gs.iloc[min(i_s, i_e) : max(i_s, i_e)+1]
-        if i_e < i_s: 
-            seg = seg.sort_index(ascending=False)
+        seg = gares[min(i_s, i_e) : max(i_s, i_e)+1]
+        if i_e < i_s:
+            seg = seg[::-1]
 
-        for _, row in seg.iterrows():
-            if res and res[-1]['gare'] == row['gare']: 
+        for gare, distance in seg:
+            if res and res[-1]['gare'] == gare:
                 continue
             d_arret = 0
             for op in unique:
-                if op['gare'] == row['gare']:
+                if op['gare'] == gare:
                     d_arret = op.get('duree_arret_min', 0)
                     break
-            dist_p = abs(row['distance'] - d_s)
+            dist_p = abs(distance - d_s)
             tot_d = abs(d_e - d_s)
             ratio = dist_p / tot_d if tot_d > 0 else 0
             t = s['time_offset_min'] + ((e['time_offset_min'] - s['time_offset_min']) * ratio)
-            res.append({"gare": row['gare'], "time_offset_min": round(t, 1), "duree_arret_min": d_arret})
-    return res
-
-# Wrapper pour compatibilité
-def construire_horaire_mission(mission, direction, df_gares):
-    """Construction d'horaire de mission (cache identite gares + mission)."""
-    key = _horaire_cache_key(mission, direction, df_gares)
-    hit = _horaire_mission_cache.get(key)
-    if hit is not None:
-        return hit
-    res = _construire_horaire_mission_impl(mission, direction, df_gares)
-    if len(_horaire_mission_cache) >= _HORAIRE_CACHE_MAX:
-        _horaire_mission_cache.clear()
-    _horaire_mission_cache[key] = res
+            res.append({"gare": gare, "time_offset_min": round(t, 1), "duree_arret_min": d_arret})
     return res
 
 def preparer_roulement_manuel(roulement):
@@ -1704,13 +1684,9 @@ def generer_exports(chronologie, figure, figures_batterie=None, logo_path=None):
     return bx, bp
 
 def reset_caches():
-    """Reinitialise les caches d'horaires et d'evaluation."""
-    _horaire_mission_cache.clear()
-    try:
-        from optimisation_logic import reset_eval_cache
-        reset_eval_cache()
-    except ImportError:
-        pass
+    horaire_mission.vider()
+    from optimisation_logic import reset_eval_cache
+    reset_eval_cache()
 
 def _calculer_stats_homogeneite(chronologie):
     """Calcule les statistiques d'homogénéité PAR MISSION ET PAR SENS (aller/retour séparés)."""

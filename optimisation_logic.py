@@ -29,8 +29,8 @@ from copy import deepcopy
 from collections import defaultdict
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError
-import hashlib
-import json
+
+from empreinte import empreinte, memoiser
 
 
 # =============================================================================
@@ -170,57 +170,9 @@ class OptimizationConfig:
 # CACHE INTELLIGENT
 # =============================================================================
 
-class SolutionCache:
-    """Cache optimisé pour les solutions."""
-    def __init__(self, max_size=1000):
-        self.cache = {}
-        self.max_size = max_size
-        self.access_count = {}
-    
-    def get_key(self, missions, genome=None):
-        """Génère une clé de cache compacte."""
-        missions_str = json.dumps(sorted([
-            (m['origine'], m['terminus'], m.get('frequence', 0))
-            for m in missions
-        ]))
-        if genome:
-            timing_key = tuple(sorted(genome['timing'].items()))
-            crossing_key = tuple(sorted(
-                (k, tuple(sorted(v['stop_durations'].items()))) 
-                for k, v in genome.get('crossing', {}).items()
-            ))
-            key_str = f"{missions_str}:{timing_key}:{crossing_key}"
-        else:
-            key_str = missions_str
-        return hashlib.md5(key_str.encode()).hexdigest()
-    
-    def get(self, key):
-        result = self.cache.get(key)
-        if result:
-            self.access_count[key] = self.access_count.get(key, 0) + 1
-        return result
-    
-    def put(self, key, value):
-        # Si cache plein, supprimer les entrées les moins utilisées
-        if len(self.cache) >= self.max_size:
-            min_key = min(self.access_count, key=self.access_count.get)
-            del self.cache[min_key]
-            del self.access_count[min_key]
-        
-        self.cache[key] = value
-        self.access_count[key] = 0
-
-_solution_cache = SolutionCache()
-
-_eval_cache = {}
-_EVAL_CACHE_MAX = 512
-_durees_cache = {}
-
-
 def reset_eval_cache():
-    """Vide les caches d'evaluation (un run d'optimisation)."""
-    _eval_cache.clear()
-    _durees_cache.clear()
+    _evaluer_simulation.vider()
+    _construire_durees_theoriques.vider()
 
 
 class GenomeCache:
@@ -231,8 +183,7 @@ class GenomeCache:
         self.max_size = max_size
 
     def key(self, genome) -> str:
-        canonical = json.dumps(genome, sort_keys=True, default=str)
-        return hashlib.md5(canonical.encode()).hexdigest()
+        return empreinte(genome)
 
     def get(self, genome):
         k = self.key(genome)
@@ -305,13 +256,7 @@ def _evaluate_genome_worker(args):
             params, missions, df_gares, heure_debut, heure_fin, allow_sharing, config=config
         )
 
-        result = (genome, chronologie, warnings, score)
-
-        if config.use_cache:
-            cache_key = _solution_cache.get_key(missions, genome)
-            _solution_cache.put(cache_key, result)
-
-        return result
+        return (genome, chronologie, warnings, score)
 
     except Exception as e:
         return (args[0], {}, {"infra_violations": [], "other": [str(e)]}, float('inf'))
@@ -860,6 +805,7 @@ class GeneticOptimizer:
 # MODE EXHAUSTIF (INCHANGÉ)
 # =============================================================================
 
+@memoiser(maxsize=64)
 def _construire_durees_theoriques(missions, df_gares):
     """{label_mission: duree_min} pour chaque mission active et chaque sens.
 
@@ -867,10 +813,6 @@ def _construire_durees_theoriques(missions, df_gares):
     cadencements/offsets (qui ne changent que les heures de départ, pas les temps
     de marche), donc calculable une fois sur les missions d'origine.
     """
-    key = (id(missions), id(df_gares))
-    hit = _durees_cache.get(key)
-    if hit is not None:
-        return hit
     from core_logic import construire_horaire_mission
     durees = {}
     for m in missions:
@@ -882,37 +824,19 @@ def _construire_durees_theoriques(missions, df_gares):
         h_retour = construire_horaire_mission(m, 'retour', df_gares)
         if h_retour:
             durees[f"{m['terminus']} → {m['origine']}"] = h_retour[-1].get('time_offset_min', 0)
-    _durees_cache[key] = durees
     return durees
 
 
-def _eval_cache_key(params, missions, df_gares, heure_debut, heure_fin, allow_sharing, config):
+def evaluer_params_simulation(params, missions, df_gares, heure_debut, heure_fin, allow_sharing=True, config=None):
     max_arret = (config.crossing_optimization.max_delay_minutes
                  if config and config.crossing_optimization and config.crossing_optimization.enabled
                  else 5)
-    return (
-        id(missions),
-        id(df_gares),
-        json.dumps(params.cadencements, sort_keys=True, default=str),
-        json.dumps(params.turnaround_buffers, sort_keys=True, default=str),
-        json.dumps(params.crossing_stop_durations, sort_keys=True, default=str),
-        json.dumps(params.crossing_pair_assignments or {}, sort_keys=True, default=str),
-        json.dumps(params.retour_offsets or {}, sort_keys=True, default=str),
-        str(heure_debut),
-        str(heure_fin),
-        allow_sharing,
-        max_arret,
-    )
+    return _evaluer_simulation(params, missions, df_gares, heure_debut, heure_fin, allow_sharing, max_arret)
 
 
-def evaluer_params_simulation(params, missions, df_gares, heure_debut, heure_fin, allow_sharing=True, config=None):
-    from core_logic import executer_simulation_evenementielle, _calculer_stats_homogeneite, _score_chronologie_bruit
-    from datetime import time as dt_time
-
-    key = _eval_cache_key(params, missions, df_gares, heure_debut, heure_fin, allow_sharing, config)
-    hit = _eval_cache.get(key)
-    if hit is not None:
-        return hit
+@memoiser(maxsize=512)
+def _evaluer_simulation(params, missions, df_gares, heure_debut, heure_fin, allow_sharing, max_arret):
+    from core_logic import executer_simulation_evenementielle, _score_chronologie_bruit
 
     adjusted_ref = params.get_adjusted_reference_minutes(missions)
     modified_missions = []
@@ -939,9 +863,6 @@ def evaluer_params_simulation(params, missions, df_gares, heure_debut, heure_fin
         retour_reference_offsets=retour_offsets,
     )
 
-    max_arret = (config.crossing_optimization.max_delay_minutes
-                 if config and config.crossing_optimization and config.crossing_optimization.enabled
-                 else 5)
     durees_theoriques = _construire_durees_theoriques(missions, df_gares)
     # NB : plus de pénalité directe sur les buffers de retournement. Leur coût
     # émerge désormais de leurs effets réels (nombre de rames, Gini, temps de
@@ -951,11 +872,7 @@ def evaluer_params_simulation(params, missions, df_gares, heure_debut, heure_fin
         durees_theoriques=durees_theoriques,
     )
 
-    result = (score, chronologie, warnings, stats)
-    if len(_eval_cache) >= _EVAL_CACHE_MAX:
-        _eval_cache.clear()
-    _eval_cache[key] = result
-    return result
+    return (score, chronologie, warnings, stats)
 
 
 def _baseline_simulation_params():
