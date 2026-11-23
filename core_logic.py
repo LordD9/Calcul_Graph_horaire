@@ -728,6 +728,7 @@ def executer_simulation_evenementielle(
 
     engine = SimulationEngine(df_gares, heure_debut, heure_fin)
     gares = engine.gares_ordonnees
+    infra_map = engine.infra_map
 
     infra_violation_warnings = []
     other_warnings = []
@@ -862,7 +863,7 @@ def executer_simulation_evenementielle(
 
             while next_crossing_idx < len(horaire):
                 gare_name = horaire[next_crossing_idx]["gare"]
-                infra = _get_infra_at_gare(df_gares, gare_name)
+                infra = infra_map.get(gare_name, "F")
                 bloc_gares.append(horaire[next_crossing_idx])
 
                 if _is_crossing_point(infra) or next_crossing_idx == len(horaire) - 1:
@@ -893,7 +894,7 @@ def executer_simulation_evenementielle(
                     while look_idx < len(horaire):
                         g = horaire[look_idx]
                         g_name = g["gare"]
-                        g_infra = _get_infra_at_gare(df_gares, g_name)
+                        g_infra = infra_map.get(g_name, "F")
                         extended.append(g)
                         if _is_crossing_point(g_infra):
                             if g_name in preferred_ves:
@@ -1081,7 +1082,7 @@ def executer_simulation_evenementielle(
                         gares_sans_ve = []
                         for gare_info in bloc_gares[1:-1]:
                             gare_inter = gare_info["gare"]
-                            infra_inter = _get_infra_at_gare(df_gares, gare_inter)
+                            infra_inter = infra_map.get(gare_inter, "F")
                             if not _is_crossing_point(infra_inter):
                                 gares_sans_ve.append(f"{gare_inter} ({infra_inter})")
 
