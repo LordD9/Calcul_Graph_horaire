@@ -35,7 +35,6 @@ _MATERIEL_TYPES = ("diesel", "electrique", "bimode", "batterie")
 UNCLASSIFIED_REGION = "Non classé"
 DEFAULT_LIGNE = "Général"
 
-# Mapping paramètre énergétique -> (clé widget Streamlit, coerceur)
 _ENERGY_WIDGET_MAP = (
     ("masse_tonne", "masse_{mat}", int),
     ("facteur_aux_kwh_h", "f_aux_{mat}", float),
@@ -58,9 +57,6 @@ _ENERGY_WIDGET_MAP = (
 )
 
 
-# =============================================================================
-# Découverte et lecture
-# =============================================================================
 
 def classify_scenario_path(path: Path, metadata: dict | None = None) -> tuple[str, str]:
     """Déduit (région, ligne) depuis le chemin relatif à `scenarios/`.
@@ -191,9 +187,6 @@ def serialize_scenario(scenario: dict) -> bytes:
     return txt.encode("utf-8")
 
 
-# =============================================================================
-# Construction et application
-# =============================================================================
 
 def build_scenario_from_session(st_session) -> dict:
     """Compose un dict scénario depuis le session_state Streamlit courant."""
@@ -202,7 +195,6 @@ def build_scenario_from_session(st_session) -> dict:
         raise ValueError("Aucune infrastructure définie : session_state.gares est vide.")
 
     gares_records = df_gares.to_dict(orient="records")
-    # Nettoyage : NaN -> None pour JSON propre
     for g in gares_records:
         for k, v in list(g.items()):
             if isinstance(v, float) and pd.isna(v):
@@ -260,7 +252,6 @@ def apply_scenario_to_session(scenario: dict, st_session) -> None:
     _reset_session_for_scenario_load(st_session)
     st_session["_scenario_ui_epoch"] = int(st_session.get("_scenario_ui_epoch") or 0) + 1
 
-    # Infrastructure -> DataFrame
     gares = scenario.get("infrastructure", {}).get("gares", [])
     df = pd.DataFrame(gares)
     if not df.empty and "distance" in df.columns:
@@ -272,28 +263,21 @@ def apply_scenario_to_session(scenario: dict, st_session) -> None:
     # involontaire sur "Valider" écraserait l'infra du scénario.
     st_session["gares_texte_input"] = format_gares_text(df)
 
-    # Missions (copies indépendantes)
     missions = [dict(m) for m in scenario.get("missions", [])]
     st_session["missions"] = missions
     st_session["nombre_missions"] = max(len(missions), 1)
 
-    # Pré-remplissage du mode "Saisie manuelle par lot" pour chaque mission.
-    # Le mode "Interface Guidée" ne sait pas relire les passing_points (ses
-    # widgets utilisent des valeurs par défaut indépendantes), donc on force le
-    # mode bulk et on écrit le texte attendu par le parser de app.py.
     for idx, m in enumerate(missions):
         bulk_text = format_mission_to_bulk_text(m, mode_calcul="Calcul Energie")
         m["pp_raw_text"] = bulk_text
         _seed_mission_widget_keys(st_session, idx, m, bulk_text)
 
-    # Heures de service
     svc = scenario.get("service", {})
     h_deb = _parse_time(svc.get("heure_debut"))
     h_fin = _parse_time(svc.get("heure_fin"))
     st_session["heure_debut_service"] = h_deb or dt_time(6, 0)
     st_session["heure_fin_service"] = h_fin or dt_time(22, 0)
 
-    # Paramètres énergie : merge avec les défauts pour les types absents
     energy_params = {}
     defaults = get_default_energy_params()
     sc_energy = scenario.get("energy_params", {}) or {}
@@ -305,7 +289,6 @@ def apply_scenario_to_session(scenario: dict, st_session) -> None:
         _seed_energy_widget_keys(st_session, mat, merged)
     st_session["energy_params"] = energy_params
 
-    # Mode de calcul forcé : un scénario s'applique au mode Énergie
     st_session["mode_calcul"] = "Calcul Energie"
     st_session["mode_calcul_selector"] = "Calcul Energie"
     st_session["mode_generation"] = "Rotation optimisée"
@@ -319,9 +302,6 @@ def apply_scenario_to_session(scenario: dict, st_session) -> None:
     st_session["scenario_dl_ligne"] = md.get("ligne") or ""
 
 
-# =============================================================================
-# Validation et migration
-# =============================================================================
 
 def validate_scenario(scenario: dict) -> list[str]:
     """Retourne une liste d'erreurs (fatales) et de warnings (préfixés ⚠️)."""
@@ -369,8 +349,6 @@ def validate_scenario(scenario: dict) -> list[str]:
 def migrate_scenario(scenario: dict) -> dict:
     """Applique les migrations en chaîne jusqu'à CURRENT_SCHEMA_VERSION."""
     v = scenario.get("schema_version", 1)
-    # Pas de migration nécessaire pour le moment (v1 est la version initiale).
-    # Quand v2 arrivera : while v < CURRENT_SCHEMA_VERSION: scenario = MIGRATIONS[v](scenario); v += 1
     if v > CURRENT_SCHEMA_VERSION:
         raise ValueError(
             f"Scénario en version {v}, supérieure à la version supportée "
@@ -380,15 +358,11 @@ def migrate_scenario(scenario: dict) -> dict:
     return scenario
 
 
-# =============================================================================
-# Utilitaires
-# =============================================================================
 
 def slugify(nom: str) -> str:
     """Convertit un nom en slug ASCII sûr pour un nom de fichier."""
     if not nom:
         return ""
-    # Décompose les accents et garde la base ASCII
     nfkd = unicodedata.normalize("NFKD", nom)
     ascii_str = "".join(c for c in nfkd if not unicodedata.combining(c))
     ascii_str = ascii_str.encode("ascii", "ignore").decode("ascii")
@@ -494,8 +468,6 @@ def format_mission_to_bulk_text(mission: dict, mode_calcul: str = "Calcul Energi
 def _seed_mission_widget_keys(st_session, idx: int, mission: dict, bulk_text: str) -> None:
     """Écrit les clés widgets d'une mission pour que Streamlit les affiche."""
     st_session[f"pp_raw_{idx}"] = bulk_text
-    # _prev_pp_raw_{idx} = bulk_text empêche l'auto-update de tt{idx}
-    # de s'exécuter au premier rendu (texte considéré "déjà appliqué").
     st_session[f"_prev_pp_raw_{idx}"] = bulk_text
     st_session[f"saisie_pp_{idx}"] = "Saisie manuelle par lot"
 

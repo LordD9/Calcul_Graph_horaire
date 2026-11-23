@@ -33,9 +33,6 @@ from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError
 from empreinte import empreinte, memoiser
 
 
-# =============================================================================
-# CONFIGURATION
-# =============================================================================
 
 @dataclass
 class CrossingOptimization:
@@ -72,13 +69,10 @@ class SimulationParams:
     cadencements: Dict[str, int]
     turnaround_buffers: Dict[str, int]
     crossing_stop_durations: Dict[str, Dict[str, int]]
-    crossing_pair_assignments: Dict[str, List[str]] = None  # mission_id → preferred VE list
-    retour_offsets: Dict[str, int] = None  # mission_id → minute de référence du départ retour
+    crossing_pair_assignments: Dict[str, List[str]] = None
+    retour_offsets: Dict[str, int] = None
 
     def get_turnaround_buffers(self, missions):
-        # Le buffer exploré par les optimiseurs s'applique au terminus A (origine).
-        # Le timing du retour (terminus B) est géré par retour_offsets (cadencé),
-        # plus régulier qu'un buffer libre. D'où la forme directionnelle {"A","B"}.
         result = {}
         for i, m in enumerate(missions):
             mid = f"M{i+1}"
@@ -135,29 +129,26 @@ class SimulationParams:
 @dataclass
 class OptimizationConfig:
     """Configuration générale de l'optimisation."""
-    mode: str = "simple"  # Options: "simple", "fast", "smart_progressive", "exhaustif", "genetic"
+    mode: str = "simple"
     crossing_optimization: CrossingOptimization = None
     
-    # Paramètres génétiques optimisés
-    population_size: int = 50  # Réduit de 100
-    generations: int = 100     # Réduit de 150
-    mutation_rate: float = 0.20  # Augmenté pour plus d'exploration
-    crossover_rate: float = 0.85  # Augmenté légèrement
-    elitism_ratio: float = 0.10   # Réduit pour plus de diversité
-    early_stop_generations: int = 15  # Réduit de 20
+    population_size: int = 50
+    generations: int = 100
+    mutation_rate: float = 0.20
+    crossover_rate: float = 0.85
+    elitism_ratio: float = 0.10
+    early_stop_generations: int = 15
     
-    # Nouveaux paramètres d'optimisation
-    adaptive_mutation: bool = True  # Mutation adaptative
+    adaptive_mutation: bool = True
     tournament_size: int = 3
     use_parallel: bool = True
     num_workers: int = None
     use_cache: bool = True
-    timeout_per_eval: int = 60  # Timeout réduit à 20s
+    timeout_per_eval: int = 60
     
-    # NOUVEAU : Optimisation des temps de retournement
-    optimize_turnaround: bool = False  # Activer l'optimisation des temps de retournement
-    turnaround_min_buffer: int = 0     # Minutes à ajouter au minimum utilisateur (par défaut : utiliser le minimum)
-    turnaround_max_buffer: int = 30    # Maximum de minutes supplémentaires autorisées
+    optimize_turnaround: bool = False
+    turnaround_min_buffer: int = 0
+    turnaround_max_buffer: int = 30
     
     def __post_init__(self):
         if self.crossing_optimization is None:
@@ -166,9 +157,6 @@ class OptimizationConfig:
             self.num_workers = max(1, mp.cpu_count() - 1)
 
 
-# =============================================================================
-# CACHE INTELLIGENT
-# =============================================================================
 
 def reset_eval_cache():
     _evaluer_simulation.vider()
@@ -202,9 +190,6 @@ class GenomeCache:
         self.access[k] = 0
 
 
-# =============================================================================
-# SYSTÈME DE SCORING OPTIMISÉ
-# =============================================================================
 
 class SolutionScorer:
     """Validation des solutions de l'algo génétique.
@@ -222,9 +207,6 @@ class SolutionScorer:
         return len(warnings.get("infra_violations", [])) == 0
 
 
-# =============================================================================
-# WORKER PARALLÈLE OPTIMISÉ
-# =============================================================================
 
 def _evaluate_genome_worker(args):
     """Worker optimisé — utilise evaluer_params_simulation au lieu de generer_tous_trajets_optimises."""
@@ -264,9 +246,6 @@ def _evaluate_genome_worker(args):
         sys.stdout, sys.stderr = old_stdout, old_stderr
 
 
-# =============================================================================
-# ALGORITHME GÉNÉTIQUE OPTIMISÉ
-# =============================================================================
 
 class GeneticOptimizer:
     """
@@ -366,19 +345,16 @@ class GeneticOptimizer:
         generations_without_improvement = 0
         
         for generation in range(self.config.generations):
-            # Mutation adaptative
             if self.config.adaptive_mutation and generation > 10:
                 if generations_without_improvement > 5:
                     self.current_mutation_rate = min(0.4, self.current_mutation_rate * 1.2)
                 else:
                     self.current_mutation_rate = max(0.1, self.current_mutation_rate * 0.95)
             
-            # Évaluation parallèle
             evaluated_population = self._evaluate_population_parallel(population)
             valid_solutions = [x for x in evaluated_population if self.scorer.is_valid_solution(x[2])]
             
             if not valid_solutions:
-                # Réinitialisation partielle si pas de solutions valides
                 new_pop = self._initialize_population()
                 population = new_pop[:len(population)//2] + population[len(population)//2:]
                 continue
@@ -405,11 +381,9 @@ class GeneticOptimizer:
                     0
                 )
             
-            # Arrêt anticipé
             if generations_without_improvement >= self.config.early_stop_generations:
                 break
             
-            # Nouvelle génération
             population = self._create_next_generation(valid_solutions)
         
         if best_solution is None:
@@ -432,7 +406,6 @@ class GeneticOptimizer:
         """
         population = []
 
-        # Plage de buffers adaptée à l'optim des croisements.
         crossing_enabled = self.config.crossing_optimization and self.config.crossing_optimization.enabled
         if crossing_enabled:
             max_buf = max(15, getattr(self.config, 'turnaround_max_buffer', 30))
@@ -443,8 +416,6 @@ class GeneticOptimizer:
             buf_choices = [0, 0, 0, 3, 5, 8, 10]
             cross_wide = [0, 2, 3, 5]
 
-        # Génome 0 = baseline utilisateur : timing/turnaround/crossing vides + retour
-        # ASAP (offset None) → core_logic reproduit exactement le mode simple.
         baseline_genome = {'timing': {}, 'turnaround_buffers': {}, 'crossing': {},
                            'crossing_pairs': {}, 'retour_offsets': {}}
         for mission_id in self.search_space.keys():
@@ -469,7 +440,6 @@ class GeneticOptimizer:
                 else:
                     genome['turnaround_buffers'][mission_id] = random.choice(buf_choices)
 
-                # Offset retour : ~1/3 ASAP (None), 1/3 sur grille de 5 min, 1/3 libre.
                 r = random.random()
                 if i < self.config.population_size // 4 or r < 0.34:
                     genome['retour_offsets'][mission_id] = None
@@ -534,7 +504,6 @@ class GeneticOptimizer:
             if not rencontres:
                 continue
 
-            # Aggréger les VE naturelles et candidates
             ve_counts = {}
             candidate_ves = set()
             for r in rencontres:
@@ -549,7 +518,6 @@ class GeneticOptimizer:
             sorted_ves = sorted(ve_counts.keys(), key=lambda v: ve_counts[v], reverse=True)
             preferred = []
             if sorted_ves:
-                # 70 % vers VE la plus naturelle, 30 % vers une candidate alternative
                 if random.random() < 0.7:
                     preferred.append(sorted_ves[0])
                 elif candidate_ves:
@@ -581,7 +549,6 @@ class GeneticOptimizer:
             'turnaround_max_buffer': self.config.turnaround_max_buffer,
         }
         
-        # Séparer les génomes déjà dans le cache des autres
         cached_results = []
         to_evaluate = []
         for genome in population:
@@ -626,11 +593,9 @@ class GeneticOptimizer:
         new_population = []
         num_elite = int(self.config.population_size * self.config.elitism_ratio)
         
-        # Élitisme
         for i in range(num_elite):
             new_population.append(deepcopy(valid_solutions[i][0]))
         
-        # Génération du reste
         while len(new_population) < self.config.population_size:
             if random.random() < self.config.crossover_rate and len(valid_solutions) >= 2:
                 parent1 = self._tournament_selection(valid_solutions)
@@ -658,10 +623,9 @@ class GeneticOptimizer:
         child = {'timing': {}, 'turnaround_buffers': {}, 'crossing': {},
                  'crossing_pairs': {}, 'retour_offsets': {}}
 
-        # Timing — union des clés des deux parents pour éviter KeyError sur le génome baseline
         all_timing_keys = set(p1.get('timing', {}).keys()) | set(p2.get('timing', {}).keys())
         mission_ids = sorted(all_timing_keys)
-        space_default = self.search_space  # {mid: {'default': x}}
+        space_default = self.search_space
         if len(mission_ids) > 2:
             point1 = random.randint(0, len(mission_ids) - 1)
             point2 = random.randint(point1, len(mission_ids) - 1)
@@ -677,13 +641,11 @@ class GeneticOptimizer:
                 v2 = p2.get('timing', {}).get(mid, fallback)
                 child['timing'][mid] = random.choice([v1, v2])
 
-        # Turnaround buffers
         for mid in mission_ids:
             buf1 = p1.get('turnaround_buffers', {}).get(mid, 0)
             buf2 = p2.get('turnaround_buffers', {}).get(mid, 0)
             child['turnaround_buffers'][mid] = random.choice([buf1, buf2])
 
-        # Crossing strategies
         all_crossing_keys = set(p1.get('crossing', {}).keys()) | set(p2.get('crossing', {}).keys())
         for key in all_crossing_keys:
             if key in p1.get('crossing', {}) and key in p2.get('crossing', {}):
@@ -693,14 +655,12 @@ class GeneticOptimizer:
             elif key in p2.get('crossing', {}):
                 child['crossing'][key] = p2['crossing'][key]
 
-        # Crossing pairs — héritage clé par clé
         all_cp_keys = set(p1.get('crossing_pairs', {}).keys()) | set(p2.get('crossing_pairs', {}).keys())
         for key in all_cp_keys:
             v1 = p1.get('crossing_pairs', {}).get(key, [])
             v2 = p2.get('crossing_pairs', {}).get(key, [])
             child['crossing_pairs'][key] = random.choice([v1, v2])
 
-        # Retour offsets — héritage clé par clé (None = ASAP, valide)
         for mid in mission_ids:
             o1 = p1.get('retour_offsets', {}).get(mid)
             o2 = p2.get('retour_offsets', {}).get(mid)
@@ -712,7 +672,6 @@ class GeneticOptimizer:
         """Mutation avec intensité variable — inclut turnaround_buffers."""
         mutated = deepcopy(genome)
 
-        # Mutation timing (30% des gènes)
         for mid in mutated['timing']:
             if random.random() < 0.3:
                 if random.random() < 0.7:
@@ -721,7 +680,6 @@ class GeneticOptimizer:
                 else:
                     mutated['timing'][mid] = random.randint(0, 59)
 
-        # Mutation turnaround buffers (40% de chance)
         crossing_enabled = self.config.crossing_optimization and self.config.crossing_optimization.enabled
         if crossing_enabled:
             max_buf = max(15, getattr(self.config, 'turnaround_max_buffer', 30))
@@ -745,7 +703,6 @@ class GeneticOptimizer:
                 else:
                     mutated['turnaround_buffers'][mid] = random.choice(buf_choices)
 
-        # Mutation crossing (30% de chance)
         ve_list = self._identify_ve_gares()
         if random.random() < 0.3 and ve_list:
             for mid in list(mutated.get('crossing', {}).keys()):
@@ -755,9 +712,6 @@ class GeneticOptimizer:
                         if random.random() < 0.5:
                             sd[gare] = random.choice(cross_choices)
 
-        # Création d'un gène crossing pour une mission qui n'en a pas (10 %/mission).
-        # Sans ça, un génome démarré sans stratégie de croisement ne pourrait jamais
-        # en acquérir une par mutation (gène inatteignable).
         if 'crossing' not in mutated:
             mutated['crossing'] = {}
         if ve_list:
@@ -765,7 +719,6 @@ class GeneticOptimizer:
                 if mid not in mutated['crossing'] and random.random() < 0.1:
                     mutated['crossing'][mid] = {ve: random.choice(cross_choices) for ve in ve_list}
 
-        # Mutation crossing_pairs (25 % de probabilité par mission)
         if 'crossing_pairs' not in mutated:
             mutated['crossing_pairs'] = {}
         if ve_list:
@@ -773,17 +726,13 @@ class GeneticOptimizer:
                 if random.random() < 0.25:
                     current = list(mutated['crossing_pairs'].get(mid, []))
                     if current and random.random() < 0.4:
-                        # Retirer une VE aléatoirement
                         current = [v for v in current if random.random() > 0.5] or current
                     else:
-                        # Ajouter une VE candidate
                         new_ve = random.choice(ve_list)
                         if new_ve not in current:
                             current = current + [new_ve]
-                    mutated['crossing_pairs'][mid] = current[:3]  # cap à 3 VE préférées
+                    mutated['crossing_pairs'][mid] = current[:3]
 
-        # Mutation retour_offsets (30 % par mission) — décale le départ retour
-        # cadencé. Peut activer (None→valeur) ou désactiver (→None) le cadencement.
         if 'retour_offsets' not in mutated:
             mutated['retour_offsets'] = {}
         for mid in list(mutated.get('timing', {}).keys()):
@@ -791,9 +740,8 @@ class GeneticOptimizer:
                 current = mutated['retour_offsets'].get(mid)
                 roll = random.random()
                 if roll < 0.2:
-                    mutated['retour_offsets'][mid] = None  # repasser en ASAP
+                    mutated['retour_offsets'][mid] = None
                 elif current is not None and roll < 0.8:
-                    # Petit décalage autour de la valeur courante (reste régulier).
                     mutated['retour_offsets'][mid] = (current + random.randint(-5, 5)) % 60
                 else:
                     mutated['retour_offsets'][mid] = random.randint(0, 59)
@@ -801,9 +749,6 @@ class GeneticOptimizer:
         return mutated
 
 
-# =============================================================================
-# MODE EXHAUSTIF (INCHANGÉ)
-# =============================================================================
 
 @memoiser(maxsize=64)
 def _construire_durees_theoriques(missions, df_gares):
@@ -844,8 +789,6 @@ def _evaluer_simulation(params, missions, df_gares, heure_debut, heure_fin, allo
         m_copy = dict(m)
         if str(i) in adjusted_ref:
             m_copy['reference_minutes'] = adjusted_ref[str(i)]
-        # Ne pas modifier les temps de retournement ici — turnaround_buffers est passé
-        # séparément à executer_simulation_evenementielle pour éviter le double-comptage.
         modified_missions.append(m_copy)
 
     turn_bufs = params.get_turnaround_buffers(missions)
@@ -864,9 +807,6 @@ def _evaluer_simulation(params, missions, df_gares, heure_debut, heure_fin, allo
     )
 
     durees_theoriques = _construire_durees_theoriques(missions, df_gares)
-    # NB : plus de pénalité directe sur les buffers de retournement. Leur coût
-    # émerge désormais de leurs effets réels (nombre de rames, Gini, temps de
-    # parcours) via le score ci-dessous.
     score = _score_chronologie_bruit(
         chronologie, warnings, max_arret_ligne_min=max_arret,
         durees_theoriques=durees_theoriques,
@@ -917,23 +857,17 @@ def _optimisation_smart_progressive(missions, df_gares, heure_debut, heure_fin,
     if config is None:
         config = OptimizationConfig(mode='smart_progressive')
 
-    # IDs uniquement pour les missions actives, dans l'ordre d'index (pas de slice).
     active_mission_ids = [f"M{i+1}" for i, m in enumerate(missions) if m.get('frequence', 0) > 0]
 
-    # Gares VE disponibles par mission (fix: missions passées pour peupler le dict).
     ve_gares = _identifier_points_croisement(df_gares, missions)
 
-    # --- BASELINE = mode simple : évaluée en premier, sert de référence à battre ---
     best_params = _baseline_simulation_params()
     best_score, best_chronologie, best_warnings, _ = evaluer_params_simulation(
         best_params, missions, df_gares, heure_debut, heure_fin, allow_sharing=allow_sharing, config=config
     )
 
-    # Seuil minimal de gain pour remplacer la baseline : évite la dérive sur des
-    # améliorations marginales qui perturbent le graphique sans bénéfice réel.
     tol = 1.0
     def _accept(new_score, current_score, trial_has_violations, best_has_violations):
-        # Toujours accepter si on résout des violations d'infrastructure
         if best_has_violations and not trial_has_violations:
             return True
         if trial_has_violations and not best_has_violations:
@@ -944,21 +878,14 @@ def _optimisation_smart_progressive(missions, df_gares, heure_debut, heure_fin,
 
     turnaround_vals = _build_turnaround_range(config)
     crossing_vals = _build_crossing_range(config)
-    # Offsets de départ retour testés : None (ASAP, baseline) + grille de 5 min.
     retour_offset_vals = [None] + list(range(0, 60, 5))
 
-    # Phases « mono-paramètre » répétées sur plusieurs passes (une amélioration sur
-    # un paramètre peut en débloquer une sur un autre au tour suivant).
     main_phases = [
         ('Cadencement', [('cadencement', mid, list(range(0, 60, 5))) for mid in active_mission_ids]),
-        # Retour cadencé : minute de référence du départ retour → départs réguliers
-        # (remplace l'ancien buffer libre au terminus B).
         ('Retour cadencé', [('retour_offset', mid, retour_offset_vals) for mid in active_mission_ids]),
-        # Retournement = buffer au terminus A (origine) uniquement.
         ('Retournement', [('turnaround', mid, turnaround_vals) for mid in active_mission_ids]),
     ]
 
-    # Phase croisement : essayer différentes durées d'arrêt aux gares VE.
     crossing_steps = [
         ('crossing', mid, ve, crossing_vals)
         for mid in active_mission_ids
@@ -967,12 +894,9 @@ def _optimisation_smart_progressive(missions, df_gares, heure_debut, heure_fin,
     if crossing_steps:
         main_phases.append(('Croisement', crossing_steps))
 
-    # Phase conjointe : grille 2D grossière (cadencement × offset retour) par mission.
-    # Indispensable pour les solutions exigeant un mouvement simultané des deux.
     conjoint_grid = [(c, r) for c in range(0, 60, 10) for r in [None, 0, 15, 30, 45]]
     conjoint_phase = ('Conjoint', [('conjoint', mid, conjoint_grid) for mid in active_mission_ids])
 
-    # Affinement : balayage fin du cadencement ET de l'offset retour.
     affinement_phase = ('Affinement', (
         [('cadencement', mid, list(range(0, 60))) for mid in active_mission_ids]
         + [('retour_offset', mid, [None] + list(range(0, 60))) for mid in active_mission_ids]
@@ -980,15 +904,11 @@ def _optimisation_smart_progressive(missions, df_gares, heure_debut, heure_fin,
 
     NUM_PASSES = 2
 
-    # Total = NUM_PASSES passes des phases mono-paramètre + conjoint + affinement.
-    # (Borne haute : l'arrêt anticipé entre passes peut faire terminer plus tôt.)
     main_steps_per_pass = sum(sum(len(step[-1]) for step in ps) for _, ps in main_phases)
     total_steps = (NUM_PASSES * main_steps_per_pass
                    + sum(len(step[-1]) for step in conjoint_phase[1])
                    + sum(len(step[-1]) for step in affinement_phase[1]))
 
-    # Phase Résolution : préparée mais seulement activée si des violations persistent.
-    # On ne l'ajoute au total_steps qu'au moment de la déclencher (progress bar honnête).
     resolution_steps = []
     if config.crossing_optimization and config.crossing_optimization.enabled:
         max_buf = max(15, getattr(config, 'turnaround_max_buffer', 30))
@@ -1021,16 +941,10 @@ def _optimisation_smart_progressive(missions, df_gares, heure_debut, heure_fin,
                 if step_type in ('cadencement',):
                     trial_params.cadencements[mid] = val
                 elif step_type in ('turnaround', 'turnaround_force'):
-                    # Buffer appliqué au terminus A (origine) ; le terminus B est
-                    # géré par retour_offset (cf. get_turnaround_buffers).
                     trial_params.turnaround_buffers[mid] = val
                 elif step_type == 'retour_offset':
-                    # val peut être None (= retour ASAP, baseline).
                     trial_params.retour_offsets[mid] = val
                 elif step_type == 'conjoint':
-                    # Mouvement 2D simultané (cadencement, offset retour) : attrape
-                    # les solutions « décaler le départ ET le retour ensemble » que
-                    # la descente coordonnée mono-paramètre rate.
                     cad_val, roff_val = val
                     trial_params.cadencements[mid] = cad_val
                     trial_params.retour_offsets[mid] = roff_val
@@ -1057,23 +971,18 @@ def _optimisation_smart_progressive(missions, df_gares, heure_debut, heure_fin,
                 if progress_callback and total_steps > 0:
                     progress_callback(steps_done, total_steps, best_score, len(best_chronologie), 0)
 
-    # Passes successives des phases mono-paramètre, avec arrêt anticipé dès qu'une
-    # passe complète n'améliore plus le score (au-delà de la tolérance).
     for pass_idx in range(NUM_PASSES):
         score_avant_passe = best_score
         for phase_name, phase_steps in main_phases:
             _run_phase(phase_name, phase_steps)
         if best_score >= score_avant_passe - tol:
-            break  # passe complète sans gain : inutile de répéter
+            break
 
-    # Phase conjointe (une fois) : mouvements 2D cadencement × offset retour.
     _run_phase(*conjoint_phase)
 
-    # Affinement final : balayage fin, tolérance nulle pour capter les petits gains.
     tol = 0.0
     _run_phase(*affinement_phase)
 
-    # Phase Résolution : ne tourne que si des violations persistent OU si aucune solution sans violation n'a été trouvée
     if resolution_steps and best_has_violations:
         _run_phase('Résolution', resolution_steps)
 
@@ -1122,15 +1031,12 @@ def optimize_exhaustive(missions, df_gares, heure_debut, heure_fin, config,
 
     mission_ids = [f"M{i+1}" for i, _ in active_missions]
 
-    # Baseline : évaluée en premier pour fournir un point de départ valide
     best_params = _baseline_simulation_params()
     best_score, best_chronologie, best_warnings, _ = evaluer_params_simulation(
         best_params, missions, df_gares, heure_debut, heure_fin, allow_sharing, config=config
     )
 
     cadence_range = list(range(0, 60, 5))
-    # On explore l'offset de départ retour (cadencé) plutôt que le buffer libre
-    # au terminus B : départs réguliers garantis. None = retour ASAP (baseline).
     retour_offset_range = [None, 0, 10, 20, 30, 40, 50]
 
     if len(active_missions) > 3:
@@ -1173,10 +1079,9 @@ def optimize_exhaustive(missions, df_gares, heure_debut, heure_fin, config,
     if not best_chronologie or best_params is None:
         return {}, {"infra_violations": [], "other": ["Echec exhaustif"]}, {'mode': 'exhaustif', 'combinations_tested': len(combos)}
 
-    # Balayage croisement : sur la meilleure configuration trouvée, tester des durées d'arrêt aux VE.
     ve_gares = _identifier_points_croisement(df_gares, missions)
     crossing_combos_tested = 0
-    crossing_durs = _build_crossing_range(config)[1:]  # on exclut 0 ici (déjà testé par défaut)
+    crossing_durs = _build_crossing_range(config)[1:]
     if ve_gares and crossing_durs:
         n_crossing = sum(
             len(crossing_durs) * len(ve_gares.get(mid, []))
@@ -1221,9 +1126,6 @@ def optimize_exhaustive(missions, df_gares, heure_debut, heure_fin, config,
     }
 
 
-# =============================================================================
-# FONCTION PRINCIPALE
-# =============================================================================
 
 def optimiser_graphique_horaire(missions, df_gares, heure_debut, heure_fin,
                                config, allow_sharing=True, progress_callback=None):
@@ -1239,9 +1141,6 @@ def optimiser_graphique_horaire(missions, df_gares, heure_debut, heure_fin,
         return optimize_exhaustive(missions, df_gares, heure_debut, heure_fin,
                                   config, scorer, allow_sharing, progress_callback)
     elif config.mode == "simple":
-        # Cadencements vides → le moteur utilise les reference_minutes d'origine de
-        # chaque mission, en préservant les patterns multi-valeurs ("0,30"). (Avant,
-        # on forçait refs[0], ce qui aplatissait les patterns à plusieurs sillons/h.)
         params = SimulationParams(cadencements={}, turnaround_buffers={}, crossing_stop_durations={})
         score, chrono, warns, stats = evaluer_params_simulation(
             params, missions, df_gares, heure_debut, heure_fin, allow_sharing, config=config

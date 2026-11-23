@@ -22,26 +22,22 @@ def trouver_mission_pour_od(origine_selectionnee, terminus_selectionne, toutes_l
     Returns:
         dict or None: La configuration de la mission trouvée, ou None si aucune ne correspond.
     """
-    # Cherche une mission directe
     for mission in toutes_les_missions:
         if mission["origine"] == origine_selectionnee and mission["terminus"] == terminus_selectionne:
             return mission
 
-    # Si pas de mission directe, cherche une mission inverse
     for mission in toutes_les_missions:
         if mission["origine"] == terminus_selectionne and mission["terminus"] == origine_selectionnee:
-            # Cas d'un trajet retour asymétrique défini explicitement
             if mission.get("trajet_asymetrique", False):
                 return {
                     "origine": origine_selectionnee,
                     "terminus": terminus_selectionne,
                     "frequence": mission["frequence"],
                     "temps_trajet": mission.get("temps_trajet_retour", mission["temps_trajet"]),
-                    "temps_retournement_A": mission.get("temps_retournement_B", 10), # Inversion logique
+                    "temps_retournement_A": mission.get("temps_retournement_B", 10),
                     "temps_retournement_B": mission.get("temps_retournement_A", 10),
                     "passing_points": mission.get("passing_points_retour", [])
                 }
-            # Cas d'un trajet retour symétrique (calculé par inversion)
             else:
                 points_passage_inverses = []
                 if isinstance(mission.get("passing_points"), list):
@@ -59,7 +55,6 @@ def trouver_mission_pour_od(origine_selectionnee, terminus_selectionne, toutes_l
                     "temps_trajet": mission["temps_trajet"],
                     "temps_retournement_A": mission.get("temps_retournement_B", 10),
                     "temps_retournement_B": mission.get("temps_retournement_A", 10),
-                    # CORRECTION: Il faut trier les points de passage inversés par leur nouvelle heure
                     "passing_points": sorted(points_passage_inverses, key=lambda x: x["time_offset_min"])
                 }
     return None
@@ -81,7 +76,6 @@ def obtenir_temps_trajet_defaut_etape_manuelle(gare_depart, gare_arrivee, toutes
     if mission_correspondante:
         return mission_correspondante["temps_trajet"]
 
-    # Si aucune mission directe n'existe, on cherche un segment dans une mission plus grande
     for mission in toutes_les_missions:
         chemin = [(mission["origine"], 0)] + [(pp["gare"], pp["time_offset_min"]) for pp in mission.get("passing_points", [])] + [(mission["terminus"], mission["temps_trajet"])]
         chemin.sort(key=lambda x: x[1])
@@ -90,7 +84,7 @@ def obtenir_temps_trajet_defaut_etape_manuelle(gare_depart, gare_arrivee, toutes
             if chemin[i][0] == gare_depart and chemin[i+1][0] == gare_arrivee:
                 return int(chemin[i+1][1] - chemin[i][1])
 
-    return 30 # Valeur par défaut si aucun segment n'est trouvé
+    return 30
 
 def obtenir_temps_retournement_defaut(nom_gare, toutes_les_missions):
     """
@@ -109,4 +103,4 @@ def obtenir_temps_retournement_defaut(nom_gare, toutes_les_missions):
             return mission.get("temps_retournement_A", 10)
         if nom_gare == mission["terminus"]:
             return mission.get("temps_retournement_B", 10)
-    return 10 # Valeur par défaut
+    return 10

@@ -260,9 +260,6 @@ def _compiler_services(chronologie, df_gares, missions):
                 raise ValueError(f"Gare absente de df_gares dans {label!r}")
             tronquee = False
             if travel[-1]["terminus"] != terminus:
-                # La génération coupe la dernière mission d'une rame à la fin de
-                # service : on l'évalue jusqu'à la dernière gare réellement
-                # atteinte, à condition qu'elle se trouve sur le trajet du label.
                 atteinte = travel[-1]["terminus"]
                 derniere = ordinal == len(groups)
                 if (not derniere or origine not in gares_map or terminus not in gares_map):
@@ -1008,7 +1005,7 @@ def _analyser_energie(chronologie, services, df_gares, energy_params,
             params = get_default_energy_params()
         try:
             result = calculer_consommation_trajet(rows, service["mission_config"], df_gares, params)
-        except Exception as exc:  # une erreur énergétique est rapportée, pas masquée
+        except Exception as exc:
             if is_battery:
                 _enregistrer_autonomie_non_verifiable(
                     train_id, service["material"],
@@ -2186,8 +2183,6 @@ def _evaluuer_avec_reserves(services, df_gares, incident, delay_min, stations,
             continue
 
         best = None
-        # Essayer d'abord chaque identité déjà déployée, même si elle a changé
-        # de gare. Les lieux sélectionnés ne servent qu'au déploiement initial.
         identites = list(dict.fromkeys(current_map.values()))
         prochain_numero = len(identites) + 1
         identites.extend((gare, prochain_numero) for gare in stations)
