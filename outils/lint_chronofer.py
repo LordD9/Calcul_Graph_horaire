@@ -16,8 +16,27 @@ CORRECTION_CACHE = (
 )
 
 
+MOTS_CLE_MANUELLE = ("cache_key", "fingerprint", "empreinte")
+
+
+def _cle_session_manuelle(noeud):
+    if isinstance(noeud, ast.Attribute):
+        nom = noeud.attr
+        dans_session = isinstance(noeud.value, ast.Attribute) and noeud.value.attr == "session_state"
+    else:
+        nom = noeud.value if isinstance(noeud.value, str) else ""
+        dans_session = False
+        parent = getattr(noeud, "parent", None)
+        if isinstance(parent, ast.Subscript) and isinstance(parent.value, ast.Attribute):
+            dans_session = parent.value.attr == "session_state"
+    return dans_session and any(mot in nom.lower() for mot in MOTS_CLE_MANUELLE)
+
+
 def _violations(chemin, source):
     arbre = ast.parse(source, filename=str(chemin))
+    for parent in ast.walk(arbre):
+        for enfant in ast.iter_child_nodes(parent):
+            enfant.parent = parent
     for noeud in ast.walk(arbre):
         if isinstance(noeud, ast.Import):
             for alias in noeud.names:
@@ -32,6 +51,12 @@ def _violations(chemin, source):
             yield noeud.lineno, "CF002", (
                 "id() comme identité de données : un objet modifié en place garde "
                 f"son id ; {CORRECTION_CACHE}"
+            )
+        elif isinstance(noeud, (ast.Attribute, ast.Constant)) and _cle_session_manuelle(noeud):
+            yield noeud.lineno, "CF004", (
+                "clé de cache/empreinte rangée à la main dans session_state : "
+                "utilise etat_session.enregistrer/lire, qui jettent le résultat "
+                "dès qu'une entrée change (a862025, formel/EtatSession.tla)"
             )
     for noeud in arbre.body:
         if isinstance(noeud, ast.Assign) and isinstance(noeud.value, ast.Dict):

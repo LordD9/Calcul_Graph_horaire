@@ -13,8 +13,6 @@ from numbers import Integral
 
 import pandas as pd
 
-from empreinte import empreinte
-
 from core_logic import SimulationEngine, _get_infra_at_gare, _is_crossing_point
 from energy_logic import (
     _get_puissance_infra,
@@ -2497,10 +2495,3 @@ def evaluer_robustesse(chronologie, df_gares, missions, energy_params=None,
         })
     return {"scenarios": scenarios, "candidates_count": len(points)}
 
-
-def fingerprint_robustesse(chronologie, df_gares, missions, energy_params=None,
-                           reserve_gares=(), max_reserve_rames=1, activer_renforts=True):
-    return empreinte(
-        chronologie, df_gares, missions, energy_params, list(reserve_gares or ()),
-        _valider_max_reserve_rames(max_reserve_rames), bool(activer_renforts),
-    )

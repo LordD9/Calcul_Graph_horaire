@@ -26,8 +26,6 @@ import numpy as np
 import pandas as pd
 from datetime import timedelta
 
-from empreinte import empreinte
-
 # Constantes physiques
 JOULES_PER_KWH = 3_600_000
 GRAVITY_MS2 = 9.81
@@ -722,10 +720,6 @@ def associer_mission_au_train(trajets, missions):
         if mission.get("terminus") == orig:
             return mission
     return None
-
-
-def fingerprint_energie(energy_params, missions, chronologie, df_gares):
-    return empreinte(energy_params, missions, chronologie, df_gares)
 
 
 def calculer_energie_flotte(chronologie, missions, df_gares, energy_params):

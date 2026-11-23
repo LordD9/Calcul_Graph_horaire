@@ -1,7 +1,7 @@
 from collections import Counter
 from datetime import datetime, timedelta
 
-from test_robustness_ui import _chronologie, _infrastructure, _mission, _app_test, _cliquer_calcul_robustesse
+from test_robustness_ui import _chronologie, _infrastructure, _mission, _app_test, _cliquer_calcul_robustesse, _resultats_robustesse
 from robustness_logic import evaluer_robustesse
 
 
@@ -31,7 +31,7 @@ def test_ui_plafond_zero_invalide_et_labels():
     assert 'Retard cumulé — Avec réserve' in columns
     assert any('ex æquo' in caption.value for caption in app.caption)
     app.number_input(key='robustesse_max_reserve_rames').set_value(0).run()
-    assert app.session_state['robustesse_resultats'] is None
+    assert _resultats_robustesse(app) is None
     _cliquer_calcul_robustesse(app)
     assert not app.exception
     for frame in app.dataframe:

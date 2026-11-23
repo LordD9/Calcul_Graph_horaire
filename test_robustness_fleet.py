@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from energy_logic import get_default_energy_params
-from robustness_logic import evaluer_robustesse, fingerprint_robustesse
+from robustness_logic import evaluer_robustesse
 
 
 def _infrastructure():
@@ -42,22 +42,6 @@ def test_evaluer_rejette_un_plafond_de_rames_non_entier_ou_negatif(invalid):
         evaluer_robustesse(
             _chronologie(), _infrastructure(), [_mission()], max_reserve_rames=invalid
         )
-
-
-@pytest.mark.parametrize("invalid", [True, False, -1, 1.0, "1"])
-def test_fingerprint_rejette_un_plafond_de_rames_non_entier_ou_negatif(invalid):
-    with pytest.raises(ValueError):
-        fingerprint_robustesse(
-            _chronologie(), _infrastructure(), [_mission()], max_reserve_rames=invalid
-        )
-
-
-def test_fingerprint_inclut_le_plafond_de_rames_physiques():
-    args = (_chronologie(), _infrastructure(), [_mission()])
-
-    assert fingerprint_robustesse(*args) != fingerprint_robustesse(
-        *args, max_reserve_rames=0
-    )
 
 
 def _chronologie_avec_rotation_disponible():
@@ -268,9 +252,8 @@ def test_deux_identites_de_reserve_peuvent_partager_un_lieu_initial():
     assert all(row['depart_reel'] == row['depart_planifie'] for row in replay['services'])
 
 
-def test_desactivation_renforts_invalide_empreinte_et_empeche_redéploiements():
+def test_desactivation_renforts_empeche_redéploiements():
     args = (_chronologie_avec_rotation_disponible(), _infrastructure(), [_mission()])
-    assert fingerprint_robustesse(*args, activer_renforts=False) != fingerprint_robustesse(*args)
     result = evaluer_robustesse(*args, reserve_gares=('A', 'B'), activer_renforts=False)
     assert all(scenario['avec_reserve'] is None for scenario in result['scenarios'])
 

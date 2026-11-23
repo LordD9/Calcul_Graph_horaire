@@ -15,7 +15,6 @@ from robustness_logic import (
     _rejouer,
     _retour_normal,
     evaluer_robustesse,
-    fingerprint_robustesse,
 )
 
 
@@ -1300,17 +1299,6 @@ def test_reserve_refuse_un_bilan_batterie_non_verifiable():
     assert scenario["battery"]["autonomie_non_verifiable"] is True
     assert any(scenario["battery"]["alertes_autonomie_non_verifiable"])
     assert scenario["reserve_refus"]
-
-
-def test_fingerprint_robustesse_est_stable_et_sensible_aux_reserves():
-    chronologie = _chronologie()
-    missions = [_mission()]
-    key = fingerprint_robustesse(chronologie, _infrastructure(), missions)
-
-    assert key == fingerprint_robustesse(chronologie, _infrastructure(), missions)
-    assert key != fingerprint_robustesse(
-        chronologie, _infrastructure(), missions, reserve_gares=("B",)
-    )
 
 
 def _chronologie_derniere_mission_tronquee():
